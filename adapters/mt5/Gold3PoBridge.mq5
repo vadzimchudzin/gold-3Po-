@@ -2,9 +2,11 @@
 #property version "2.10"
 #property description "GOLD-3Po RoboForex MT5 bridge: tick history, live quotes and live liquidity-zone drawing on the chart."
 
+input string HealthUrl = "http://127.0.0.1:8787/health";
 input string HistoryUrl = "http://127.0.0.1:8787/v1/ingest/mt5/history";
 input string LiveBatchUrl = "http://127.0.0.1:8787/v1/ingest/mt5/live-batch";
 input string IngestToken = "";
+input bool AppConnectionFeedsLive = true; // The desktop connector owns the recent/live feed when enabled.
 input int MinIntervalMs = 100;
 input int RequestTimeoutMs = 5000;
 input int HistoryDays = 30;
@@ -40,6 +42,14 @@ ulong historyRejectedTotal = 0;
 ulong nextZonesRefreshAt = 0;
 string zonesStatusText = "";
 int zonesDrawnCount = 0;
+
+// Runtime state for the per-symbol lock, live retry queue and bounded history batches.
+string g_bridgeLockKey = "";
+double g_bridgeLockStamp = 0.0;
+ulong g_nextBridgeLockRefreshAt = 0;
+ulong g_nextLiveRetryAt = 0;
+int g_liveFailures = 0;
+int g_effectiveHistoryBatchSize = 1000;
 
 string TickStamp(const long timeMsc)
 {
@@ -83,19 +93,19 @@ long JsonLong(const string json, const string key)
    return (long)StringToInteger(StringSubstr(json, start, end - start));
 }
 
-bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong &historySequence, string &response)
+bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong &sequenceCursor, string &response)
 {
    string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\",\"ticks\":[";
    for(int i=0; i<count; i++)
    {
       MqlTick tick = ticks[first+i];
-      historySequence++;
+      sequenceCursor++;
       double lastPrice = tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
       string eventId = StringFormat("%s-%I64d-%.10f-%.10f-%.10f-%I64u-%.4f-%u", _Symbol, tick.time_msc, tick.bid, tick.ask, lastPrice, tick.volume, tick.volume_real, tick.flags);
       if(i > 0) body += ",";
       body += StringFormat(
          "{\"timestamp\":\"%s\",\"sequence\":%I64u,\"eventId\":\"%s\",\"bid\":%.10f,\"ask\":%.10f,\"last\":%.10f,\"tickVolume\":%I64u,\"realVolume\":%.4f,\"flags\":%u}",
-         TickStamp(tick.time_msc), historySequence, eventId, tick.bid, tick.ask, lastPrice, tick.volume, tick.volume_real, tick.flags
+         TickStamp(tick.time_msc), sequenceCursor, eventId, tick.bid, tick.ask, lastPrice, tick.volume, tick.volume_real, tick.flags
       );
    }
    body += "]}";
@@ -107,6 +117,8 @@ void StartHistorySync()
 {
    int days = MathMax(1, MathMin(HistoryDays, 90));
    historyEnd = TimeGMT();
+   // Avoid duplicating the recent window already supplied by the desktop connector.
+   if(AppConnectionFeedsLive) historyEnd -= 8 * 60 * 60;
    historyCursor = historyEnd - days * 86400;
    historySequence = 0;
    historyTotalTicks = 0;
@@ -130,7 +142,7 @@ void ScheduleHistoryRetry()
 void ProcessHistorySync()
 {
    if(historySynchronized) return;
-   int batchSize = MathMax(10, MathMin(HistoryBatchSize, 1000));
+   int batchSize = g_effectiveHistoryBatchSize;
 
    if(!historyChunkLoaded)
    {
