@@ -287,3 +287,33 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .price-chart-wrap.is-dragging{cursor:grabbing}
 .price-chart-wrap.is-dragging .candle{pointer-events:none}
 @media(max-width:850px){.chart-zoom-controls button{min-width:20px;padding:4px 4px}.chart-zoom-controls #chartZoomReset{min-width:33px}}
+
+/* GOLD-3Po 0.9 workspace: independent footprint X/Y scale and TradingView-like split panes. */
+.footprint-zoom-controls{flex:none}
+.footprint-zoom-controls button{min-width:27px}
+.footprint-table{--footprint-row-height:23px}
+.foot-row{min-height:var(--footprint-row-height,23px)}
+.foot-cell{height:var(--footprint-row-height,23px);min-height:var(--footprint-row-height,23px);font-size:clamp(7px,calc(var(--footprint-row-height,23px)*.36),12px)}
+.foot-head,.foot-times{height:var(--footprint-row-height,23px)}
+.bar-head,.bar-time,.foot-delta{min-height:var(--footprint-row-height,23px)}
+.panel-resizer{display:none}
+.trading-layout .chart-column{display:grid;grid-template-columns:minmax(0,calc(var(--chart-split,50%) - 4px)) 8px minmax(0,1fr);align-items:stretch;gap:0}
+.trading-layout .price-panel{grid-column:1;min-width:0}
+.trading-layout .panel-resizer{display:block;grid-column:2;grid-row:1;align-self:stretch;border-radius:8px;cursor:col-resize;touch-action:none;position:relative;background:transparent}
+.trading-layout .panel-resizer:before{content:"";position:absolute;left:3px;top:12%;bottom:12%;width:2px;border-radius:3px;background:var(--line-strong);transition:background .15s,box-shadow .15s}
+.trading-layout .panel-resizer:hover:before,.trading-layout .panel-resizer:focus:before{background:var(--gold);box-shadow:0 0 10px #ffc79955;outline:none}
+.trading-layout .footprint-panel{grid-column:3;min-width:0}
+.trading-layout .footprint-wrap{max-height:min(68vh,760px)}
+.trading-layout .footprint-meta{flex-wrap:wrap;gap:8px}
+.trading-layout .footprint-header{align-items:flex-start;flex-wrap:wrap}
+.trading-layout .footprint-header .panel-tools{flex-wrap:wrap;justify-content:flex-end}
+.trading-layout .footprint-zoom-controls button{padding:4px 5px;font-size:8px}
+@media(max-width:1120px){
+ .trading-layout .chart-column{grid-template-columns:minmax(0,1fr);gap:14px}
+ .trading-layout .price-panel,.trading-layout .footprint-panel{grid-column:1}
+ .trading-layout .panel-resizer{display:none}
+}
+@media(max-width:850px){
+ .trading-layout .chart-column{display:flex}
+ .footprint-zoom-controls button{padding:4px 5px}
+}

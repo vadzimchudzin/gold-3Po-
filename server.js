@@ -196,15 +196,14 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/analysis') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
-      const intervalMs = Math.min(86400000, Math.max(60000, Number(url.searchParams.get('intervalMs') || 900000)));
       const priceStep = Math.min(100, Math.max(0.001, Number(url.searchParams.get('priceStep') || 0.1)));
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
       const selected = events.filter(e => e.symbol === symbol && e.source === source);
-      const activeAnalysis = await setups.activeDefinition();
       const current = await settings.get();
-      return json(res, 200, { symbol, source, ...buildMarketAnalysis(selected, { intervalMs, priceStep, zoneOptions: current.zones, footprintOptions: current.footprint }), feed: health().feeds.find(f => f.source === source && f.symbol === symbol) || null });
+      const intervalMs = current.zones.timeframeMinutes * 60000;
+      return json(res, 200, { symbol, source, intervalMs, timeframeMinutes: current.zones.timeframeMinutes, ...buildMarketAnalysis(selected, { intervalMs, priceStep, zoneOptions: current.zones, footprintOptions: current.footprint }), feed: health().feeds.find(f => f.source === source && f.symbol === symbol) || null });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/replay') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();

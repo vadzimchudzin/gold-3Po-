@@ -145,9 +145,24 @@ try {
   assert.equal(await page.locator('.zone-row.selected').count(), 0, 'reset should clear zone selection');
 
   await page.locator('#layoutButton').click();
-  assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('focus-chart')));
+  assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout')));
+  assert.ok(await page.locator('#chartPanelResizer').isVisible(), 'split layout must show a chart/footprint divider');
+  for (const id of ['#footZoomXOut', '#footZoomXIn', '#footZoomYOut', '#footZoomYIn']) {
+    assert.ok(await page.locator(id).isVisible(), `footprint zoom control ${id} must be visible`);
+  }
+  const footprintCell = page.locator('.foot-cell').first();
+  const cellWidthBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
+  const cellHeightBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
+  await page.locator('#footZoomXIn').click();
+  const cellWidthAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
+  assert.ok(cellWidthAfter > cellWidthBefore, 'X+ must widen footprint columns');
+  await page.locator('#footZoomYIn').click();
+  const cellHeightAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
+  assert.ok(cellHeightAfter > cellHeightBefore, 'Y+ must increase footprint price-row height');
+  await page.locator('#footZoomXReset').click();
+  await page.locator('#footZoomYReset').click();
   await page.locator('#layoutButton').click();
-  assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('focus-chart'))));
+  assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout'))));
 
   await page.locator('#loadReplay').click();
   await page.waitForFunction(() => document.querySelector('#replaySlider') && !document.querySelector('#replaySlider').disabled, null, { timeout:5000 });

@@ -12,6 +12,11 @@ jobs:
         with:
           node-version: 22
       - run: npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: python -B -m unittest discover -s adapters/mt5 -p test_mt5_connector.py
+      - run: python adapters/mt5/mt5_connector.py --selftest
       - run: npm run check
       - run: npm install --no-save playwright
       - run: npx playwright install --with-deps chromium
