@@ -30,6 +30,7 @@ class FakeMT5:
                                         data_path="terminal data", commondata_path="common data")
         self.account = SimpleNamespace(login=1234, server="Broker-Demo", trade_allowed=False)
         self.latest = SimpleNamespace(time=SECOND, time_msc=SECOND * 1000 + 800)
+        self.info = SimpleNamespace(chart_mode=connector.SYMBOL_CHART_MODE_BID)
         self.rows = [tick(SECOND, 800)]
         self.calls = []
         self.login_ok = True
@@ -55,6 +56,10 @@ class FakeMT5:
 
     def symbol_info_tick(self, symbol):
         return self.latest
+
+    def symbol_info(self, symbol):
+        self.calls.append(("symbol_info", symbol))
+        return self.info
 
     def symbol_select(self, symbol, enabled):
         self.calls.append(("symbol_select", symbol, enabled))
@@ -93,6 +98,7 @@ class ConnectorTests(unittest.TestCase):
             ("initialize", (os.path.join(self.api.install, "terminal64.exe"),), connector.MT5_TIMEOUT_MS),
             ("login", 1234, SECRET, "Broker-Demo", connector.MT5_TIMEOUT_MS),
             ("symbol_select", "XAUUSDm", True),
+            ("symbol_info", "XAUUSDm"),
         ])
 
     def test_auto_discover_and_clean_failure(self):
@@ -126,14 +132,24 @@ class ConnectorTests(unittest.TestCase):
         self.assertTrue(first["connected"])
         self.assertEqual(len(first["ticks"]), 2)
         self.assertEqual(first["ticks"][0], {"timestamp": "2023-11-14T22:13:20.799Z", "bid": 2000.0,
-                                            "ask": 2000.5, "last": 2000.25, "tickVolume": 7,
+                                            "ask": 2000.5, "last": 2000.0, "tickVolume": 7,
                                             "realVolume": 0.0, "flags": 6})
         self.assertEqual(first["ticks"][0], first["ticks"][1])
-        self.assertEqual([row["last"] for row in second["ticks"] + third["ticks"]], [2000.25, 2000.4])
+        self.assertEqual([row["last"] for row in second["ticks"] + third["ticks"]], [2000.0, 2000.0])
         self.assertEqual(third["ticks"][0]["realVolume"], 0.7)
         self.assertEqual(fourth["ticks"], [])
         reads = [call for call in self.api.calls if call[0] == "copy_ticks_from"]
         self.assertTrue(all(call[2].tzinfo is timezone.utc and call[4] == -1 for call in reads))
+
+    def test_chart_mode_uses_bid_or_last_price_like_the_mt5_chart(self):
+        quote = tick(SECOND, 900, bid=2000.0, ask=2000.5, last=0.0)
+        bid_bar = connector.encode_tick(quote, SECOND * 1000 + 900, connector.SYMBOL_CHART_MODE_BID)
+        last_fallback = connector.encode_tick(quote, SECOND * 1000 + 900, connector.SYMBOL_CHART_MODE_LAST)
+        last_trade = connector.encode_tick({**quote, "last": 2000.42}, SECOND * 1000 + 900,
+                                            connector.SYMBOL_CHART_MODE_LAST)
+        self.assertEqual(bid_bar["last"], 2000.0)
+        self.assertEqual(last_fallback["last"], 2000.25)
+        self.assertEqual(last_trade["last"], 2000.42)
 
     def test_disconnected_terminal_mismatch_and_read_diagnostics(self):
         self.connect()

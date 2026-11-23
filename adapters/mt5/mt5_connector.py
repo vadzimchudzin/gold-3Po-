@@ -19,6 +19,8 @@ MAX_LINE = 16 * 1024
 MT5_TIMEOUT_MS = 15_000
 POLL_LIMIT = 1_000
 MAX_SECOND_OFFSET = 8_192
+SYMBOL_CHART_MODE_BID = 0
+SYMBOL_CHART_MODE_LAST = 1
 HISTORY_LIMIT = 25_000
 HISTORY_LOOKBACK = 8 * 60 * 60
 HISTORY_WINDOW = 30 * 60
@@ -150,15 +152,21 @@ def milliseconds(row):
         return int(row["time"]) * 1000
 
 
-def encode_tick(row, stamp):
+def encode_tick(row, stamp, chart_mode=None):
     bid, ask, last = (float(row[name]) for name in ("bid", "ask", "last"))
     volume = int(row["volume"])
     real_volume = float(row["volume_real"])
     if (stamp <= 0 or not all(map(math.isfinite, (bid, ask, real_volume)))
             or bid <= 0 or ask < bid or volume < 0 or real_volume < 0):
         return None  # e.g. broker sent an empty quote; the ingest API rejects it.
-    if not math.isfinite(last) or last <= 0:
-        last = bid + (ask - bid) / 2  # OTC quote, not a broker-reported trade.
+    if chart_mode == SYMBOL_CHART_MODE_BID:
+        # Most OTC/Forex MT5 charts are built from Bid. Do not plot the Bid/Ask
+        # midpoint as candle price: that shifts every bar by half the spread.
+        last = bid
+    elif not math.isfinite(last) or last <= 0:
+        # For Last-mode symbols use the broker's Last when present. If this
+        # tick has no Last, retain the established quote-midpoint fallback.
+        last = bid + (ask - bid) / 2
     return {
         "timestamp": (EPOCH + timedelta(milliseconds=stamp)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "bid": bid,
@@ -175,9 +183,11 @@ class Worker:
         self.load_api = load_api or (lambda: import_module("MetaTrader5"))
         self.api = None
         self.session = None
+        self.chart_mode = None
 
     def close(self):
         self.session = None
+        self.chart_mode = None
         if self.api is not None:
             try:
                 self.api.shutdown()
@@ -239,6 +249,11 @@ class Worker:
             terminal = self.verify(login, server)
             if not self.api.symbol_select(symbol, True):
                 raise mt5_error(self.api, "symbol_select_failed", "MT5 could not select the symbol. Use the exact Market Watch name, including its broker suffix and letter case.")
+            symbol_info = self.api.symbol_info(symbol)
+            if symbol_info is None:
+                raise mt5_error(self.api, "symbol_info_failed", "MT5 could not read the selected symbol specification.")
+            chart_mode = getattr(symbol_info, "chart_mode", None)
+            self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else None
             for path in (terminal.commondata_path, terminal.data_path):
                 if not isinstance(path, str) or not path or len(path) > 4096:
                     raise WorkerError("terminal_paths_unavailable", "MT5 did not provide its terminal data directories.")
@@ -293,7 +308,7 @@ class Worker:
             seen += 1
             if second == start and seen <= offset:
                 continue
-            tick = encode_tick(row, stamp)
+            tick = encode_tick(row, stamp, self.chart_mode)
             if tick is not None:
                 ticks.append(tick)
             if len(ticks) == POLL_LIMIT:
@@ -333,7 +348,7 @@ class Worker:
                 continue
             batch = []
             for stamp, row in items:
-                tick = encode_tick(row, stamp)
+                tick = encode_tick(row, stamp, self.chart_mode)
                 if tick is not None:
                     batch.append(tick)
             if len(items) > remaining:
