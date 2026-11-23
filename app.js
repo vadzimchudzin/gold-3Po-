@@ -335,5 +335,14 @@ window.addEventListener('exit-replay',()=>{replayMode=false;});
 const initialStatus=$('#chartStatus');if(initialStatus&&!live){initialStatus.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';initialStatus.className='warning';}
 let resizeTimer=null;
 window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=window.setTimeout(()=>{renderChart();renderFootprint();},150);});
-if(typeof ResizeObserver!=='undefined'){const footprintResizeObserver=new ResizeObserver(()=>renderFootprint());footprintResizeObserver.observe(grid);}
+if(typeof ResizeObserver!=='undefined'){
+ const workspaceResizeObserver=new ResizeObserver(entries=>{
+  for(const entry of entries){
+   if(entry.target===chartViewport)renderChart();
+   if(entry.target===grid)renderFootprint();
+  }
+ });
+ workspaceResizeObserver.observe(chartViewport);
+ workspaceResizeObserver.observe(grid);
+}
 renderZones();renderInspector();renderChart();renderFootprint();
