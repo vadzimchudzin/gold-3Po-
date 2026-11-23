@@ -143,6 +143,34 @@ test('session recovers from a live sequence collision', async () => {
   await session.disconnect();
 });
 
+test('a transient live ingest failure is retried without losing the tick or disconnecting MT5', async () => {
+  const api = fakeApi();
+  let failed = false;
+  const request = async (url, init = {}) => {
+    if (new URL(url).pathname.endsWith('/live-batch') && !failed) {
+      failed = true;
+      return { ok: false, status: 503, json: async () => ({}) };
+    }
+    return api.request(url, init);
+  };
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: { ok: true, ticks: [tick] }
+    }),
+    request, publish: async () => {}
+  });
+  const connected = await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' });
+  assert.equal(connected.state, 'online');
+  await new Promise(resolve => setTimeout(resolve, 1800));
+  assert.equal(session.state().state, 'online');
+  assert.equal(failed, true);
+  assert.ok(api.calls.some(call => call.path.endsWith('/live-batch')), 'the queued tick must eventually be resent');
+  await session.disconnect();
+});
+
 test('session disconnects when the licence becomes invalid', async () => {
   let valid = true;
   const api = fakeApi({ licenseValid: () => valid });

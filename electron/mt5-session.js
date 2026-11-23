@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { publishSnapshot } from './mt5-snapshot.js';
 
+const LIVE_POLL_INTERVAL_MS = 450;
+const MAX_RETRY_DELAY_MS = 10_000;
+
 function startWorker(command, args) {
   let child;
   try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
@@ -117,21 +120,38 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
   }
 
   async function poll(owner) {
+    let delay = LIVE_POLL_INTERVAL_MS;
     try {
       const result = await owner.worker.request('poll');
       if (session !== owner) return;
-      const count = await ingest(owner, result.ticks, false);
-      if (count) {
-        owner.dirty = true;
-        owner.lastTick = result.ticks.at(-1).timestamp;
+      if (Array.isArray(result.ticks) && result.ticks.length) owner.pendingTicks.push(...result.ticks);
+      if (owner.pendingTicks.length > 0) {
+        const batch = owner.pendingTicks.splice(0, 1000);
+        try {
+          const count = await ingest(owner, batch, false);
+          if (count) {
+            owner.dirty = true;
+            owner.lastTick = batch.at(-1)?.timestamp || owner.lastTick;
+          }
+        } catch (error) {
+          // MT5 has advanced its native cursor. Keep failed batches locally until
+          // the loop can deliver them; this prevents silent holes in live candles.
+          owner.pendingTicks.unshift(...batch);
+          throw error;
+        }
       }
       await refreshLevels(owner, owner.dirty);
-      const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'Вход подтверждён. Уровни обновляются по таймфрейму из настроек.';
-      set(owner, { state: 'online', lastTick: owner.lastTick ?? null, message: owner.historyNote ? `${online} ${owner.historyNote}` : online });
+      owner.failures = 0;
+      const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'MT5 синхронизирован. График и футпринт получают одну ленту тиков.';
+      set(owner, { state: 'online', lastTick: owner.lastTick ?? null, message: owner.historyNote ? `${online} ${owner.historyNote}` : online, queuedTicks: owner.pendingTicks.length });
     } catch (error) {
-      if (session === owner) await disconnect(error.message);
+      if (session === owner) {
+        owner.failures = (owner.failures || 0) + 1;
+        delay = Math.min(MAX_RETRY_DELAY_MS, LIVE_POLL_INTERVAL_MS * (2 ** Math.min(owner.failures, 5)));
+        set(owner, { state: 'online', message: `Временный сбой MT5/API: ${error.message}. Повтор через ${Math.ceil(delay/1000)} с; очередь тиков сохранена.`, queuedTicks: owner.pendingTicks.length });
+      }
     } finally {
-      if (session === owner) owner.timer = setTimeout(() => void poll(owner), 1800);
+      if (session === owner) owner.timer = setTimeout(() => void poll(owner), delay);
     }
   }
 
@@ -168,7 +188,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       throw new Error('Заполните путь к terminal64.exe, номер счёта, пароль, сервер и точное имя символа золота.');
     }
     const worker = makeWorker(workerCommand, workerArgs);
-    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, dirty: true };
+    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, dirty: true, pendingTicks: [], failures: 0 };
     session = owner;
     status = { state: 'connecting', symbol: owner.symbol, message: 'Подключение к терминалу MT5…' };
     try {
