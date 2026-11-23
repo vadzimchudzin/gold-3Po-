@@ -145,9 +145,13 @@ try {
   assert.equal(await page.locator('.zone-row.selected').count(), 0, 'reset should clear zone selection');
 
   await page.locator('#layoutButton').click();
-  assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('focus-chart')));
+  assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout')));
+  assert.ok(await page.locator('#chartPanelResizer').isVisible(), 'split layout must show a chart/footprint divider');
+  for (const id of ['#footZoomXOut', '#footZoomXIn', '#footZoomYOut', '#footZoomYIn']) {
+    assert.ok(await page.locator(id).isVisible(), `footprint zoom control ${id} must be visible`);
+  }
   await page.locator('#layoutButton').click();
-  assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('focus-chart'))));
+  assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout'))));
 
   await page.locator('#loadReplay').click();
   await page.waitForFunction(() => document.querySelector('#replaySlider') && !document.querySelector('#replaySlider').disabled, null, { timeout:5000 });

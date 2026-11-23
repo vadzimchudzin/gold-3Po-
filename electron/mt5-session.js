@@ -94,9 +94,18 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     return records.length;
   }
 
+  async function refreshLicense(owner) {
+    if (session !== owner || Date.now() - owner.licenseAt < 4500) return;
+    const response = await fetchApi('/v1/license/status');
+    if (!response.ok) throw new Error('Не удалось проверить лицензию.');
+    owner.licenseAt = Date.now();
+    if (!(await response.json()).valid) await disconnect('Лицензия GOLD-3Po недействительна.');
+  }
+
   async function refreshLevels(owner, changed) {
     if (session !== owner) return;
-    // Refetch every ~4.5 s even without new ticks, so changed settings reach MT5 on a quiet market too.
+    // Zone snapshots are throttled separately from the live tick poll and licence heartbeat.
+    if (owner.cachedZones && Date.now() - owner.levelAt < 4500 && !changed) return;
     if (!owner.cachedZones || Date.now() - owner.levelAt >= 4500) {
       const response = await fetchApi('/v1/chart/zones?' + new URLSearchParams({ symbol: owner.symbol }));
       if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
@@ -104,12 +113,6 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const body = await response.json();
       owner.cachedZones = body.zones;
       owner.cachedStyle = body.style;
-    } else if (!changed) {
-      const response = await fetchApi('/v1/license/status');
-      if (!response.ok) throw new Error('Не удалось проверить лицензию.');
-      if (!(await response.json()).valid) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
-    } else {
-      return;
     }
     if (session !== owner) return;
     owner.levelWrite = publish(owner.commonDataPath, owner.symbol, owner.cachedZones, owner.cachedStyle);
@@ -140,6 +143,8 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
           throw error;
         }
       }
+      await refreshLicense(owner);
+      if (session !== owner) return;
       await refreshLevels(owner, owner.dirty);
       owner.failures = 0;
       const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'MT5 синхронизирован. График и футпринт получают одну ленту тиков.';
@@ -188,7 +193,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       throw new Error('Заполните путь к terminal64.exe, номер счёта, пароль, сервер и точное имя символа золота.');
     }
     const worker = makeWorker(workerCommand, workerArgs);
-    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, dirty: true, pendingTicks: [], failures: 0 };
+    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, licenseAt: 0, dirty: true, pendingTicks: [], failures: 0 };
     session = owner;
     status = { state: 'connecting', symbol: owner.symbol, message: 'Подключение к терминалу MT5…' };
     try {
