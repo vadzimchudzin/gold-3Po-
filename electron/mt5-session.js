@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { publishSnapshot } from './mt5-snapshot.js';
 
+const LIVE_POLL_INTERVAL_MS = 450;
+const MAX_RETRY_DELAY_MS = 10_000;
+
 function startWorker(command, args) {
   let child;
   try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
@@ -91,9 +94,19 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     return records.length;
   }
 
-  async function refreshLevels(owner, changed) {
+  async function refreshLicense(owner) {
+    if (session !== owner || Date.now() - owner.licenseAt < 4500) return;
+    const response = await fetchApi('/v1/license/status');
+    if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
+    if (!response.ok) throw new Error('Не удалось проверить лицензию.');
+    owner.licenseAt = Date.now();
+    if (!(await response.json()).valid) await disconnect('Лицензия GOLD-3Po недействительна.');
+  }
+
+  async function refreshLevels(owner) {
     if (session !== owner) return;
-    // Refetch every ~4.5 s even without new ticks, so changed settings reach MT5 on a quiet market too.
+    // Zone snapshots are throttled separately from the live tick poll and licence heartbeat.
+    if (owner.cachedZones && Date.now() - owner.levelAt < 4500) return;
     if (!owner.cachedZones || Date.now() - owner.levelAt >= 4500) {
       const response = await fetchApi('/v1/chart/zones?' + new URLSearchParams({ symbol: owner.symbol }));
       if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
@@ -101,12 +114,6 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const body = await response.json();
       owner.cachedZones = body.zones;
       owner.cachedStyle = body.style;
-    } else if (!changed) {
-      const response = await fetchApi('/v1/license/status');
-      if (!response.ok) throw new Error('Не удалось проверить лицензию.');
-      if (!(await response.json()).valid) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
-    } else {
-      return;
     }
     if (session !== owner) return;
     owner.levelWrite = publish(owner.commonDataPath, owner.symbol, owner.cachedZones, owner.cachedStyle);
@@ -117,21 +124,44 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
   }
 
   async function poll(owner) {
+    let delay = LIVE_POLL_INTERVAL_MS;
     try {
-      const result = await owner.worker.request('poll');
-      if (session !== owner) return;
-      const count = await ingest(owner, result.ticks, false);
-      if (count) {
-        owner.dirty = true;
-        owner.lastTick = result.ticks.at(-1).timestamp;
+      // Apply backpressure: do not advance the MT5 cursor while an earlier batch
+      // is waiting for API delivery. The worker can page the untouched cursor later.
+      if (owner.pendingTicks.length === 0) {
+        const result = await owner.worker.request('poll');
+        if (session !== owner) return;
+        if (Array.isArray(result.ticks) && result.ticks.length) owner.pendingTicks.push(...result.ticks);
       }
-      await refreshLevels(owner, owner.dirty);
-      const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'Вход подтверждён. Уровни обновляются по таймфрейму из настроек.';
-      set(owner, { state: 'online', lastTick: owner.lastTick ?? null, message: owner.historyNote ? `${online} ${owner.historyNote}` : online });
+      if (owner.pendingTicks.length > 0) {
+        const batch = owner.pendingTicks.splice(0, 1000);
+        try {
+          const count = await ingest(owner, batch, false);
+          if (count) {
+            owner.dirty = true;
+            owner.lastTick = batch.at(-1)?.timestamp || owner.lastTick;
+          }
+        } catch (error) {
+          // MT5 has advanced its native cursor. Keep failed batches locally until
+          // the loop can deliver them; this prevents silent holes in live candles.
+          owner.pendingTicks.unshift(...batch);
+          throw error;
+        }
+      }
+      await refreshLicense(owner);
+      if (session !== owner) return;
+      await refreshLevels(owner);
+      owner.failures = 0;
+      const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'MT5 синхронизирован. График и футпринт получают одну ленту тиков.';
+      set(owner, { state: 'online', lastTick: owner.lastTick ?? null, message: owner.historyNote ? `${online} ${owner.historyNote}` : online, queuedTicks: owner.pendingTicks.length });
     } catch (error) {
-      if (session === owner) await disconnect(error.message);
+      if (session === owner) {
+        owner.failures = (owner.failures || 0) + 1;
+        delay = Math.min(MAX_RETRY_DELAY_MS, LIVE_POLL_INTERVAL_MS * (2 ** Math.min(owner.failures, 5)));
+        set(owner, { state: 'online', message: `Временный сбой MT5/API: ${error.message}. Повтор через ${Math.ceil(delay/1000)} с; очередь тиков сохранена.`, queuedTicks: owner.pendingTicks.length });
+      }
     } finally {
-      if (session === owner) owner.timer = setTimeout(() => void poll(owner), 1800);
+      if (session === owner) owner.timer = setTimeout(() => void poll(owner), delay);
     }
   }
 
@@ -168,7 +198,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       throw new Error('Заполните путь к terminal64.exe, номер счёта, пароль, сервер и точное имя символа золота.');
     }
     const worker = makeWorker(workerCommand, workerArgs);
-    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, dirty: true };
+    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, licenseAt: 0, dirty: true, pendingTicks: [], failures: 0 };
     session = owner;
     status = { state: 'connecting', symbol: owner.symbol, message: 'Подключение к терминалу MT5…' };
     try {

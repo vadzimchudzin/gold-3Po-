@@ -13,7 +13,7 @@ function paint(node,label,state){if(node===mt5)topStatus(label,state);if(!node)r
 function ageLabel(ms){if(!Number.isFinite(ms))return '—';if(ms<1000)return 'СЕЙЧАС';if(ms<60000)return Math.floor(ms/1000)+' с назад';return Math.floor(ms/60000)+' мин назад';}
 async function refreshAnalysis(){
  try{
-  const response=await fetch('/v1/market/analysis?symbol='+encodeURIComponent(marketSymbol())+'&intervalMs='+(window.gold3poIntervalMs?.()||900000)+'&priceStep=0.1',{cache:'no-store'});
+  const response=await fetch('/v1/market/analysis?symbol='+encodeURIComponent(marketSymbol())+'&priceStep=0.1',{cache:'no-store'});
   if(!response.ok)throw new Error('HTTP '+response.status);
   const data=await response.json();
   if(data.bars?.length){
@@ -25,7 +25,7 @@ async function refreshAnalysis(){
   }
  }catch{ /* Отсутствие фида брокера не должно ломать рабочую область. */ }
 }
-function scheduleAnalysis(){if(analysisTimer)return;analysisTimer=window.setTimeout(()=>{analysisTimer=null;refreshAnalysis();},1500);}
+function scheduleAnalysis(){if(analysisTimer)return;analysisTimer=window.setTimeout(()=>{analysisTimer=null;refreshAnalysis();},500);}
 async function refreshHealth(){
  try{
   const response=await fetch('/health',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);

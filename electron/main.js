@@ -67,13 +67,26 @@ function registerMt5Ipc() {
     const response = await fetch(`${localOrigin}/v1/license/status`, { signal: AbortSignal.timeout(5000) });
     if (!response.ok || !(await response.json()).valid) throw new Error('Сначала активируйте лицензию GOLD-3Po.');
     if (isQuitting) throw new Error('Приложение завершает работу.');
-    return mt5.connect({ terminalPath: mt5TerminalPath, login: input.login, password: input.password, server: input.server, symbol: input.symbol?.trim() });
+    const connected = await mt5.connect({ terminalPath: mt5TerminalPath, login: input.login, password: input.password, server: input.server, symbol: input.symbol?.trim() });
+    if (connected.state !== 'online') return connected;
+    const terminalDataPath = mt5.terminalDataPath();
+    try {
+      const patch = await installIndicator({
+        source: path.join(adapterDir, 'Gold3PoLevels.mq5'),
+        bridgeSource: path.join(adapterDir, 'Gold3PoBridge.mq5'),
+        terminalPath: mt5TerminalPath,
+        terminalDataPath
+      });
+      return { ...connected, message: `${connected.message} ${patch}` };
+    } catch (error) {
+      return { ...connected, message: `${connected.message} Автопатч не завершён: ${error.message}` };
+    }
   });
   handle('disconnect', () => mt5.disconnect());
   handle('install-indicator', () => {
     const terminalDataPath = mt5.terminalDataPath();
     if (!terminalDataPath) throw new Error('Сначала подключите терминал MT5.');
-    return installIndicator({ source: path.join(adapterDir, 'Gold3PoLevels.mq5'), terminalPath: mt5TerminalPath, terminalDataPath });
+    return installIndicator({ source: path.join(adapterDir, 'Gold3PoLevels.mq5'), bridgeSource: path.join(adapterDir, 'Gold3PoBridge.mq5'), terminalPath: mt5TerminalPath, terminalDataPath });
   });
   // The EA bridge (Gold3PoBridge.mq5) authenticates with the same token the local API expects,
   // so the window shows it instead of sending the user into settings.json.
