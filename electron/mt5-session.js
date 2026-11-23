@@ -97,6 +97,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
   async function refreshLicense(owner) {
     if (session !== owner || Date.now() - owner.licenseAt < 4500) return;
     const response = await fetchApi('/v1/license/status');
+    if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
     if (!response.ok) throw new Error('Не удалось проверить лицензию.');
     owner.licenseAt = Date.now();
     if (!(await response.json()).valid) await disconnect('Лицензия GOLD-3Po недействительна.');
