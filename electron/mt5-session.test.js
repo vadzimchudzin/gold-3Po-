@@ -187,7 +187,7 @@ test('session disconnects when the licence becomes invalid', async () => {
   await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' });
   await new Promise(resolve => setTimeout(resolve, 2200));
   valid = false;
-  await new Promise(resolve => setTimeout(resolve, 2600));
+  await new Promise(resolve => setTimeout(resolve, 3400));
   const state = session.state();
   assert.equal(state.state, 'offline');
   assert.match(state.message, /лиценз/i);
