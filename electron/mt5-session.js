@@ -126,9 +126,13 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
   async function poll(owner) {
     let delay = LIVE_POLL_INTERVAL_MS;
     try {
-      const result = await owner.worker.request('poll');
-      if (session !== owner) return;
-      if (Array.isArray(result.ticks) && result.ticks.length) owner.pendingTicks.push(...result.ticks);
+      // Apply backpressure: do not advance the MT5 cursor while an earlier batch
+      // is waiting for API delivery. The worker can page the untouched cursor later.
+      if (owner.pendingTicks.length === 0) {
+        const result = await owner.worker.request('poll');
+        if (session !== owner) return;
+        if (Array.isArray(result.ticks) && result.ticks.length) owner.pendingTicks.push(...result.ticks);
+      }
       if (owner.pendingTicks.length > 0) {
         const batch = owner.pendingTicks.splice(0, 1000);
         try {
