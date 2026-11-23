@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMarketServer } from './server.js';
@@ -24,6 +24,45 @@ const auth = { authorization: 'Bearer test-secret', 'content-type': 'application
 const mt5 = (sequence=1) => ({ source:'mt5',symbol:'XAUUSD',timestamp:'2026-11-17T15:00:00.000Z',sequence,bid:2648.2,ask:2648.4,last:2648.3,tickVolume:1,realVolume:0 });
 const comex = (sequence=1) => ({ source:'comex',symbol:'GCZ6',timestamp:'2026-11-17T15:00:00.000Z',sequence,tradeId:'trade-'+sequence,price:2650.1,size:2,aggressorSide:'buy' });
 test('health endpoint reports configured but initially empty feeds',async()=>{const r=await fetch(base+'/health');const b=await r.json();assert.equal(r.status,200);assert.equal(b.status,'ok');assert.equal(b.ingestConfigured,true);assert.equal(b.eventCount,0);});
+test('startup loads only the latest retained events from a large JSONL archive', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gold3po-market-archive-'));
+  const storageFile = join(directory, 'market-events.jsonl');
+  const records = Array.from({ length: 5 }, (_, index) => ({
+    ...mt5(index + 1),
+    eventId: 'archive-' + (index + 1),
+    receivedAt: '2026-11-17T15:00:01.000Z'
+  }));
+  await writeFile(storageFile, records.map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8');
+  const app = createMarketServer({
+    token: 'test-secret',
+    storageFile,
+    maxEvents: 2,
+    license: testLicense(),
+    setupStore: createSetupStore({ file: null }),
+    settingsStore: createSettingsStore({ file: null }),
+    patternStore: createPatternStore({ file: null })
+  });
+  const archiveServer = app.server;
+  await new Promise(resolve => archiveServer.listen(0, '127.0.0.1', resolve));
+  const url = 'http://127.0.0.1:' + archiveServer.address().port;
+  try {
+    const health = await (await fetch(url + '/health')).json();
+    assert.equal(health.eventCount, 2, 'only the configured rolling window is restored');
+    const snapshot = await (await fetch(url + '/v1/market/snapshot?symbol=XAUUSD&limit=10')).json();
+    assert.deepEqual(snapshot.events.map(event => event.sequence), [4, 5], 'the newest records remain in chronological order');
+    const stale = await fetch(url + '/v1/ingest/mt5/tick', {
+      method: 'POST', headers: auth, body: JSON.stringify(mt5(5))
+    });
+    assert.equal(stale.status, 409, 'the restored sequence cursor still rejects an old tick');
+    const fresh = await fetch(url + '/v1/ingest/mt5/tick', {
+      method: 'POST', headers: auth, body: JSON.stringify(mt5(6))
+    });
+    assert.equal(fresh.status, 202, 'the next live tick is accepted after restoring the archive tail');
+  } finally {
+    await new Promise(resolve => archiveServer.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test('MT5 tick is authenticated, normalized and visible in snapshot',async()=>{const r=await fetch(base+'/v1/ingest/mt5/tick',{method:'POST',headers:auth,body:JSON.stringify(mt5())});const b=await r.json();assert.equal(r.status,202);assert.equal(b.event.venue,'broker_otc');assert.equal(b.event.volumeKind,'broker_tick_or_reported_volume');const s=await fetch(base+'/v1/market/snapshot?symbol=XAUUSD');const snap=await s.json();assert.equal(snap.count,1);assert.equal(snap.events[0].last,2648.3);});
 test('COMEX trade preserves trade size and aggressor side',async()=>{const r=await fetch(base+'/v1/ingest/comex/trade',{method:'POST',headers:auth,body:JSON.stringify(comex())});const b=await r.json();assert.equal(r.status,202);assert.equal(b.event.venue,'comex_futures');assert.equal(b.event.size,2);assert.equal(b.event.aggressorSide,'buy');});
 test('ingest rejects missing or incorrect bearer token',async()=>{for(const headers of [{'content-type':'application/json'},{...auth,authorization:'Bearer wrong'}]){const r=await fetch(base+'/v1/ingest/mt5/tick',{method:'POST',headers,body:JSON.stringify(mt5())});assert.equal(r.status,401);}});
