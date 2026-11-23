@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import tempfile
 import unittest
 from datetime import timezone
 from types import SimpleNamespace
@@ -25,7 +26,10 @@ class FakeMT5:
     COPY_TICKS_ALL = -1
 
     def __init__(self):
-        self.install = os.path.abspath("Some MT5")
+        self.temp_dir = tempfile.TemporaryDirectory(prefix="gold3po-mt5-test-")
+        self.install = self.temp_dir.name
+        with open(os.path.join(self.install, "terminal64.exe"), "wb") as terminal:
+            terminal.write(b"fake terminal executable")
         self.terminal = SimpleNamespace(connected=True, path=self.install,
                                         data_path="terminal data", commondata_path="common data")
         self.account = SimpleNamespace(login=1234, server="Broker-Demo", trade_allowed=False)
@@ -81,6 +85,7 @@ class ConnectorTests(unittest.TestCase):
         self.api = FakeMT5()
         self.worker = connector.Worker(lambda: self.api)
         self.addCleanup(self.worker.close)
+        self.addCleanup(self.api.temp_dir.cleanup)
 
     def command(self, op, **fields):
         line = json.dumps({"id": "request-1", "op": op, **fields}).encode() + b"\n"
@@ -123,7 +128,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(self.connect()["error"], "symbol_select_failed")
         self.assertEqual(self.command("history")["error"], "not_connected")
 
-    def test_live_poll_utc_midpoint_and_duplicate_boundary(self):
+    def test_live_poll_utc_chart_mode_and_duplicate_boundary(self):
         self.api.rows = [tick(SECOND, 799), tick(SECOND, 799), tick(SECOND, 800, bid=0.0),
                          tick(SECOND, 801), tick(SECOND + 1, 20, last=2000.4, volume_real=0.7, flags=32)]
         self.assertTrue(self.connect()["ok"])
