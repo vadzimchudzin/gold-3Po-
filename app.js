@@ -6,7 +6,7 @@ const $ = s => document.querySelector(s);
 const chart=$('#priceChart'), grid=$('#footprintGrid'), zoneList=$('#zoneList'), toast=$('#toast'), chartEmpty=$('#chartEmpty');
 let bars=[], zones=[], selected=-1, selectedZone=null, showZones=true, showNumbers=true, mode='bidask', live=false, replayMode=false, toastTimer;
 let levels=[], analysisMeta=null, hasAutoScrolled=false;
-let horizontalZoom=1, verticalZoom=1, chartDrag=null, suppressChartClickUntil=0;
+let horizontalZoom=1, verticalZoom=1, footprintZoomX=1, footprintZoomY=1, chartDrag=null, suppressChartClickUntil=0;
 const chartViewport=chart.parentElement;
 // The user's footprint options (published by settings-client at module init and on every save).
 // The live path recomputes the forming bar with them, so a changed setting shows at once.
@@ -38,6 +38,16 @@ function changeHorizontalZoom(next,anchorClientX=null){
  updateChartZoomControls();
 }
 function changeVerticalZoom(next){verticalZoom=clamp(next,0.25,8);renderChart();updateChartZoomControls();}
+function updateFootprintZoomControls(){
+ const x=$('#footZoomXReset'),y=$('#footZoomYReset');
+ if(x)x.textContent='X '+Math.round(footprintZoomX*100)+'%';
+ if(y)y.textContent='Y '+Math.round(footprintZoomY*100)+'%';
+}
+function changeFootprintZoom(axis,next){
+ if(axis==='x')footprintZoomX=clamp(next,0.35,3.5);
+ else footprintZoomY=clamp(next,0.55,3);
+ renderFootprint();updateFootprintZoomControls();
+}
 function bindChartNavigation(){
  if(!chartViewport||chartViewport.dataset.navigationBound==='1')return;
  chartViewport.dataset.navigationBound='1';
@@ -128,7 +138,7 @@ function renderFootprint(){
  if(!bars.length){grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
  // Column count follows the panel width, so the session profile stays on screen instead of
  // hiding behind a horizontal scrollbar.
- const available=Math.max(320,(grid.clientWidth||900)-24),maxCols=Math.max(6,Math.min(60,Math.floor((available-68-92)/34)));
+ const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(34*footprintZoomX),22,112),maxCols=Math.max(3,Math.min(60,Math.floor((available-68-92)/(cellWidth+3)))),rowHeight=clamp(Math.round(23*footprintZoomY),14,64);
  const windowSize=maxCols,start=Math.max(0,Math.min(Math.max(0,bars.length-windowSize),selected-Math.floor(windowSize/2))),visible=bars.slice(start,start+windowSize),offset=start;
  // Only prices that actually traded are drawn: a row of zeros is not information.
  const traded=new Map();
@@ -148,7 +158,7 @@ function renderFootprint(){
  const profileRows=new Map((currentProfile?.levels||[]).map(row=>[row.price.toFixed(2),row]));
  const profileMax=Math.max(1,...(currentProfile?.levels||[]).map(row=>row.total));
  const va=currentProfile?.valueArea||null;
- const cols=visible.length,template=`68px repeat(${cols},minmax(30px,44px)) 92px`,minWidth=68+cols*30+92;
+ const cols=visible.length,template=`68px repeat(${cols},${cellWidth}px) 92px`,minWidth=68+cols*(cellWidth+3)+92;
  const head=`<div class="foot-row foot-head" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">ЦЕНА</div>${visible.map((b,i)=>`<div class="bar-head ${offset+i===selected?'active':''}">#${String(offset+i+1).padStart(3,'0')}</div>`).join('')}<div class="foot-profile-head">ПРОФИЛЬ</div></div>`;
  const rows=priceRows.map(p=>`<div class="foot-row" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">${fmt(p)}</div>${feet.map((b,i)=>{
   const v=levelOf(b,p),delta=v.ask-v.bid,total=v.total||(v.ask+v.bid+v.unknown);
@@ -179,7 +189,8 @@ function renderFootprint(){
  })()}</div>`).join('');
  const deltas=`<div class="foot-row foot-deltas" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">Δ СВЕЧИ</div>${feet.map((b,i)=>{const d=b.unknown>0?null:(b.delta??barDelta(b));return `<div class="foot-delta ${d===null?'':d>=0?'positive':'negative'} ${offset+i===selected?'active':''}">${d===null?'—':((d>0?'+':'')+fmt(d,0))}</div>`;}).join('')}<div class="foot-profile-total">${currentProfile?fmt(currentProfile.volume,0):'—'}</div></div>`;
  const times=`<div class="foot-row foot-times" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">ВРЕМЯ</div>${visible.map((b,i)=>`<button class="bar-time ${offset+i===selected?'active':''}" data-index="${offset+i}">${timeLabel(b.time,{hour:'2-digit',minute:'2-digit',timeZone:'UTC'},'toLocaleTimeString')}</button>`).join('')}<div class="foot-profile-head">СЕССИЯ</div></div>`;
- grid.innerHTML=`<div class="footprint-table" style="min-width:${minWidth}px">${head}${deltas}${rows}${times}</div>`;
+ grid.innerHTML=`<div class="footprint-table" style="min-width:${minWidth}px;--footprint-row-height:${rowHeight}px">${head}${deltas}${rows}${times}</div>`;
+ updateFootprintZoomControls();
  // Keep the latest price in view unless the trader scrolled the panel themselves.
  if(grid.dataset.autoScroll!=='0'){
   const target=grid.querySelector('.foot-cell.foot-forming.foot-poc')||[...grid.querySelectorAll('.foot-cell.foot-forming')].find(node=>node.textContent.trim());
@@ -231,9 +242,46 @@ function select(i){
 }
 $('#zonesToggle').addEventListener('click',e=>{showZones=!showZones;e.currentTarget.setAttribute('aria-pressed',String(showZones));e.currentTarget.classList.toggle('is-off',!showZones);renderChart();notify(showZones?'Зоны ликвидности показаны':'Зоны ликвидности скрыты');});
 $('#numbersToggle').addEventListener('click',e=>{showNumbers=!showNumbers;e.currentTarget.setAttribute('aria-pressed',String(showNumbers));renderFootprint();});
+$('#footZoomXOut')?.addEventListener('click',()=>changeFootprintZoom('x',footprintZoomX/1.2));
+$('#footZoomXIn')?.addEventListener('click',()=>changeFootprintZoom('x',footprintZoomX*1.2));
+$('#footZoomXReset')?.addEventListener('click',()=>changeFootprintZoom('x',1));
+$('#footZoomYOut')?.addEventListener('click',()=>changeFootprintZoom('y',footprintZoomY/1.2));
+$('#footZoomYIn')?.addEventListener('click',()=>changeFootprintZoom('y',footprintZoomY*1.2));
+$('#footZoomYReset')?.addEventListener('click',()=>changeFootprintZoom('y',1));
+grid.addEventListener('wheel',event=>{
+ if(event.ctrlKey){event.preventDefault();changeFootprintZoom('x',footprintZoomX*(event.deltaY<0?1.12:1/1.12));}
+ else if(event.shiftKey){event.preventDefault();changeFootprintZoom('y',footprintZoomY*(event.deltaY<0?1.12:1/1.12));}
+},{passive:false});
 $('#footprintModes').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{mode=b.dataset.mode;$('#footprintModes').querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===b));renderFootprint();}));
-$('#resetView').addEventListener('click',()=>{replayMode=false;showZones=true;showNumbers=true;mode='bidask';horizontalZoom=1;verticalZoom=1;selectedZone=null;$('#zonesToggle').setAttribute('aria-pressed','true');$('#numbersToggle').setAttribute('aria-pressed','true');$('#zonesToggle').classList.remove('is-off');renderZones();$('#footprintModes').querySelectorAll('button').forEach(b=>b.classList.toggle('selected',b.dataset.mode==='bidask'));select(bars.length-1);chartViewport.scrollLeft=chartViewport.scrollWidth;updateChartZoomControls();notify('Вид сброшен');});
-$('#layoutButton').addEventListener('click',()=>{$('#workspace').classList.toggle('focus-chart');renderChart();notify($('#workspace').classList.contains('focus-chart')?'Режим графика включён':'Рабочая область восстановлена');});
+$('#resetView').addEventListener('click',()=>{replayMode=false;showZones=true;showNumbers=true;mode='bidask';horizontalZoom=1;verticalZoom=1;footprintZoomX=1;footprintZoomY=1;selectedZone=null;$('#zonesToggle').setAttribute('aria-pressed','true');$('#numbersToggle').setAttribute('aria-pressed','true');$('#zonesToggle').classList.remove('is-off');renderZones();$('#footprintModes').querySelectorAll('button').forEach(b=>b.classList.toggle('selected',b.dataset.mode==='bidask'));select(bars.length-1);chartViewport.scrollLeft=chartViewport.scrollWidth;updateChartZoomControls();notify('Вид сброшен');});
+const workspace=$('#workspace'),layoutButton=$('#layoutButton'),panelResizer=$('#chartPanelResizer');
+let layoutMode='stacked',splitRatio=0.5,splitPointer=false;
+try{layoutMode=localStorage.getItem('gold3po-layout')==='split'?'split':'stacked';splitRatio=clamp(Number(localStorage.getItem('gold3po-split')||0.5),0.32,0.68);}catch{}
+function applyWorkspaceLayout(){
+ workspace.classList.toggle('trading-layout',layoutMode==='split');
+ workspace.style.setProperty('--chart-split',`${Math.round(splitRatio*100)}%`);
+ if(layoutButton){const label=layoutButton.querySelector('span');if(label)label.textContent=layoutMode==='split'?'Окна: рядом':'Рабочая область';layoutButton.setAttribute('aria-pressed',String(layoutMode==='split'));}
+ requestAnimationFrame(()=>{renderChart();renderFootprint();});
+}
+layoutButton.addEventListener('click',()=>{
+ layoutMode=layoutMode==='split'?'stacked':'split';
+ try{localStorage.setItem('gold3po-layout',layoutMode);}catch{}
+ applyWorkspaceLayout();notify(layoutMode==='split'?'График и футпринт размещены рядом':'График и футпринт расположены вертикально');
+});
+panelResizer?.addEventListener('pointerdown',event=>{
+ if(layoutMode!=='split'||event.button!==0)return;
+ event.preventDefault();splitPointer=true;panelResizer.setPointerCapture?.(event.pointerId);
+});
+window.addEventListener('pointermove',event=>{
+ if(!splitPointer)return;
+ const column=workspace.querySelector('.chart-column'),rect=column.getBoundingClientRect();
+ if(rect.width<=0)return;
+ splitRatio=clamp((event.clientX-rect.left)/rect.width,0.32,0.68);
+ workspace.style.setProperty('--chart-split',`${Math.round(splitRatio*100)}%`);
+});
+const finishSplit=()=>{if(!splitPointer)return;splitPointer=false;try{localStorage.setItem('gold3po-split',String(splitRatio));}catch{};renderChart();renderFootprint();};
+window.addEventListener('pointerup',finishSplit);window.addEventListener('pointercancel',finishSplit);
+applyWorkspaceLayout();
 // A streamed tick updates the forming bar in place: the last footprint column and the last
 // candle move between authoritative refetches instead of waiting for the next 1.5 s poll.
 let liveFrame=0,liveRenderedAt=0;
@@ -244,7 +292,7 @@ function scheduleLiveRender(){
 }
 function applyLiveTick(event){
  if(replayMode||!bars.length||!event)return;
- const time=Date.parse(event.timestamp),interval=Number(window.gold3poIntervalMs?.()||900000);
+ const time=Date.parse(event.timestamp),interval=Number(analysisMeta?.intervalMs||window.gold3poIntervalMs?.()||900000);
  if(!Number.isFinite(time)||!(interval>0))return;
  const start=Math.floor(time/interval)*interval;
  const previous=bars.at(-1);
@@ -272,7 +320,7 @@ window.addEventListener('market-tick',e=>applyLiveTick(e.detail));
 // Footprint settings changed: re-render with the new options. Bars served before the change carry
 // the old marks, so drop their cached footprint fields and recompute them from the level maps.
 window.addEventListener('gold3po-settings',()=>{for(const b of bars){if(Array.isArray(b.levels)&&b.poc!==undefined){delete b.poc;delete b.valueArea;delete b.imbalances;delete b.stackedImbalances;delete b.absorbedLevels;delete b.unfinishedHigh;delete b.unfinishedLow;delete b.delta;delete b.deltaRatio;delete b.maxLevelVolume;}}renderFootprint();renderInspector();});
-window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=a.bars;live=true;analysisMeta=a;zones=a.zones||[];selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
+window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=a.bars;live=true;analysisMeta=a;const tf=Number(a.timeframeMinutes||Number(a.intervalMs)/60000);document.querySelectorAll('.timeframe-label').forEach(node=>{if(Number.isFinite(tf)&&tf>0)node.textContent=(tf>=60?(tf%60===0?tf/60+'ч':tf+'м'):tf+'м')+' · BROKER TICKS';});zones=a.zones||[];selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
 window.addEventListener('market-replay',e=>{
  const a=e.detail;if(!a?.bars?.length)return;
  replayMode=true;bars=a.bars;live=true;analysisMeta=a;zones=a.zones||[];selected=0;levels=currentLevels();hasAutoScrolled=false;
@@ -286,5 +334,6 @@ window.addEventListener('market-replay-step',e=>{if(replayMode)select(Number(e.d
 window.addEventListener('exit-replay',()=>{replayMode=false;});
 const initialStatus=$('#chartStatus');if(initialStatus&&!live){initialStatus.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';initialStatus.className='warning';}
 let resizeTimer=null;
-window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=window.setTimeout(()=>renderChart(),150);});
+window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=window.setTimeout(()=>{renderChart();renderFootprint();},150);});
+if(typeof ResizeObserver!=='undefined'){const footprintResizeObserver=new ResizeObserver(()=>renderFootprint());footprintResizeObserver.observe(grid);}
 renderZones();renderInspector();renderChart();renderFootprint();
