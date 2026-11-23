@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, appendFile, mkdir } from 'node:fs/promises';
+import { readFile, appendFile, mkdir, open } from 'node:fs/promises';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { runBacktest } from './backtest-engine.js';
 import { generateSignals, attachWalkForwardCalibration } from './strategy-engine.js';
@@ -18,6 +18,37 @@ const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
 const positive = n => Number.isFinite(n) && n > 0;
 const validTimestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
+
+// Read only the newest retained JSONL records. The old whole-file readFile()+split() path
+// built one giant JavaScript string from an append-only tick archive and could fail at startup
+// with RangeError: Invalid string length. Scan backwards in bounded byte chunks instead.
+async function readRecentLines(file, maxLines, chunkSize = 1024 * 1024) {
+  const handle = await open(file, 'r');
+  try {
+    let offset = (await handle.stat()).size;
+    let carry = Buffer.alloc(0);
+    const newestFirst = [];
+    while (offset > 0 && newestFirst.length < maxLines) {
+      const start = Math.max(0, offset - chunkSize);
+      const chunk = Buffer.alloc(offset - start);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
+      if (!bytesRead) break;
+      const combined = Buffer.concat([chunk.subarray(0, bytesRead), carry]);
+      let lineEnd = combined.length;
+      for (let index = combined.length - 1; index >= 0 && newestFirst.length < maxLines; index -= 1) {
+        if (combined[index] !== 10) continue;
+        if (lineEnd > index + 1) newestFirst.push(combined.subarray(index + 1, lineEnd));
+        lineEnd = index;
+      }
+      carry = combined.subarray(0, lineEnd);
+      offset = start;
+    }
+    if (offset === 0 && carry.length && newestFirst.length < maxLines) newestFirst.push(carry);
+    return newestFirst.reverse();
+  } finally {
+    await handle.close();
+  }
+}
 // GOLD-3Po is a gold-only workspace: broker XAUUSD (incl. suffix variants like XAUUSD./XAUUSD-ECN)
 // and COMEX GC futures (GC, GCZ6, …). Everything else is rejected at the ingest boundary.
 const isGoldSymbol = (source, symbol) => source === 'comex'
@@ -70,8 +101,11 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   const dedupeKey = (event, id) => `${event.source}:${event.symbol}:${id}`;
   const storageReady = dataFile ? (async () => {
     try {
-      const raw = await readFile(dataFile, 'utf8');
-      for (const line of raw.split('\n')) {
+      // Only the newest eventBufferCap records are useful to the rolling in-memory market
+      // window. The JSONL file may have grown for months, so never materialize the whole archive.
+      const recentLines = await readRecentLines(dataFile, eventBufferCap);
+      for (const rawLine of recentLines) {
+        const line = rawLine.toString('utf8');
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
@@ -88,7 +122,6 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
           }
         } catch {}
       }
-      if (events.length > eventBufferCap) events.splice(0, events.length - eventBufferCap);
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   })() : Promise.resolve();
   async function persistMany(storedEvents) { if (!dataFile || !storedEvents.length) return; await mkdir(dirname(dataFile), { recursive:true }); await appendFile(dataFile, storedEvents.map(event => JSON.stringify(event)).join('\n')+'\n'); }
