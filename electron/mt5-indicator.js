@@ -57,10 +57,11 @@ async function installMqlAsset({ source, terminalPath, terminalDataPath, folder,
 /** Idempotent patch of only the two GOLD-3Po-owned MQL5 assets. */
 export async function installIndicator({ source, bridgeSource, terminalPath, terminalDataPath }) {
   if (!source || !bridgeSource || !terminalPath || !terminalDataPath) throw new Error('Для автопатча нужны оба исходника GOLD-3Po и выбранный каталог данных MT5.');
-  const results = await Promise.all([
-    installMqlAsset({ source: bridgeSource, terminalPath, terminalDataPath, folder: 'Experts', name: 'Gold3PoBridge', kind: 'советник-мост' }),
-    installMqlAsset({ source, terminalPath, terminalDataPath, folder: 'Indicators', name: 'Gold3PoLevels', kind: 'индикатор уровней' })
-  ]);
+  const results = [];
+  // Use one MetaEditor process at a time; some terminal distributions serialize
+  // compilation through a shared editor/profile lock.
+  results.push(await installMqlAsset({ source: bridgeSource, terminalPath, terminalDataPath, folder: 'Experts', name: 'Gold3PoBridge', kind: 'советник-мост' }));
+  results.push(await installMqlAsset({ source, terminalPath, terminalDataPath, folder: 'Indicators', name: 'Gold3PoLevels', kind: 'индикатор уровней' }));
   const compiled = results.filter(item => item.status === 'compiled').length;
   const warning = results.filter(item => item.status !== 'compiled');
   return `Автопатч MT5 завершён: Gold3PoBridge (Experts) и Gold3PoLevels (Indicators); скомпилировано ${compiled}/2. ${warning.map(item => item.message).join(' ')}`;

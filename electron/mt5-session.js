@@ -102,10 +102,10 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     if (!(await response.json()).valid) await disconnect('Лицензия GOLD-3Po недействительна.');
   }
 
-  async function refreshLevels(owner, changed) {
+  async function refreshLevels(owner) {
     if (session !== owner) return;
     // Zone snapshots are throttled separately from the live tick poll and licence heartbeat.
-    if (owner.cachedZones && Date.now() - owner.levelAt < 4500 && !changed) return;
+    if (owner.cachedZones && Date.now() - owner.levelAt < 4500) return;
     if (!owner.cachedZones || Date.now() - owner.levelAt >= 4500) {
       const response = await fetchApi('/v1/chart/zones?' + new URLSearchParams({ symbol: owner.symbol }));
       if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
@@ -145,7 +145,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       }
       await refreshLicense(owner);
       if (session !== owner) return;
-      await refreshLevels(owner, owner.dirty);
+      await refreshLevels(owner);
       owner.failures = 0;
       const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'MT5 синхронизирован. График и футпринт получают одну ленту тиков.';
       set(owner, { state: 'online', lastTick: owner.lastTick ?? null, message: owner.historyNote ? `${online} ${owner.historyNote}` : online, queuedTicks: owner.pendingTicks.length });
