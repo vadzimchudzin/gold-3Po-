@@ -11,3 +11,10 @@ pnpm-workspace.yaml
 smoke-*.log
 
 tools/license-issued.jsonl
+
+# Licence generator: secrets and per-machine state never go to git
+tools/keygen/keygen-config.json
+tools/keygen/license-issued.csv
+**/GOLD3Po-Keygen.exe
+
+__pycache__/

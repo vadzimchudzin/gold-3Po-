@@ -23,6 +23,7 @@ on:
       - "backtest-engine.js"
       - "risk-engine.js"
       - "adapters/**"
+      - "tools/keygen/**"
   workflow_dispatch:
 
 permissions:
@@ -84,7 +85,7 @@ jobs:
           npm run dist:win
           if ($LASTEXITCODE -ne 0) { throw "Electron Windows installer build failed." }
 
-          $installer = Get-ChildItem -Path release -Filter "*.exe" | Select-Object -First 1
+          $installer = Get-ChildItem -Path release -Filter "GOLD-3Po-Setup*.exe" | Select-Object -First 1
           if (-not $installer) { throw "Electron setup executable was not created." }
           $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$($installer.FullName).sha256" -Value "$hash  $($installer.Name)" -Encoding ascii
@@ -98,11 +99,38 @@ jobs:
             "Tests: npm test and npm run check passed before packaging"
           ) | Set-Content -LiteralPath "release\BUILD-INFO.txt" -Encoding utf8
 
+      - name: Build the offline licence generator
+        shell: pwsh
+        run: |
+          python -m pip install --quiet cryptography pyinstaller
+          python -m unittest discover -s tools/keygen -p "test_*.py"
+          if ($LASTEXITCODE -ne 0) { throw "Licence generator tests failed." }
+
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name GOLD3Po-Keygen --paths tools/keygen --distpath release --workpath release/keygen-build --specpath release/keygen-spec tools/keygen/keygen.py
+          if (-not (Test-Path release/GOLD3Po-Keygen.exe)) { throw "Licence generator executable was not created." }
+
+          # Prove the packaged binary signs and verifies on its own, with a throwaway key: the vendor
+          # key is never present in CI, so a self-consistent round trip is what can be checked here.
+          $pemPath = Join-Path $env:RUNNER_TEMP "keygen-selftest-private.pem"
+          python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; from cryptography.hazmat.primitives import serialization; open(r'$pemPath','w').write(Ed25519PrivateKey.generate().private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode())"
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the throwaway key for the keygen smoke test." }
+          $reportPath = Join-Path $env:RUNNER_TEMP "keygen-selftest.json"
+          $proc = Start-Process -FilePath "release/GOLD3Po-Keygen.exe" -ArgumentList @("--selftest", $pemPath, $reportPath) -PassThru
+          if (-not $proc.WaitForExit(120000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "Licence generator smoke test timed out." }
+          if (-not (Test-Path $reportPath)) { throw "Licence generator produced no selftest report." }
+          $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+          if (-not $report.valid -or $report.tampered -ne "bad_signature" -or $report.other_machine -ne "wrong_machine") {
+            throw ("Licence generator smoke test failed: " + (Get-Content $reportPath -Raw))
+          }
+
+          $hash = (Get-FileHash -LiteralPath release/GOLD3Po-Keygen.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "release/GOLD3Po-Keygen.exe.sha256" -Value "$hash  GOLD3Po-Keygen.exe" -Encoding ascii
+
       - name: Install and smoke-test the packaged application
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $installer = Get-ChildItem -Path release -Filter "*.exe" | Select-Object -First 1
+          $installer = Get-ChildItem -Path release -Filter "GOLD-3Po-Setup*.exe" | Select-Object -First 1
           $installDir = Join-Path $env:RUNNER_TEMP "GOLD3Po-Electron-Smoke"
           New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
