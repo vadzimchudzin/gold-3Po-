@@ -147,7 +147,6 @@ $('#chartZoomReset')?.addEventListener('click',()=>{horizontalZoom=1;renderChart
 $('#chartPriceZoomOut')?.addEventListener('click',()=>changeVerticalZoom(verticalZoom/1.2));
 $('#chartPriceZoomIn')?.addEventListener('click',()=>changeVerticalZoom(verticalZoom*1.2));
 $('#chartPriceZoomReset')?.addEventListener('click',()=>changeVerticalZoom(1));
-window.addEventListener('resize',()=>{renderChart();renderFootprint();});
 function clearDeltaPane(){const svg=$('#deltaPane');if(svg)svg.innerHTML='';}
 // The pane shares the chart's scale, so a cluster and its cumulative delta always line up.
 function renderDeltaPane(scale){
@@ -180,8 +179,27 @@ function renderChart(){
  const min=range.min,max=range.max;
  const x=i=>left+step*(i+.5),y=p=>34+(max-p)/(max-min)*315,cw=Math.max(1,Math.min(26,step*.62));
  const rawStep=(max-min)/8,mag=10**Math.floor(Math.log10(rawStep)),gridStep=[1,2,2.5,5,10].map(m=>m*mag).find(v=>v>=rawStep);
- let html=''; for(let p=Math.ceil(min/gridStep)*gridStep;p<=max;p+=gridStep)html+=`<line x1="${left}" y1="${y(p)}" x2="${left+width}" y2="${y(p)}" class="grid-line"/><text x="${left+width+12}" y="${y(p)+4}" class="axis-label">${fmt(p,gridStep<1?2:gridStep<10?1:0)}</text>`;
- if(showZones)for(const z of zones){const top=y(z.high),h=Math.max(4,y(z.low)-y(z.high)),c=z.side==='buy'?'zone-buy':'zone-sell';html+=`<rect x="${left}" y="${top}" width="${width}" height="${h}" class="${c} ${selectedZone===z.id?'selected-zone':''}" opacity="${.08+z.strength*.2}"/><line x1="${left}" y1="${top}" x2="${left+width}" y2="${top}" class="${c}-edge"/>`;}
+ const ZONE_DASH={solid:'',dash:'8 5',dot:'2 4',dashdot:'8 4 2 4',dashdotdot:'8 4 2 4 2 4'};
+ const zs=(typeof window.gold3poZoneStyle==='function'&&window.gold3poZoneStyle())||{};
+ const zBuyCol=zs.buyColor&&zs.buyColor!=='#FF0000'?zs.buyColor:'#f45d5d';
+ const zSellCol=zs.sellColor&&zs.sellColor!=='#FF0000'?zs.sellColor:'#2ed3a7';
+ const zFillStyle=zs.fillStyle||'gradient';
+ const zBaseOp=clamp(Number(zs.fillOpacity??0.22),0.05,0.6);
+ const zDash=ZONE_DASH[zs.lineStyle||'solid']||'';
+ const zLineW=zs.lineStyle&&zs.lineStyle!=='solid'?1:clamp(Number(zs.lineWidth??1.5),1,4);
+ const zGlow=zs.glow!==false;
+ let html=`<defs><linearGradient id="zg-buy" x1="0" x2="1"><stop offset="0%" stop-color="${zBuyCol}" stop-opacity="${zBaseOp.toFixed(2)}"/><stop offset="100%" stop-color="${zBuyCol}" stop-opacity="${(zBaseOp*0.28).toFixed(2)}"/></linearGradient><linearGradient id="zg-sell" x1="0" x2="1"><stop offset="0%" stop-color="${zSellCol}" stop-opacity="${zBaseOp.toFixed(2)}"/><stop offset="100%" stop-color="${zSellCol}" stop-opacity="${(zBaseOp*0.28).toFixed(2)}"/></linearGradient><pattern id="zg-stripe" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="8" stroke="#ffffff" stroke-width="1.2" stroke-opacity=".28"/></pattern></defs>`;
+ for(let p=Math.ceil(min/gridStep)*gridStep;p<=max;p+=gridStep)html+=`<line x1="${left}" y1="${y(p)}" x2="${left+width}" y2="${y(p)}" class="grid-line"/><text x="${left+width+12}" y="${y(p)+4}" class="axis-label">${fmt(p,gridStep<1?2:gridStep<10?1:0)}</text>`;
+ if(showZones)for(const z of zones){
+  const top=y(z.high),bot=y(z.low),h=Math.max(4,bot-top),c=z.side==='buy'?'zone-buy':'zone-sell';
+  const col=z.side==='buy'?zBuyCol:zSellCol,gradId=z.side==='buy'?'zg-buy':'zg-sell';
+  const op=clamp(zBaseOp*(0.65+Number(z.strength||0.5)*0.7),0.06,0.75);
+  const fillAttr=zFillStyle==='outline'?'none':zFillStyle==='gradient'?`url(#${gradId})`:col;
+  const fillOp=zFillStyle==='outline'?0:zFillStyle==='gradient'?1:op;
+  const isSel=selectedZone===z.id,isHov=hoveredZone===z.id;
+  const lbl=zs.showLabels!==false?`<text x="${left+width-8}" y="${top-4}" text-anchor="end" class="zone-chart-label" fill="${col}">${zoneLabelText(z.label)}${zs.showStrength!==false?' · '+Math.round((z.strength||0)*100)+'%':''}</text>`:'';
+  html+=`<g class="chart-zone ${c} ${isSel?'selected-zone':''} ${isHov?'is-hovered':''} ${zGlow?'has-glow':''}" data-zone-id="${z.id}" style="--zone-color:${col}"><rect x="${left}" y="${top}" width="${width}" height="${h}" class="zone-body ${c}" fill="${fillAttr}" fill-opacity="${fillOp.toFixed(3)}"/>${zFillStyle==='stripe'?`<rect x="${left}" y="${top}" width="${width}" height="${h}" class="zone-stripe" fill="url(#zg-stripe)" opacity="${Math.min(0.9,op*1.8).toFixed(2)}"/>`:''}<line x1="${left}" y1="${top}" x2="${left+width}" y2="${top}" class="zone-edge ${c}-edge" stroke="${col}" stroke-width="${zLineW}" ${zDash?`stroke-dasharray="${zDash}"`:''}/><line x1="${left}" y1="${top+h}" x2="${left+width}" y2="${top+h}" class="zone-edge-bot" stroke="${col}" stroke-width="${Math.max(1,zLineW-0.5)}" stroke-opacity=".55" ${zDash?`stroke-dasharray="${zDash}"`:''}/>${lbl}</g>`;
+ }
  const multiDay=(Date.parse(bars.at(-1).time)-Date.parse(bars[0].time))>86400000;
  const labelStep=Math.max(1,Math.ceil(bars.length/Math.max(2,Math.floor(width/92))));
  const axisLabel=b=>!multiDay?timeLabel(b.time,{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})
@@ -191,18 +209,53 @@ function renderChart(){
  if(i%labelStep===0)html+=`<text x="${cx}" y="378" text-anchor="middle" class="time-label">${axisLabel(b)}</text>`;});
  const last=bars.at(-1),py=y(last.c);html+=`<line x1="${left}" y1="${py}" x2="${left+width}" y2="${py}" class="last-price-line"/><rect x="${left+width-2}" y="${py-11}" width="70" height="22" rx="5" class="last-price-tag"/><text x="${left+width+33}" y="${py+4}" text-anchor="middle" class="last-price-text">${fmt(last.c)}</text>`;
  chart.setAttribute('viewBox',`0 0 ${svgWidth} 390`);chart.style.width=svgWidth+'px';chart.innerHTML=html;
+ chart.classList.toggle('zone-hovering',!!hoveredZone);
  renderDeltaPane(scale);
  updateChartZoomControls();
- chart.querySelectorAll('.candle').forEach(n=>{const f=()=>{if(performance.now()<suppressChartClickUntil)return;select(Number(n.dataset.index));};n.addEventListener('click',f);n.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();f();}});});if(live&&!hasAutoScrolled){chartViewport.scrollLeft=chartViewport.scrollWidth;hasAutoScrolled=true;}
+ if(live&&!hasAutoScrolled){chartViewport.scrollLeft=chartViewport.scrollWidth;hasAutoScrolled=true;}
 }
+let hoveredZone=null;
+function setHoveredZone(id){
+ const next=id||null;
+ if(hoveredZone===next)return;
+ hoveredZone=next;
+ chart.classList.toggle('zone-hovering',!!next);
+ chart.querySelectorAll('.chart-zone').forEach(node=>node.classList.toggle('is-hovered',!!next&&node.dataset.zoneId===next));
+ zoneList.querySelectorAll('.zone-row').forEach(node=>node.classList.toggle('is-hovered',!!next&&node.dataset.zone===next));
+}
+chart.addEventListener('click',event=>{
+ if(performance.now()<suppressChartClickUntil)return;
+ const node=event.target.closest('.candle[data-index]');
+ if(node&&chart.contains(node))select(Number(node.dataset.index));
+});
+chart.addEventListener('keydown',event=>{
+ if(event.key!=='Enter'&&event.key!==' ')return;
+ const node=event.target.closest('.candle[data-index]');
+ if(node&&chart.contains(node)){event.preventDefault();select(Number(node.dataset.index));}
+});
+zoneList.addEventListener('pointerover',event=>{
+ const row=event.target.closest('.zone-row[data-zone]');
+ if(row&&zoneList.contains(row))setHoveredZone(row.dataset.zone);
+});
+zoneList.addEventListener('pointerleave',()=>setHoveredZone(null));
+zoneList.addEventListener('focusin',event=>{
+ const row=event.target.closest('.zone-row[data-zone]');
+ if(row&&zoneList.contains(row))setHoveredZone(row.dataset.zone);
+});
+zoneList.addEventListener('focusout',()=>setHoveredZone(null));
+zoneList.addEventListener('click',event=>{
+ const n=event.target.closest('.zone-row[data-zone]');
+ if(!n||!zoneList.contains(n))return;
+ selectedZone=selectedZone===n.dataset.zone?null:n.dataset.zone;
+ renderZones();renderChart();
+});
 function renderZones(){
  const buyCount=zones.filter(z=>z.side==='buy').length,sellCount=zones.filter(z=>z.side==='sell').length;
  $('#zoneCount').textContent=String(zones.length).padStart(2,'0');$('#aboveZones').textContent=zonesWord(buyCount);$('#belowZones').textContent=zonesWord(sellCount);
  if(!zones.length){zoneList.innerHTML='<div class="zone-empty">Зон пока нет. Они появятся, когда загрузится история брокера.</div>';return;}
- zoneList.innerHTML=zones.map(z=>{const src=Array.isArray(z.sources)?z.sources.filter(Boolean):[];const reaction=z.reactions?.touches?`реакция ${z.reactions.respected}/${z.reactions.touches}`:'касаний не было';return `<button class="zone-row ${selectedZone===z.id?'selected':''}" data-zone="${z.id}" title="${src.map(zoneLabelText).join(', ')}"><span class="zone-side-dot ${z.side}"></span><span class="zone-info"><strong>${zoneLabelText(z.label)}</strong><small>${fmt(z.low)} — ${fmt(z.high)}</small><span class="zone-meter"><i class="${z.side}" style="width:${z.strength*100}%"></i></span></span><span class="zone-right"><b>${z.distance||''}</b><small>${zoneStateText(z.state)}</small><small class="zone-reaction">${reaction}${src.length?' · источников '+src.length:''}</small></span></button>`;}).join('');
+ zoneList.innerHTML=zones.map(z=>{const src=Array.isArray(z.sources)?z.sources.filter(Boolean):[];const reaction=z.reactions?.touches?`реакция ${z.reactions.respected}/${z.reactions.touches}`:'касаний не было';return `<button class="zone-row ${selectedZone===z.id?'selected':''} ${hoveredZone===z.id?'is-hovered':''}" data-zone="${z.id}" title="${src.map(zoneLabelText).join(', ')}"><span class="zone-side-dot ${z.side}"></span><span class="zone-info"><strong>${zoneLabelText(z.label)}</strong><small>${fmt(z.low)} — ${fmt(z.high)}</small><span class="zone-meter"><i class="${z.side}" style="width:${z.strength*100}%"></i></span></span><span class="zone-right"><b>${z.distance||''}</b><small>${zoneStateText(z.state)}</small><small class="zone-reaction">${reaction}${src.length?' · источников '+src.length:''}</small></span></button>`;}).join('');
  const stats=$('#zoneStats');
  if(stats){const touches=zones.reduce((n,z)=>n+(z.reactions?.touches||0),0),kept=zones.reduce((n,z)=>n+(z.reactions?.respected||0),0);stats.textContent=touches?`История: ${kept} удержаний из ${touches} касаний · та же история, что и расчёт`:'Проверять пока нечего: в истории нет касаний этих уровней';}
- zoneList.querySelectorAll('button').forEach(n=>n.addEventListener('click',()=>{selectedZone=selectedZone===n.dataset.zone?null:n.dataset.zone;renderZones();renderChart();}));
 }
 const near=(a,b,t=1e-6)=>Math.abs(Number(a)-Number(b))<t;
 // One row of one bar: real per-price volume only. A bar without a level map shows nothing
@@ -498,6 +551,12 @@ $('#footZoomYOut')?.addEventListener('click',()=>changeFootprintZoom('y',footpri
 $('#footZoomYIn')?.addEventListener('click',()=>changeFootprintZoom('y',footprintZoomY*1.25));
 $('#footZoomYReset')?.addEventListener('click',()=>changeFootprintZoom('y',1));
 $('#footZoomFit')?.addEventListener('click',()=>fitFootprintOverview());
+$('#footRefresh')?.addEventListener('click',()=>{
+ lastFootprintAutoAt=Date.now();
+ renderFootprint();
+ if(selected===bars.length-1)renderInspector();
+ notify('Футпринт обновлён');
+});
 grid.addEventListener('wheel',event=>{
  const factor=event.deltaY<0?1.15:1/1.15;
  if(event.altKey){event.preventDefault();changeFootprintZoom('both',{x:footprintZoomX*factor,y:footprintZoomY*factor});}
@@ -543,11 +602,24 @@ panelResizer?.addEventListener('keydown',event=>{
 applyWorkspaceLayout();
 // A streamed tick updates the forming bar in place: the last footprint column and the last
 // candle move between authoritative refetches instead of waiting for the next 1.5 s poll.
-let liveFrame=0,liveRenderedAt=0,lastLiveTick=null,liveRuleBid=null,liveRuleAsk=null,liveRuleSide=null;
+const FOOTPRINT_REFRESH_MS=10000;
+let liveFrame=0,liveRenderedAt=0,lastFootprintAutoAt=0,lastLiveTick=null,liveRuleBid=null,liveRuleAsk=null,liveRuleSide=null;
 function scheduleLiveRender(){
  if(liveFrame)return;
- const wait=Math.max(0,180-(performance.now()-liveRenderedAt));
- liveFrame=setTimeout(()=>{liveFrame=0;liveRenderedAt=performance.now();renderChart();if(!patchLiveFootprint())renderFootprint();if(selected===bars.length-1)renderInspector();},wait);
+ const wait=Math.max(0,350-(performance.now()-liveRenderedAt));
+ liveFrame=setTimeout(()=>{
+  liveFrame=0;
+  liveRenderedAt=performance.now();
+  renderChart();
+  if(selected===bars.length-1)renderInspector();
+  // Refresh the footprint at most once every 10 seconds in the background (or instantly via #footRefresh),
+  // eliminating DOM/layout stutter during active gold sessions.
+  const nowMs=Date.now();
+  if(nowMs-lastFootprintAutoAt>=FOOTPRINT_REFRESH_MS){
+   lastFootprintAutoAt=nowMs;
+   if(!patchLiveFootprint())renderFootprint();
+  }
+ },wait);
 }
 function applyLiveTick(event){
  if(replayMode||!bars.length||!event)return;
@@ -562,6 +634,7 @@ function applyLiveTick(event){
   fresh.levelMap=new Map();
   bars.push(fresh);
   if(selected===bars.length-2)selected=bars.length-1;
+  window.dispatchEvent(new CustomEvent('market-bar-close'));
  }else if(!bars.at(-1).levelMap&&Array.isArray(bars.at(-1).levels)){
   bars.at(-1).levelMap=new Map(bars.at(-1).levels.map(row=>[Number(row.price).toFixed(8),{...row}]));
  }
@@ -605,7 +678,7 @@ function mergeLiveBars(analysis){
 window.addEventListener('market-tick',e=>applyLiveTick(e.detail));
 // Footprint settings changed: re-render with the new options. Bars served before the change carry
 // the old marks, so drop their cached footprint fields and recompute them from the level maps.
-window.addEventListener('gold3po-settings',()=>{for(const b of bars){if(Array.isArray(b.levels)&&b.poc!==undefined){delete b.poc;delete b.valueArea;delete b.imbalances;delete b.stackedImbalances;delete b.absorbedLevels;delete b.unfinishedHigh;delete b.unfinishedLow;delete b.delta;delete b.deltaRatio;delete b.maxLevelVolume;}}renderFootprint();renderInspector();});
+window.addEventListener('gold3po-settings',()=>{for(const b of bars){if(Array.isArray(b.levels)&&b.poc!==undefined){delete b.poc;delete b.valueArea;delete b.imbalances;delete b.stackedImbalances;delete b.absorbedLevels;delete b.unfinishedHigh;delete b.unfinishedLow;delete b.delta;delete b.deltaRatio;delete b.maxLevelVolume;}}renderChart();lastFootprintAutoAt=Date.now();renderFootprint();renderInspector();});
 window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=mergeLiveBars(a);live=true;analysisMeta=a;const tf=Number(a.timeframeMinutes||Number(a.intervalMs)/60000);document.querySelectorAll('.timeframe-label').forEach(node=>{if(Number.isFinite(tf)&&tf>0){const caption=tf>=60?(tf%60===0?tf/60+'ч':tf+'м'):tf+'м';node.textContent=caption+(node.classList.contains('footprint-timeframe')?' · ЕДИНЫЙ ТФ':' · ТИКИ БРОКЕРА');}});zones=a.zones||[];selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
 window.addEventListener('market-replay',e=>{
  const a=e.detail;if(!a?.bars?.length)return;
@@ -627,14 +700,19 @@ window.addEventListener('market-feed-clear',()=>{
  renderZones();renderInspector();renderChart();renderFootprint();
 });
 const initialStatus=$('#chartStatus');if(initialStatus&&!live){initialStatus.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';initialStatus.className='warning';}
-let resizeTimer=null;
-window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=window.setTimeout(()=>{renderChart();renderFootprint();},150);});
+let resizeTimer=null,roTimer=null,lastChartW=0,lastGridW=0;
+window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=window.setTimeout(()=>{renderChart();renderFootprint();},180);});
 if(typeof ResizeObserver!=='undefined'){
  const workspaceResizeObserver=new ResizeObserver(entries=>{
+  let chartChanged=false,gridChanged=false;
   for(const entry of entries){
-   if(entry.target===chartViewport)renderChart();
-   if(entry.target===grid)renderFootprint();
+   const w=Math.round(entry.contentRect.width);
+   if(entry.target===chartViewport&&w!==lastChartW){lastChartW=w;chartChanged=true;}
+   if(entry.target===grid&&w!==lastGridW){lastGridW=w;gridChanged=true;}
   }
+  if(!chartChanged&&!gridChanged)return;
+  clearTimeout(roTimer);
+  roTimer=window.setTimeout(()=>{if(chartChanged)renderChart();if(gridChanged)renderFootprint();},180);
  });
  workspaceResizeObserver.observe(chartViewport);
  workspaceResizeObserver.observe(grid);

@@ -3,7 +3,13 @@
 const $ = id => document.getElementById(id);
 const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true, strongOnly: false },
   footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1, autoStep: true },
-  mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark' } };
+  mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, fillStyle: 'gradient', fillOpacity: 0.22, glow: true, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark' } };
+const ZONE_STYLE_PRESETS = {
+  classic:  { buyColor: '#F45D5D', sellColor: '#2ED3A7', lineStyle: 'solid', lineWidth: 2, fill: true,  fillStyle: 'gradient', fillOpacity: 0.22, glow: true,  showLabels: true,  showStrength: true },
+  neon:     { buyColor: '#FF4D8D', sellColor: '#00F5D4', lineStyle: 'solid', lineWidth: 2, fill: true,  fillStyle: 'solid',    fillOpacity: 0.26, glow: true,  showLabels: true,  showStrength: true },
+  terminal: { buyColor: '#FFC799', sellColor: '#60A5FA', lineStyle: 'dash',  lineWidth: 1, fill: true,  fillStyle: 'stripe',   fillOpacity: 0.24, glow: true,  showLabels: true,  showStrength: false },
+  minimal:  { buyColor: '#EF4444', sellColor: '#22C55E', lineStyle: 'dot',   lineWidth: 1, fill: false, fillStyle: 'outline',  fillOpacity: 0.10, glow: false, showLabels: false, showStrength: false }
+};
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
 const TF_LABEL = { 5: '5m', 15: '15m', 30: '30m', 60: '1h', 240: '4h' };
 const DASH = { solid: '', dash: '10 6', dot: '2 5', dashdot: '10 5 2 5' };
@@ -25,13 +31,22 @@ function setToggle(id, on) { const el = $(id); if (!el) return; el.classList.tog
 function preview() {
   const svg = $('stylePreview'); if (!svg) return;
   const m = settings.mt5, w = m.lineStyle === 'solid' ? m.lineWidth : 1;
-  const zone = (y1, y2, color, text) => `${m.fill ? `<rect x="0" y="${y1}" width="320" height="${y2 - y1}" fill="${color}" opacity=".18"/>` : ''}`
-    + `<line x1="0" x2="320" y1="${y1}" y2="${y1}" stroke="${color}" stroke-width="${w}" stroke-dasharray="${DASH[m.lineStyle]}"/>`
-    + `<line x1="0" x2="320" y1="${y2}" y2="${y2}" stroke="${color}" stroke-width="${w}" stroke-dasharray="${DASH[m.lineStyle]}"/>`
-    + (m.showLabels ? `<text x="314" y="${y1 - 4}" text-anchor="end" fill="${color}" font-size="9">${text}${m.showStrength ? ' | 72%' : ''}</text>` : '');
+  const op = Number(m.fillOpacity ?? 0.22);
+  const style = m.fillStyle || 'gradient';
+  const defs = `<defs><linearGradient id="prevBuyGrad" x1="0" x2="1"><stop offset="0%" stop-color="${m.buyColor}" stop-opacity="${op}"/><stop offset="100%" stop-color="${m.buyColor}" stop-opacity="${(op * 0.25).toFixed(2)}"/></linearGradient><linearGradient id="prevSellGrad" x1="0" x2="1"><stop offset="0%" stop-color="${m.sellColor}" stop-opacity="${op}"/><stop offset="100%" stop-color="${m.sellColor}" stop-opacity="${(op * 0.25).toFixed(2)}"/></linearGradient><pattern id="prevStripe" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="currentColor" stroke-width="1.5" stroke-opacity=".4"/></pattern></defs>`;
+  const zone = (y1, y2, color, gradId, text) => {
+    const showFill = style !== 'outline' && (m.fill || style === 'gradient' || style === 'stripe');
+    const fillAttr = style === 'gradient' ? `url(#${gradId})` : color;
+    const fillOp = style === 'gradient' ? 1 : op;
+    return `${showFill ? `<rect x="0" y="${y1}" width="320" height="${y2 - y1}" fill="${fillAttr}" opacity="${fillOp}"/>` : ''}`
+      + `${style === 'stripe' ? `<rect x="0" y="${y1}" width="320" height="${y2 - y1}" fill="url(#prevStripe)" opacity="${Math.min(1, op * 2)}"/>` : ''}`
+      + `<line x1="0" x2="320" y1="${y1}" y2="${y1}" stroke="${color}" stroke-width="${w}" stroke-dasharray="${DASH[m.lineStyle]}"/>`
+      + `<line x1="0" x2="320" y1="${y2}" y2="${y2}" stroke="${color}" stroke-width="${w}" stroke-dasharray="${DASH[m.lineStyle]}"/>`
+      + (m.showLabels ? `<text x="314" y="${y1 - 4}" text-anchor="end" fill="${color}" font-size="9">${text}${m.showStrength ? ' | 72%' : ''}</text>` : '');
+  };
   const candles = [[40, 46, 62], [70, 52, 70], [100, 44, 58], [130, 50, 66], [160, 40, 54], [190, 47, 60], [220, 42, 57], [250, 49, 63]]
     .map(([x, a, b], i) => `<line x1="${x}" x2="${x}" y1="${a - 6}" y2="${b + 6}" stroke="currentColor" opacity=".35"/><rect x="${x - 5}" y="${a}" width="10" height="${b - a}" rx="1.5" fill="${i % 2 ? 'var(--red)' : 'var(--cyan)'}" opacity=".75"/>`).join('');
-  svg.innerHTML = zone(18, 26, m.buyColor, 'Повторный максимум · ПРОВЕРЕНА') + candles + zone(80, 88, m.sellColor, 'Повторный минимум · НЕ ПРОВЕРЕНА');
+  svg.innerHTML = defs + zone(18, 28, m.buyColor, 'prevBuyGrad', 'Повторный максимум · ПРОВЕРЕНА') + candles + zone(76, 86, m.sellColor, 'prevSellGrad', 'Повторный минимум · НЕ ПРОВЕРЕНА');
 }
 
 function render() {
@@ -58,12 +73,15 @@ function render() {
   setSeg('setTimeframe', z.timeframeMinutes);
   set('setBuyColor', m.buyColor.toLowerCase()); set('setSellColor', m.sellColor.toLowerCase());
   setSeg('setLineStyle', m.lineStyle);
+  setSeg('setFillStyle', m.fillStyle || 'gradient');
+  set('setFillOpacity', Math.round((m.fillOpacity ?? 0.22) * 100));
+  $('fillOpacityValue') && ($('fillOpacityValue').textContent = `${Math.round((m.fillOpacity ?? 0.22) * 100)}%`);
   set('setLineWidth', m.lineWidth);
   if ($('setLineWidth')) $('setLineWidth').disabled = m.lineStyle !== 'solid';
   $('lineWidthValue') && ($('lineWidthValue').textContent = String(m.lineWidth));
   $('lineWidthNote') && ($('lineWidthNote').hidden = m.lineStyle === 'solid');
   document.querySelectorAll('.swatches').forEach(box => box.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.color === m[box.dataset.for === 'setBuyColor' ? 'buyColor' : 'sellColor'])));
-  setToggle('setFill', m.fill); setToggle('setLabels', m.showLabels); setToggle('setStrength', m.showStrength); setToggle('setZonesVisible', m.zonesVisible !== false);
+  setToggle('setFill', m.fill); setToggle('setGlow', m.glow !== false); setToggle('setLabels', m.showLabels); setToggle('setStrength', m.showStrength); setToggle('setZonesVisible', m.zonesVisible !== false);
   setToggle('setSrcDay', z.usePriorDay); setToggle('setSrcSessions', z.useSessions); setToggle('setSrcWeek', z.useWeek); setToggle('setSrcTf', z.useHigherTf); setToggle('setSrcVolume', z.useVolume); setToggle('setStrongOnly', z.strongOnly);
   const strongBtn = $('strongZonesToggle');
   if (strongBtn) { strongBtn.setAttribute('aria-pressed', String(!!z.strongOnly)); strongBtn.classList.toggle('is-active', !!z.strongOnly); }
@@ -76,6 +94,7 @@ function render() {
 
 function publish(changedZones) {
   window.gold3poSettings = settings;
+  window.gold3poZoneStyle = () => ({ ...DEFAULTS.mt5, ...(settings.mt5 || {}) });
   window.dispatchEvent(new CustomEvent('gold3po-settings', { detail: { settings, zonesChanged: changedZones } }));
 }
 
@@ -106,6 +125,7 @@ function change(section, key, value) {
   if (section === 'ui' && key === 'theme') theme(value);
   (pending[section] ||= {})[key] = value;
   render();
+  if (section === 'mt5') publish(false);
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, 350);
 }
@@ -136,11 +156,20 @@ function bind() {
     change('footprint', key, cast(e.target.value));
   });
   $('setLineWidth')?.addEventListener('input', e => change('mt5', 'lineWidth', Number(e.target.value)));
+  $('setFillOpacity')?.addEventListener('input', e => change('mt5', 'fillOpacity', Number(e.target.value) / 100));
   $('setBuyColor')?.addEventListener('input', e => change('mt5', 'buyColor', e.target.value.toUpperCase()));
   $('setSellColor')?.addEventListener('input', e => change('mt5', 'sellColor', e.target.value.toUpperCase()));
-  const segs = { setTimeframe: ['zones', 'timeframeMinutes', Number], setLineStyle: ['mt5', 'lineStyle', String], setTheme: ['ui', 'theme', String] };
+  const segs = { setTimeframe: ['zones', 'timeframeMinutes', Number], setLineStyle: ['mt5', 'lineStyle', String], setFillStyle: ['mt5', 'fillStyle', String], setTheme: ['ui', 'theme', String] };
   for (const [id, [section, key, cast]] of Object.entries(segs)) $(id)?.addEventListener('click', e => { const b = e.target.closest('button[data-value]'); if (b) change(section, key, cast(b.dataset.value)); });
-  const toggles = { setFill: 'fill', setLabels: 'showLabels', setStrength: 'showStrength', setZonesVisible: 'zonesVisible' };
+  const toggles = { setFill: 'fill', setGlow: 'glow', setLabels: 'showLabels', setStrength: 'showStrength', setZonesVisible: 'zonesVisible' };
+  $('zoneStylePresets')?.addEventListener('click', e => {
+    const b = e.target.closest('button[data-preset]'); if (!b) return;
+    const preset = ZONE_STYLE_PRESETS[b.dataset.preset]; if (!preset) return;
+    settings = { ...settings, mt5: { ...settings.mt5, ...preset } };
+    pending.mt5 = { ...(pending.mt5 || {}), ...preset };
+    render(); publish(false);
+    clearTimeout(saveTimer); saveTimer = setTimeout(save, 250);
+  });
   for (const [id, key] of Object.entries(toggles)) $(id)?.addEventListener('click', () => {
     const next = !settings.mt5[key];
     change('mt5', key, next);

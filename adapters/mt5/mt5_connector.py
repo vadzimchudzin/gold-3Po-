@@ -18,7 +18,7 @@ from importlib import import_module
 
 MAX_LINE = 16 * 1024
 MT5_TIMEOUT_MS = 15_000
-POLL_LIMIT = 1_000
+POLL_LIMIT = 4_000
 MAX_SECOND_OFFSET = 8_192
 # A live cursor that stays empty while the terminal shows a newer quote is a broken stream, not a
 # quiet market: report it after this many seconds instead of polling nothing forever.
@@ -30,9 +30,9 @@ TICK_FLAG_LAST = 8
 TICK_FLAG_BUY = 32
 TICK_FLAG_SELL = 64
 HISTORY_LIMIT = 100_000
-HISTORY_LOOKBACK = 8 * 60 * 60
+HISTORY_LOOKBACK = 24 * 60 * 60
 HISTORY_WINDOW = 30 * 60
-HISTORY_MAX_READS = 48
+HISTORY_MAX_READS = 64
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -457,12 +457,30 @@ class Worker:
                 break
         self.require_session()
         if not ticks:
-            # An empty read is not "a quiet market" when the terminal itself carries a newer quote: the
-            # cursor and the terminal disagree, and every later poll would keep returning nothing while
-            # the window shows an archive as if it were live. Say it instead of staying silent.
+            # An empty read is not "a quiet market" when the terminal itself carries a newer quote:
+            # first retry from start + 1 in case MT5 stalled on the boundary second; only fail if
+            # the terminal still returns nothing despite a newer quote.
             latest = self.api.symbol_info_tick(symbol)
             latest_ms = (latest.time_msc or latest.time * 1000) if latest is not None else 0
             if latest_ms // 1000 > start + TICK_STALL_SECONDS:
+                retry_rows = self.read_ticks(symbol, start + 1, POLL_LIMIT)
+                r_second, r_seen = start + 1, 0
+                for row in retry_rows:
+                    stamp = milliseconds(row)
+                    row_second = stamp // 1000
+                    if row_second < start + 1:
+                        continue
+                    if row_second != r_second:
+                        r_second, r_seen = row_second, 0
+                    r_seen += 1
+                    tick = encode_tick(row, stamp, self.chart_mode)
+                    if tick is not None:
+                        ticks.append(tick)
+                    if len(ticks) == POLL_LIMIT:
+                        break
+                if ticks:
+                    self.cursor = (r_second, r_seen)
+                    return {"connected": True, "ticks": ticks}
                 stamp = (EPOCH + timedelta(milliseconds=latest_ms)).isoformat(timespec="seconds").replace("+00:00", "Z")
                 raise WorkerError("tick_stream_missing",
                     f"Терминал отдаёт котировки (последний тик {stamp}), но чтение тиков от курсора возвращает пусто. Переподключите MT5 в приложении.")

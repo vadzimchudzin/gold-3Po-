@@ -206,11 +206,23 @@ try {
   const liveTick = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2649.1, ask: 2649.3, last: 2649.2, tickVolume: 9, realVolume: 0, flags: 32 };
   const liveResponse = await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({...liveTick,feedId:browserFeedId}) });
   assert.equal(liveResponse.status, 202, 'a live tick must be accepted');
+  // Footprint refreshes on a 10s cadence to eliminate lag; #footRefresh triggers an immediate refresh.
+  await page.waitForTimeout(450);
+  await page.locator('#footRefresh').click();
   try {
     await page.waitForFunction(before => [...document.querySelectorAll('.foot-cell.foot-forming')]
       .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0) > before, beforeTick, { timeout: 5000 });
   } catch (error) {
     throw new Error('a streamed tick never reached the forming bar: ' + error.message + ' · page errors: ' + (pageErrors.join(' | ') || 'none'));
+  }
+  // Hovering a zone card in the sidebar must glow the matching zone band on the chart without rebuilding SVG.
+  const firstZoneRow = page.locator('.zone-row[data-zone]').first();
+  if (await firstZoneRow.count()) {
+    const zId = await firstZoneRow.getAttribute('data-zone');
+    await firstZoneRow.hover();
+    const hovered = await page.evaluate(id => document.querySelector(`#priceChart .chart-zone[data-zone-id="${id}"]`)?.classList.contains('is-hovered'), zId);
+    assert.equal(hovered, true, 'hovering a sidebar zone card must highlight its matching chart zone');
+    await page.mouse.move(10, 10);
   }
   assert.ok(await formingVolume() >= beforeTick + 9, 'the forming bar must absorb the tick volume immediately');
   assert.ok(await page.locator('.foot-cell.foot-forming').count() > 0, 'the forming column survives the tick');
@@ -533,9 +545,13 @@ try {
   const specTick = { timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2700.42, ask: 2700.44, last: 2700.41, tickVolume: 1, realVolume: 0, flags: 0 };
   const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId: browserFeedId, spec: { tickSize: 0.01 }, ticks: [specTick] }) });
   assert.equal(specResponse.status, 202, 'a live batch with the broker tick size is accepted');
+  await page.waitForTimeout(300);
+  await page.locator('#footRefresh').click();
   await page.waitForFunction(() => document.querySelectorAll('#footprintGrid .price-level').length && [...document.querySelectorAll('#footprintGrid .price-level')].some(node => /2[\s\u00a0]?700,41/.test(node.textContent)), null, { timeout: 8000 });
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2700.43, aggressorSide: 'buy', tickVolume: 2, realVolume: 0 } })));
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(300);
+  await page.locator('#footRefresh').click();
+  await page.waitForTimeout(400);
   const liveRows = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .price-level')].map(node => node.textContent.replace(/[\s\u00a0]/g, '')));
   assert.ok(liveRows.includes('2700,43'), 'the forming bar must keep 2700.43 on the broker 0.01 grid, rows: ' + liveRows.join(' '));
   assert.ok(!liveRows.includes('2700,40'), 'the live tick must not be rounded onto the 0.1 grid');
