@@ -1,4 +1,4 @@
-"""Read-only MetaTrader 5 worker. UTF-8 NDJSON in/out; credentials in stdin only.
+"""Read-only MetaTrader 5 worker. UTF-8 NDJSON in/out; attaches to an already-authorized terminal only.
 
 Run with Windows Python and the official MetaTrader5 module. The parent owns
 HTTP delivery, sequencing and the watchdog (native tick reads have no timeout
@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -145,6 +146,34 @@ def account_number(value):
     return value
 
 
+_SYMBOL_INFO_NOT_READ = object()
+_SYMBOL_INFO_FAILED = object()
+
+
+def symbol_spec(api, symbol, info=_SYMBOL_INFO_NOT_READ):
+    """The broker's own price grid for the symbol: (spec, None) or (None, reason).
+
+    The caller may pass the result of its existing symbol_info call so connection
+    setup does not query MT5 twice. The reason distinguishes a failed read, no
+    metadata, and an unusable tick grid.
+    """
+    if info is _SYMBOL_INFO_NOT_READ:
+        try:
+            info = api.symbol_info(symbol)
+        except Exception:
+            return None, "symbol_info_failed"
+    elif info is _SYMBOL_INFO_FAILED:
+        return None, "symbol_info_failed"
+    if info is None:
+        return None, "symbol_info_empty"
+    tick = getattr(info, "trade_tick_size", None)
+    point = getattr(info, "point", None)
+    size = tick if isinstance(tick, (int, float)) and tick > 0 else point
+    if not isinstance(size, (int, float)) or not (0 < size <= 100) or size != size:
+        return None, "tick_size_unusable"
+    return {"tickSize": float(size)}, None
+
+
 def milliseconds(row):
     try:
         return int(row["time_msc"]) or int(row["time"]) * 1000
@@ -178,9 +207,82 @@ def encode_tick(row, stamp, chart_mode=None):
     }
 
 
+def running_terminal_paths():
+    """Return paths of MT5 terminals that are already running for this Windows user."""
+    if os.name != "nt":
+        raise WorkerError("terminal_discovery_unsupported",
+                          "Автопоиск MetaTrader 5 доступен в Windows. Откройте MT5 и повторите подключение.")
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; "
+        "Get-CimInstance Win32_Process -Filter \"Name='terminal64.exe'\" | "
+        "Where-Object { $_.ExecutablePath } | ForEach-Object { $_.ExecutablePath }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=8, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    except Exception:
+        raise WorkerError("terminal_discovery_failed",
+                          "Не удалось найти запущенный MetaTrader 5. Откройте терминал и повторите.") from None
+    if result.returncode != 0:
+        raise WorkerError("terminal_discovery_failed",
+                          "Windows не смогла определить путь к запущенному MetaTrader 5.")
+    paths = []
+    for line in result.stdout.splitlines():
+        candidate = line.strip().strip('"')
+        if candidate and os.path.basename(candidate).casefold() == "terminal64.exe" and os.path.isfile(candidate):
+            paths.append(os.path.realpath(candidate))
+    return paths
+
+
+def choose_gold_symbol(api, requested=None):
+    """Choose an exact/visible broker gold symbol; never substitute a non-gold instrument."""
+    names = []
+    try:
+        symbols = api.symbols_get()
+    except Exception:
+        symbols = None
+    for item in symbols or ():
+        name = getattr(item, "name", "")
+        if isinstance(name, str) and re.fullmatch(r"(?:XAUUSD|GOLD)[A-Z0-9._#+-]{0,20}", name, re.IGNORECASE):
+            names.append((name, bool(getattr(item, "visible", False))))
+    unique = {name.casefold(): (name, visible) for name, visible in names}
+    candidates = list(unique.values())
+    if requested:
+        match = next((name for name, _ in candidates if name.casefold() == requested.casefold()), None)
+        if match:
+            return match
+    candidates.sort(key=lambda item: (
+        0 if item[1] else 1,
+        0 if item[0].upper() == "XAUUSD" else 1,
+        0 if item[0].upper().startswith("XAUUSD") else 1,
+        len(item[0]),
+        item[0].casefold()
+    ))
+    if candidates:
+        return candidates[0][0]
+    # Some older terminals only expose a symbol through symbol_info before it is in symbols_get().
+    fallbacks = [requested] if requested else []
+    fallbacks.extend(["XAUUSD", "GOLD"])
+    for candidate in fallbacks:
+        if candidate:
+            try:
+                if api.symbol_info(candidate) is not None:
+                    return candidate
+            except Exception:
+                pass
+    raise WorkerError("gold_symbol_not_found",
+                      "В авторизованном MT5 не найден XAUUSD или GOLD. Добавьте инструмент золота в «Обзор рынка».")
+
+
 class Worker:
-    def __init__(self, load_api=None):
+    def __init__(self, load_api=None, terminal_finder=None):
         self.load_api = load_api or (lambda: import_module("MetaTrader5"))
+        self.find_terminals = terminal_finder or running_terminal_paths
         self.api = None
         self.session = None
         self.chart_mode = None
@@ -209,13 +311,21 @@ class Worker:
 
     def connect(self, command):
         self.close()
-        terminal_path = text(command, "terminalPath", 4096, optional=True)
-        login = account_number(command.get("login"))
-        password = text(command, "password", 1024, strip=False)
-        server = text(command, "server", 256)
-        symbol = text(command, "symbol", 128)
-        if terminal_path and not os.path.isfile(terminal_path):
-            raise WorkerError("terminal_path_missing", "The MT5 terminal executable is not at that path. Choose terminal64.exe in the MT5 folder.")
+        requested_symbol = text(command, "symbol", 128, optional=True)
+        try:
+            paths = self.find_terminals()
+        except WorkerError:
+            raise
+        except Exception:
+            raise WorkerError("terminal_discovery_failed", "Не удалось найти уже запущенный MetaTrader 5.") from None
+        if not paths:
+            raise WorkerError("terminal_not_running", "Не найден запущенный MetaTrader 5. Откройте MT5, войдите в счёт обычным способом и повторите подключение.")
+        if len(paths) != 1:
+            raise WorkerError("multiple_terminal_instances",
+                              "Найдено несколько запущенных терминалов MT5. Оставьте открытым нужный терминал с авторизованным счётом и повторите подключение.")
+        terminal_path = paths[0]
+        if not isinstance(terminal_path, str) or os.path.basename(terminal_path).casefold() != "terminal64.exe":
+            raise WorkerError("terminal_path_invalid", "Windows вернула некорректный путь к terminal64.exe.")
         try:
             if self.api is None:
                 try:
@@ -223,50 +333,62 @@ class Worker:
                 except Exception:
                     raise WorkerError("mt5_module_unavailable", "The MetaTrader5 Python module could not load. Check the app's Windows Python runtime.") from None
             try:
-                initialized = self.api.initialize(*([terminal_path] if terminal_path else []), timeout=MT5_TIMEOUT_MS)
+                initialized = self.api.initialize(terminal_path, timeout=MT5_TIMEOUT_MS)
             except Exception:
                 initialized = False
             if not initialized:
                 hint = journal_hint()
-                raise mt5_error(self.api, "initialize_failed", "Could not attach to MT5." + (f" {hint}" if hint else
-                    " Open MT5 by hand, log in, wait for quotes, then connect again."))
-            if terminal_path:
-                terminal = self.api.terminal_info()
-                if terminal is None:
-                    raise mt5_error(self.api, "terminal_unavailable", "Cannot confirm the MT5 terminal installation.")
-                # terminal_info().path is the installation directory, not the exe.
-                actual = os.path.normcase(os.path.realpath(terminal.path))
-                expected = os.path.dirname(os.path.normcase(os.path.realpath(terminal_path)))
-                if actual != expected:
-                    raise WorkerError("terminal_mismatch", "MT5 attached to a different terminal installation. Check the terminal executable path.")
-            try:
-                authenticated = self.api.login(login, password=password, server=server, timeout=MT5_TIMEOUT_MS)
-            except Exception:
-                authenticated = False
-            if not authenticated:
-                raise mt5_error(self.api, "login_failed", "MT5 login failed. Check the account number, password, broker server and network connection.")
-
-            terminal = self.verify(login, server)
+                raise mt5_error(self.api, "initialize_failed", "Не удалось подключиться к уже открытому MT5." + (f" {hint}" if hint else
+                    " Проверьте, что терминал не закрыт и полностью загрузился. GOLD-3Po не будет выполнять вход в счёт самостоятельно."))
+            terminal = self.api.terminal_info()
+            if terminal is None:
+                raise mt5_error(self.api, "terminal_unavailable", "MT5 не подтвердил данные терминала.")
+            actual = os.path.normcase(os.path.realpath(terminal.path))
+            expected = os.path.dirname(os.path.normcase(os.path.realpath(terminal_path)))
+            if actual != expected:
+                raise WorkerError("terminal_mismatch", "MT5 подключил не тот запущенный терминал. Закройте лишние экземпляры и повторите.")
+            if not terminal.connected:
+                raise WorkerError("terminal_not_authorized", "Терминал MT5 открыт, но не подключён к брокеру. Сначала войдите в счёт в самом MT5.")
+            account = self.api.account_info()
+            if account is None or not getattr(account, "login", 0) or not getattr(account, "server", ""):
+                raise WorkerError("terminal_not_authorized", "В MT5 нет подтверждённого авторизованного счёта. Войдите в него в самом терминале.")
+            login = int(account.login)
+            server = plain(str(account.server), 128)
+            symbol = choose_gold_symbol(self.api, requested_symbol)
             if not self.api.symbol_select(symbol, True):
-                raise mt5_error(self.api, "symbol_select_failed", "MT5 could not select the symbol. Use the exact Market Watch name, including its broker suffix and letter case.")
-            symbol_info = self.api.symbol_info(symbol)
-            if symbol_info is None:
-                raise mt5_error(self.api, "symbol_info_failed", "MT5 could not read the selected symbol specification.")
-            chart_mode = getattr(symbol_info, "chart_mode", None)
+                raise mt5_error(self.api, "symbol_select_failed", "MT5 не смог выбрать найденный инструмент золота из «Обзора рынка».")
+            # The session can still stream broker quotes when MT5 does not expose
+            # symbol metadata. Keep the connection and report the missing tick grid
+            # separately through specUnavailable below.
+            try:
+                symbol_info = self.api.symbol_info(symbol)
+            except Exception:
+                symbol_info = _SYMBOL_INFO_FAILED
+            chart_mode = getattr(symbol_info, "chart_mode", None) if symbol_info not in (None, _SYMBOL_INFO_FAILED) else None
             self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else None
             for path in (terminal.commondata_path, terminal.data_path):
                 if not isinstance(path, str) or not path or len(path) > 4096:
                     raise WorkerError("terminal_paths_unavailable", "MT5 did not provide its terminal data directories.")
 
-            # Start at the latest broker second so quiet/closed markets and local
-            # clock differences do not prevent the first quote from being read.
+            # Attach to the account already authenticated inside MT5. No login() call
+            # is made, no account password is requested and the active account is not changed.
             latest = self.api.symbol_info_tick(symbol)
             latest_ms = (latest.time_msc or latest.time * 1000) if latest is not None else 0
             boundary = latest_ms // 1000 if latest_ms > 0 else int(datetime.now(timezone.utc).timestamp())
             self.verify(login, server)
             self.session = (login, server, symbol, boundary)
             self.cursor = (boundary, 0)
-            return {"symbol": symbol, "commonDataPath": terminal.commondata_path, "dataPath": terminal.data_path}
+            result = {
+                "symbol": symbol, "commonDataPath": terminal.commondata_path,
+                "dataPath": terminal.data_path, "terminalPath": terminal_path,
+                "accountLogin": str(login), "server": server
+            }
+            spec, missing = symbol_spec(self.api, symbol, symbol_info)
+            if spec:
+                result["spec"] = spec
+            else:
+                result["specUnavailable"] = missing
+            return result
         except Exception:
             self.close()
             raise

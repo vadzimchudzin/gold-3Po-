@@ -1,11 +1,12 @@
 #property strict
-#property version "2.10"
+#property version "2.20"
 #property description "GOLD-3Po RoboForex MT5 bridge: tick history, live quotes and live liquidity-zone drawing on the chart."
 
 input string HealthUrl = "http://127.0.0.1:8787/health";
 input string HistoryUrl = "http://127.0.0.1:8787/v1/ingest/mt5/history";
 input string LiveBatchUrl = "http://127.0.0.1:8787/v1/ingest/mt5/live-batch";
-input string IngestToken = "";
+input string IngestToken = "";          // Optional override; normally read from the app's Common Files token
+input bool AppConnectionFeedsLive = true; // The desktop connector owns recent/live ticks when connected
 input bool AppConnectionFeedsLive = true; // The desktop connector owns the recent/live feed when enabled.
 input int MinIntervalMs = 100;
 input int RequestTimeoutMs = 5000;
@@ -42,6 +43,7 @@ ulong historyRejectedTotal = 0;
 ulong nextZonesRefreshAt = 0;
 string zonesStatusText = "";
 int zonesDrawnCount = 0;
+string g_ingestToken = "";
 
 // Runtime state for the per-symbol lock, live retry queue and bounded history batches.
 string g_bridgeLockKey = "";
@@ -50,6 +52,36 @@ ulong g_nextBridgeLockRefreshAt = 0;
 ulong g_nextLiveRetryAt = 0;
 int g_liveFailures = 0;
 int g_effectiveHistoryBatchSize = 1000;
+
+bool ResolveIngestToken()
+{
+   // The current desktop-app token is authoritative. This deliberately overrides an
+   // older value saved in the EA's chart inputs after a GOLD-3Po reinstall/update.
+   const int handle = FileOpen("GOLD3PO\\bridge-token.txt", FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle != INVALID_HANDLE)
+   {
+      string sharedToken = FileReadString(handle);
+      FileClose(handle);
+      StringTrimLeft(sharedToken);
+      StringTrimRight(sharedToken);
+      if(StringLen(sharedToken) >= 24)
+      {
+         g_ingestToken = sharedToken;
+         return true;
+      }
+      Print("GOLD-3Po: shared bridge token is present but invalid; checking the explicit IngestToken override.");
+   }
+
+   // Explicit override is retained for a standalone EA connected to a remote API.
+   g_ingestToken = IngestToken;
+   StringTrimLeft(g_ingestToken);
+   StringTrimRight(g_ingestToken);
+   if(StringLen(g_ingestToken) >= 24)
+      return true;
+
+   Print("GOLD-3Po: bridge token is not available. Start GOLD-3Po or provide IngestToken for a standalone remote API.");
+   return false;
+}
 
 string TickStamp(const long timeMsc)
 {
@@ -68,7 +100,7 @@ int PostJson(const string url, const string body, string &response)
    if(copied > 0) ArrayResize(data, copied - 1);
    char result[];
    string responseHeaders;
-   string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + IngestToken + "\r\n";
+   string headers = "Content-Type: application/json\r\nAuthorization: Bearer " + g_ingestToken +"\r\n";
    int status = WebRequest("POST", url, headers, RequestTimeoutMs, data, result, responseHeaders);
    if(ArraySize(result) > 0) response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
    if(status < 200 || status >= 300)
@@ -116,7 +148,7 @@ bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong 
 void StartHistorySync()
 {
    int days = MathMax(1, MathMin(HistoryDays, 90));
-   historyEnd = TimeGMT();
+   historyEnd = TimeGMT() - (AppConnectionFeedsLive ? 8 * 60 * 60 : 0);
    // Avoid duplicating the recent window already supplied by the desktop connector.
    if(AppConnectionFeedsLive) historyEnd -= 8 * 60 * 60;
    historyCursor = historyEnd - days * 86400;
@@ -289,7 +321,7 @@ bool GetJson(const string url, string &response)
    ArrayResize(data, 0);
    char result[];
    string responseHeaders;
-   string headers = "Authorization: Bearer " + IngestToken + "\r\n";
+   string headers = "Authorization: Bearer " + g_ingestToken +"\r\n";
    ResetLastError();
    int status = WebRequest("GET", url, headers, RequestTimeoutMs, data, result, responseHeaders);
    if(status == 200)
@@ -626,11 +658,8 @@ bool CheckLocalApi()
 }
 int OnInit()
 {
-   if(StringLen(IngestToken) < 24)
-   {
-      Print("GOLD-3Po: IngestToken is missing or too short. Copy it from GOLD-3Po > Settings > Отрисовка в MT5 > Мост MT5.");
+   if(!ResolveIngestToken())
       return INIT_PARAMETERS_INCORRECT;
-   }
    if(!AcquireBridgeLock()) return INIT_FAILED;
    if(!CheckLocalApi())
    {

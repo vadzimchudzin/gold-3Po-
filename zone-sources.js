@@ -6,18 +6,18 @@ const finite = n => Number.isFinite(n);
 const timeOf = bar => Number.isFinite(Date.parse(bar?.time)) ? Date.parse(bar.time) : null;
 const HOUR = 3600_000;
 
+// Extremes of a filtered slice of candles. The indexes point into the original series (`__i`), not into
+// the slice, so a level's age and formation time come from the candle that actually set it.
 function extremes(bars) {
-  let high = -Infinity, low = Infinity, close = null, open = null, index = -1;
-  for (let i = 0; i < bars.length; i++) {
-    const b = bars[i];
+  let high = -Infinity, low = Infinity, close = null, open = null, highIndex = -1, lowIndex = -1, openIndex = -1;
+  for (const b of bars) {
     if (!finite(b.h) || !finite(b.l)) continue;
-    if (b.h > high) high = b.h;
-    if (b.l < low) low = b.l;
+    if (b.h > high) { high = b.h; highIndex = b.__i; }
+    if (b.l < low) { low = b.l; lowIndex = b.__i; }
     if (finite(b.c)) close = b.c;
-    if (open === null && finite(b.o)) open = b.o;
-    index = i;
+    if (open === null && finite(b.o)) { open = b.o; openIndex = b.__i; }
   }
-  return high > low ? { high, low, close, open, index } : null;
+  return high > low ? { high, low, close, open, highIndex, lowIndex, openIndex } : null;
 }
 
 function aggregated(bars, bucketMs) {
@@ -104,8 +104,8 @@ export function collectSourceLevels(bars, { priceStep = 0.1, use = {} } = {}) {
       const day = extremes(days.get(keys.at(-offset)) || []);
       if (!day) continue;
       const tag = offset === 2 ? 'Prior day' : 'Two days ago';
-      levels.push({ price: day.high, label: tag + ' high', source: 'day', weight, index: day.index });
-      levels.push({ price: day.low, label: tag + ' low', source: 'day', weight, index: day.index });
+      levels.push({ price: day.high, label: tag + ' high', source: 'day', weight, index: day.highIndex });
+      levels.push({ price: day.low, label: tag + ' low', source: 'day', weight, index: day.lowIndex });
     }
     const today = keys.at(-1);
     const sessions = [['Asia', 0, 7], ['London', 7, 12], ['New York', 12, 17]];
@@ -118,8 +118,8 @@ export function collectSourceLevels(bars, { priceStep = 0.1, use = {} } = {}) {
       });
       const session = extremes(sessionBars);
       if (!session) continue;
-      levels.push({ price: session.high, label: name + ' high', source: 'session', weight: 0.6, index: session.index });
-      levels.push({ price: session.low, label: name + ' low', source: 'session', weight: 0.6, index: session.index });
+      levels.push({ price: session.high, label: name + ' high', source: 'session', weight: 0.6, index: session.highIndex });
+      levels.push({ price: session.low, label: name + ' low', source: 'session', weight: 0.6, index: session.lowIndex });
     }
     // Week boundaries: Monday-based week open plus the previous week's extremes.
     const weeks = new Map();
@@ -133,11 +133,11 @@ export function collectSourceLevels(bars, { priceStep = 0.1, use = {} } = {}) {
     }
     const weekKeys = [...weeks.keys()].sort();
     const currentWeek = extremes(weeks.get(weekKeys.at(-1)) || []);
-    if (allowed.week && currentWeek && finite(currentWeek.open)) levels.push({ price: currentWeek.open, label: 'Weekly open', source: 'week', weight: 0.5, index: currentWeek.index });
+    if (allowed.week && currentWeek && finite(currentWeek.open)) levels.push({ price: currentWeek.open, label: 'Weekly open', source: 'week', weight: 0.5, index: currentWeek.openIndex });
     const previousWeek = extremes(weeks.get(weekKeys.at(-2)) || []);
     if (allowed.week && previousWeek) {
-      levels.push({ price: previousWeek.high, label: 'Prior week high', source: 'week', weight: 0.65, index: previousWeek.index });
-      levels.push({ price: previousWeek.low, label: 'Prior week low', source: 'week', weight: 0.65, index: previousWeek.index });
+      levels.push({ price: previousWeek.high, label: 'Prior week high', source: 'week', weight: 0.65, index: previousWeek.highIndex });
+      levels.push({ price: previousWeek.low, label: 'Prior week low', source: 'week', weight: 0.65, index: previousWeek.lowIndex });
     }
     // Higher-timeframe swings: the same candles, bucketed into 4h and 1h structures.
     for (const [name, bucket] of [['H4', 4 * HOUR], ['H1', HOUR]]) {

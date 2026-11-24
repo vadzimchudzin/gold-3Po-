@@ -92,10 +92,35 @@ try {
   assert.equal(await page.locator('rect.zone-buy, rect.zone-sell').count(), 0, 'zone toggle should hide overlays');
   await page.locator('#zonesToggle').click();
 
+  // The history has no aggressor side: Delta mode must not paint those rows as buying or selling.
   await page.locator('#footprintModes [data-mode="delta"]').click();
-  assert.ok(await page.locator('.delta-positive, .delta-negative').count() > 0, 'Delta mode should render delta cells');
+  assert.equal(await page.locator('.foot-cell.delta-positive, .foot-cell.delta-negative').count(), 0, 'rows without a known side carry no delta colour');
   await page.locator('#footprintModes [data-mode="volume"]').click();
   assert.ok(await page.locator('.volume-cell').count() > 0, 'Volume mode should render volume cells');
+  // Delta %, buy and sell: each mode really switches what the cells show. The history above has no
+  // aggressor side, so the side modes are rightly empty there; a few classified live ticks give them data.
+  await page.evaluate(() => {
+    const tick = (last, side, volume) => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last, aggressorSide: side, tickVolume: volume, realVolume: 0 } }));
+    tick(2648.5, 'buy', 9); tick(2648.5, 'sell', 3); tick(2648.6, 'sell', 7); tick(2648.6, 'buy', 2);
+  });
+  await page.waitForTimeout(500);
+  await page.locator('#resetView').click();
+  await page.waitForTimeout(300);
+  const cellTexts = () => page.evaluate(() => [...document.querySelectorAll('#footprintGrid .foot-cell')].map(node => node.textContent.replace(/[◆\s\u00a0]/g, '')).filter(Boolean));
+  await page.locator('#footprintModes [data-mode="delta"]').click();
+  const deltaTexts = await cellTexts();
+  assert.ok(deltaTexts.includes('+6') && deltaTexts.includes('-5'), 'Delta mode shows each classified row as ask minus bid: ' + deltaTexts.join(' '));
+  assert.ok(await page.locator('.foot-cell.delta-positive').count() > 0 && await page.locator('.foot-cell.delta-negative').count() > 0, 'Delta mode colours buying and selling rows');
+  await page.locator('#footprintModes [data-mode="deltaPct"]').click();
+  const pctTexts = await cellTexts();
+  assert.ok(pctTexts.includes('+50%') && pctTexts.includes('-56%') && pctTexts.every(text => /^[+-]?\d+%$/.test(text)), 'Delta % mode shows each row as a share of its sided volume: ' + pctTexts.slice(0, 8).join(' '));
+  assert.ok(await page.locator('#footprintModes [data-mode="deltaPct"].selected').count() === 1, 'the Delta % button is marked selected');
+  await page.locator('#footprintModes [data-mode="buy"]').click();
+  const buyTexts = await cellTexts();
+  await page.locator('#footprintModes [data-mode="sell"]').click();
+  const sellTexts = await cellTexts();
+  assert.ok(buyTexts.includes('9') && buyTexts.includes('2') && sellTexts.includes('3') && sellTexts.includes('7'), 'buy shows the ask side and sell the bid side: ' + buyTexts.join(' ') + ' / ' + sellTexts.join(' '));
+  assert.notDeepEqual(buyTexts, sellTexts, 'buy and sell modes show different sides of the rows');
   await page.locator('#footprintModes [data-mode="bidask"]').click();
   await page.locator('#numbersToggle').click();
   assert.ok(await page.locator('.foot-cell').first().innerText().then(v => v.trim()).then(v => v === ''), 'number toggle should hide cell values');
@@ -109,6 +134,17 @@ try {
   assert.equal(await page.locator('.foot-delta').count(), await page.locator('.bar-head').count(), 'one delta cell per bar');
   assert.equal(await page.locator('.foot-cell.foot-forming').count() > 0, true, 'the forming bar is marked');
   assert.ok(!/Swing high|Prior day|Value area/.test(await page.locator('#footprintGrid').innerText()), 'no engine token leaks into the footprint');
+  // The ladder reads as one continuous grid: cells sit edge to edge with hairline separators, not as
+  // individually bordered and rounded tiles floating apart.
+  const ladder = await page.evaluate(() => {
+    const cell = document.querySelector('.foot-cell');
+    const row = cell.closest('.foot-row');
+    const style = getComputedStyle(cell);
+    return { gap: getComputedStyle(row).columnGap, radius: style.borderTopLeftRadius, border: style.borderTopWidth };
+  });
+  assert.equal(ladder.gap, '0px', 'footprint cells must sit edge to edge, got a ' + ladder.gap + ' gap between them');
+  assert.equal(ladder.radius, '0px', 'footprint cells must not carry rounded tile corners');
+  assert.ok(parseFloat(ladder.border) <= 1, 'footprint cells may only carry a hairline separator');
 
   // Real time: a streamed tick lands in the forming bar between refetches, without a reload.
   // The price is outside the fixture range, so a new price row proves the tick was applied.
@@ -145,24 +181,24 @@ try {
   assert.equal(await page.locator('.zone-row.selected').count(), 0, 'reset should clear zone selection');
 
   await page.locator('#layoutButton').click();
-  assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout')));
-  assert.ok(await page.locator('#chartPanelResizer').isVisible(), 'split layout must show a chart/footprint divider');
+  assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout')), 'split TradingView layout must activate');
+  assert.ok(await page.locator('#chartPanelResizer').isVisible(), 'split layout must expose the chart/footprint divider');
   for (const id of ['#footZoomXOut', '#footZoomXIn', '#footZoomYOut', '#footZoomYIn']) {
-    assert.ok(await page.locator(id).isVisible(), `footprint zoom control ${id} must be visible`);
+    assert.ok(await page.locator(id).isVisible(), 'footprint zoom control must be visible: ' + id);
   }
-  const footprintCell = page.locator('.foot-cell').first();
-  const cellWidthBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
-  const cellHeightBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
+  const footprintCell = page.locator('#footprintGrid .foot-cell').first();
+  const widthBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
+  const heightBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
   await page.locator('#footZoomXIn').click();
-  const cellWidthAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
-  assert.ok(cellWidthAfter > cellWidthBefore, 'X+ must widen footprint columns');
+  const widthAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
+  assert.ok(widthAfter > widthBefore, 'X+ must widen footprint columns');
   await page.locator('#footZoomYIn').click();
-  const cellHeightAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
-  assert.ok(cellHeightAfter > cellHeightBefore, 'Y+ must increase footprint price-row height');
+  const heightAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
+  assert.ok(heightAfter > heightBefore, 'Y+ must increase footprint price-row height');
   await page.locator('#footZoomXReset').click();
   await page.locator('#footZoomYReset').click();
   await page.locator('#layoutButton').click();
-  assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout'))));
+  assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout'))), 'layout toggle restores stacked workspace');
 
   await page.locator('#loadReplay').click();
   await page.waitForFunction(() => document.querySelector('#replaySlider') && !document.querySelector('#replaySlider').disabled, null, { timeout:5000 });
@@ -231,6 +267,29 @@ try {
   const savedFootprint = await (await fetch(base + '/v1/settings')).json();
   assert.equal(savedFootprint.footprint.imbalanceLevels, 10, 'the stack-length setting must be saved');
   assert.equal(savedFootprint.footprint.minLevelVolume, 30, 'the min-level setting must be saved');
+  // Row size: grouping five source steps per row must shrink the ladder, be saved, and come back at 1.
+  const ladderRows = () => page.evaluate(() => document.querySelectorAll('#footprintGrid .foot-row:not(.foot-head):not(.foot-deltas):not(.foot-times)').length);
+  const rowsFine = await ladderRows();
+  // Hold back the analysis refetch so only the browser's own footprint path can regroup the rows.
+  await page.route('**/v1/market/analysis**', route => route.abort());
+  await page.locator('#setTicksPerRow').evaluate(el => { el.value = '5'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.waitForFunction(() => document.querySelector('#settingsStatus')?.textContent === 'Сохранено', null, { timeout: 5000 });
+  await page.waitForTimeout(800);
+  const rowsCoarse = await ladderRows();
+  assert.ok(rowsCoarse < rowsFine, 'five steps per row must draw fewer ladder rows: ' + rowsCoarse + ' vs ' + rowsFine);
+  const ladderPrices = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .foot-row:not(.foot-head):not(.foot-deltas):not(.foot-times) .price-level')]
+    .map(node => Number(node.textContent.replace(/[\s\u00a0]/g, '').replace(',', '.'))));
+  // Every label must parse: an empty or garbled label is a failure, not a row to skip.
+  assert.equal(ladderPrices.length, rowsCoarse, 'every ladder row must carry a price label');
+  assert.ok(ladderPrices.length > 0 && ladderPrices.every(Number.isFinite), 'every ladder price must be a number, got ' + ladderPrices.join(', '));
+  const offGrid = ladderPrices.filter(price => Math.abs(price * 2 - Math.round(price * 2)) > 1e-6);
+  assert.deepEqual(offGrid, [], 'grouped ladder rows must sit on the 0.5 grid, found ' + offGrid.join(', '));
+  await page.unroute('**/v1/market/analysis**');
+  assert.equal((await (await fetch(base + '/v1/settings')).json()).footprint.ticksPerRow, 5, 'the row size must be saved');
+  await page.locator('#setTicksPerRow').evaluate(el => { el.value = '1'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.waitForFunction(() => document.querySelector('#settingsStatus')?.textContent === 'Сохранено', null, { timeout: 5000 });
+  await page.waitForTimeout(2500);
+  assert.equal(await ladderRows(), rowsFine, 'returning to one step per row restores the source precision');
   // The value-area share: at the default 70% the dominant row alone covers it (a one-row area);
   // at 95% the area must widen past the point of control. The forming bar is recomputed locally
   // by the live-tick path, so this checks exactly the code that used to ignore the setting.
@@ -270,13 +329,14 @@ try {
   assert.equal(setupsState.activeDefinition.strategy.requireStacked, true, 'applied conditions must persist server-side');
   assert.match(await page.locator('#licenseStatus').innerText(), /НЕ ТРЕБУЕТСЯ/, 'licence row must reflect the CI dev mode');
 
-  // MT5 connection dialog exists and degrades safely outside Electron (no bridge).
+  // MT5 auto-connect dialog contains no credential form and degrades safely outside Electron.
   await page.locator('#mt5Open').click();
   await page.waitForSelector('#mt5Dialog[open]');
-  assert.ok(await page.locator('#mt5Terminal').count() === 1, 'terminal path field must exist');
-  assert.ok(await page.locator('#mt5Password').getAttribute('type') === 'password', 'password field must be masked');
+  assert.equal(await page.locator('#mt5Connect').innerText(), 'Найти и подключить MT5');
+  assert.ok(await page.locator('#mt5InstallIntegration').count() === 1, 'the auto-repair action must exist');
+  assert.equal(await page.locator('#mt5Terminal, #mt5Password, #mt5Form').count(), 0, 'no account credentials or manual terminal path may be requested');
   assert.ok(await page.locator('#mt5Connect').isDisabled(), 'connect must be disabled without the desktop bridge');
-  assert.match(await page.locator('#mt5Detail').innerText(), /настольном приложении/, 'browser mode must explain the desktop-only login');
+  assert.match(await page.locator('#mt5Detail').innerText(), /настольной версии/, 'browser mode must explain that MT5 discovery runs in the desktop app');
   await page.locator('#mt5Close').click();
 
   // Settings sheet: zone finder + MT5 drawing style are saved server-side and reach the zones endpoint.
@@ -351,30 +411,35 @@ try {
   await page.screenshot({ path:'artifacts/settings-mobile.png' });
   await page.locator('#settingsTabs button[data-tab="mt5"]').click();
   await page.waitForTimeout(120);
-  const bridge = await page.evaluate(() => {
-    const block = document.querySelector('#bridgeBlock'), note = document.querySelector('#bridgeUnavailable');
-    return {
-      overflow: document.documentElement.scrollWidth - innerWidth,
-      blockVisible: block ? block.getBoundingClientRect().height > 0 : null,
-      noteVisible: note ? note.getBoundingClientRect().height > 0 : null,
-      token: document.querySelector('#bridgeToken')?.textContent?.trim()
-    };
-  });
+  const bridge = await page.evaluate(() => ({
+    overflow: document.documentElement.scrollWidth - innerWidth,
+    paneText: document.querySelector('#settingsDialog .settings-pane[data-pane="mt5"]')?.innerText || '',
+    hasTokenField: Boolean(document.querySelector('#bridgeToken, #bridgeCopy, #bridgeBlock'))
+  }));
   assert.ok(bridge.overflow <= 0, 'the MT5 pane must not overflow a phone width');
-  assert.equal(bridge.blockVisible, false, 'a browser without the desktop bridge must not show a token block');
-  assert.equal(bridge.noteVisible, true, 'the browser must explain why the bridge block is empty');
-  assert.equal(bridge.token, '—', 'web mode must not fake a bridge token');
+  assert.match(bridge.paneText, /токен передаёт через Common Files/i, 'the settings must explain automatic local token hand-off');
+  assert.equal(bridge.hasTokenField, false, 'the renderer must not expose the private bridge token');
   await page.locator('#settingsTabs button[data-tab="zones"]').click();
   await page.locator('#settingsClose').click();
   await page.waitForTimeout(150);
   // Плотная история: на 4K панель должна вмещать серию, а не растягивать её в ленту.
-  const denseTicks = Array.from({ length: 600 }, (_, i) => {
-    const at = new Date(Date.now() - (600 - i) * 15 * 60000);
-    const px = 2650 + Math.sin(i / 9) * 4 + i * 0.02;
-    return { timestamp: at.toISOString(), sequence: 100000 + i, bid: +px.toFixed(2), ask: +(px + 0.2).toFixed(2), last: +(px + 0.1).toFixed(2), tickVolume: 1, realVolume: 0, flags: 0 };
+  // Three trades per 15-minute bar create OHLC bodies in both directions plus a traded
+  // extreme outside each body, so both candle edges and wick rows are exercised.
+  const denseTicks = Array.from({ length: 1800 }, (_, n) => {
+    const i = Math.floor(n / 3), tickInBar = n % 3;
+    const at = new Date(Date.now() - (600 - i) * 15 * 60000 + tickInBar * 15000);
+    const basePrice = 2650 + Math.sin(i / 9) * 4 + i * 0.02;
+    const close = basePrice + (i % 2 ? -0.3 : 0.3);
+    const extreme = basePrice + (i % 2 ? -0.5 : 0.5);
+    const px = tickInBar === 0 ? basePrice : tickInBar === 1 ? extreme : close;
+    return { timestamp: at.toISOString(), sequence: 100000 + n, bid: +(px - 0.1).toFixed(2), ask: +(px + 0.1).toFixed(2), last: +px.toFixed(2), tickVolume: 1, realVolume: 0, flags: 0 };
   });
-  const denseResponse = await fetch(base + '/v1/ingest/mt5/history', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', ticks: denseTicks }) });
-  assert.equal(denseResponse.status, 202, 'dense history fixture should be accepted');
+  // History ingestion is intentionally capped at 1,000 ticks per request; send the 1,200-tick
+  // fixture as bounded batches so the browser test exercises the real ingestion contract.
+  for (let offset = 0; offset < denseTicks.length; offset += 1000) {
+    const denseResponse = await fetch(base + '/v1/ingest/mt5/history', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', ticks: denseTicks.slice(offset, offset + 1000) }) });
+    assert.equal(denseResponse.status, 202, 'dense history fixture batch should be accepted');
+  }
   await page.setViewportSize({ width: 3840, height: 2160 });
   await page.waitForFunction(() => document.querySelectorAll('.candle').length >= 600, null, { timeout: 8000 });
   await page.waitForTimeout(400);
@@ -391,6 +456,47 @@ try {
   assert.ok(wide.chart <= wide.wrap * 1.05, 'dense history must be compressed into the 4K panel instead of a multi-screen scroll strip');
   assert.ok(wide.chart / wide.bars >= 2, 'bars never get thinner than the 4K pitch');
   await page.screenshot({ path:'artifacts/market-lab-4k.png', fullPage:true });
+
+  // The live forming bar uses the broker tick size the server built the bars on, not a fixed 0.1:
+  // once MT5 reports 0.01, a streamed tick at 2700.43 keeps its own row instead of rounding to 2700.40.
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  const specTick = { timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2700.42, ask: 2700.44, last: 2700.41, tickVolume: 1, realVolume: 0, flags: 0 };
+  const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', spec: { tickSize: 0.01 }, ticks: [specTick] }) });
+  assert.equal(specResponse.status, 202, 'a live batch with the broker tick size is accepted');
+  await page.waitForFunction(() => document.querySelectorAll('#footprintGrid .price-level').length && [...document.querySelectorAll('#footprintGrid .price-level')].some(node => /2[\s\u00a0]?700,41/.test(node.textContent)), null, { timeout: 8000 });
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2700.43, aggressorSide: 'buy', tickVolume: 2, realVolume: 0 } })));
+  await page.waitForTimeout(600);
+  const liveRows = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .price-level')].map(node => node.textContent.replace(/[\s\u00a0]/g, '')));
+  assert.ok(liveRows.includes('2700,43'), 'the forming bar must keep 2700.43 on the broker 0.01 grid, rows: ' + liveRows.join(' '));
+  assert.ok(!liveRows.includes('2700,40'), 'the live tick must not be rounded onto the 0.1 grid');
+
+  // Each footprint column reads as its candle: body rows between open and close, wick rows inside the
+  // high-low range only, blank rows beyond it, and the body edge coloured by the bar's direction.
+  await page.locator('#resetView').click();
+  await page.waitForTimeout(500);
+  const candles = await page.evaluate(() => {
+    const cells = [...document.querySelectorAll('#footprintGrid .foot-cell')];
+    const forming = cells.filter(cell => cell.classList.contains('foot-forming'));
+    const first = document.querySelector('#footprintGrid .foot-row:not(.foot-head):not(.foot-deltas):not(.foot-times) .foot-cell');
+    
+    return {
+      body: cells.filter(cell => cell.classList.contains('candle-body')).length,
+      wick: cells.filter(cell => cell.classList.contains('candle-wick')).length,
+      out: cells.filter(cell => cell.classList.contains('candle-out')).length,
+      up: cells.filter(cell => cell.classList.contains('candle-body') && cell.classList.contains('candle-up')).length,
+      down: cells.filter(cell => cell.classList.contains('candle-body') && cell.classList.contains('candle-down')).length,
+      formingBody: forming.filter(cell => cell.classList.contains('candle-body')).length,
+
+    };
+  });
+  // The fixtures are nearly flat bars, so the body/wick/blank split itself is unit tested in
+  // footprint-candle.test.js; here it is enough that the drawn ladder carries the parts.
+  assert.ok(candles.body > 0 && candles.out > 0, 'the ladder marks body rows and blank rows: ' + JSON.stringify(candles));
+  assert.ok(candles.up > 0, 'body edges follow the up-bar direction');
+  assert.ok(candles.down > 0, 'body edges follow the down-bar direction');
+  assert.ok(candles.wick > 0, 'traded rows outside candle bodies are rendered as wicks');
+  assert.equal(candles.formingBody > 0, true, 'the forming column has a body too');
+
   assert.deepEqual(pageErrors, [], 'browser must not emit uncaught JavaScript errors');
   process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), zones, replay, backtest, risk planner, setup library, settings, live MT5/COMEX status and mobile overflow.\n');
 } finally {

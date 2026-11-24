@@ -2,7 +2,7 @@
 // Every change is saved to /v1/settings right away; the MT5 indicator picks it up on its next refresh.
 const $ = id => document.getElementById(id);
 const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true },
-  footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2 },
+  footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1 },
   mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true }, ui: { theme: 'glass-dark' } };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
 const TF_LABEL = { 5: '5m', 15: '15m', 30: '30m', 60: '1h', 240: '4h' };
@@ -21,27 +21,6 @@ function status(text, kind = '') { const el = $('settingsStatus'); if (!el) retu
 
 function setSeg(id, value) { $(id)?.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.value === String(value))); }
 function setToggle(id, on) { const el = $(id); if (!el) return; el.classList.toggle('on', !!on); el.setAttribute('aria-pressed', String(!!on)); }
-
-// The EA bridge lives in the desktop app: the renderer only knows its port and token through IPC,
-// so in a browser the whole block stays hidden instead of showing an empty secret.
-async function renderBridge() {
-  const block = $('bridgeBlock'), note = $('bridgeUnavailable'), hint = $('bridgeOriginHint');
-  if (!block) return;
-  const api = window.goldMt5?.bridge;
-  if (!api) { block.hidden = true; if (note) note.hidden = false; return; }
-  try {
-    const info = await api();
-    const origin = `http://127.0.0.1:${info.port}`;
-    if ($('bridgeUrl')) $('bridgeUrl').textContent = origin;
-    if ($('bridgeToken')) $('bridgeToken').textContent = info.ingestToken || '—';
-    if (hint) hint.textContent = origin;
-    block.hidden = false;
-    if (note) note.hidden = true;
-  } catch (error) {
-    block.hidden = true;
-    if (note) { note.hidden = false; note.textContent = `Мост недоступен: ${error.message}`; }
-  }
-}
 
 function preview() {
   const svg = $('stylePreview'); if (!svg) return;
@@ -69,7 +48,8 @@ function render() {
   $('reactionBarsValue') && ($('reactionBarsValue').textContent = `${z.reactionBars} бар${z.reactionBars === 1 ? '' : z.reactionBars < 5 ? 'а' : 'ов'}`);
   const f = settings.footprint;
   set('setImbalanceRatio', f.imbalanceRatio); set('setValueAreaShare', Math.round(f.valueAreaShare * 100)); set('setAbsorptionMultiple', f.absorptionMultiple);
-  set('setImbalanceLevels', f.imbalanceLevels); set('setMinLevelVolume', f.minLevelVolume);
+  set('setImbalanceLevels', f.imbalanceLevels); set('setMinLevelVolume', f.minLevelVolume); set('setTicksPerRow', f.ticksPerRow ?? 1);
+  $('ticksPerRowValue') && ($('ticksPerRowValue').textContent = (f.ticksPerRow ?? 1) === 1 ? 'точность источника' : `${f.ticksPerRow} шагов цены`);
   $('imbalanceRatioValue') && ($('imbalanceRatioValue').textContent = `${Math.round(f.imbalanceRatio * 100)}%`);
   $('valueAreaShareValue') && ($('valueAreaShareValue').textContent = `${Math.round(f.valueAreaShare * 100)}%`);
   $('absorptionMultipleValue') && ($('absorptionMultipleValue').textContent = `${Number(f.absorptionMultiple).toFixed(1)}× медианы`);
@@ -97,7 +77,8 @@ function publish(changedZones) {
 
 async function save() {
   const patch = pending; pending = {};
-  const zonesChanged = !!patch.zones;
+  // A new row size needs the broker's ticks at their own precision again, so it refetches like a zone change.
+  const zonesChanged = !!patch.zones || !!(patch.footprint && 'ticksPerRow' in patch.footprint);
   status('Сохранение…');
   try {
     const response = await fetch('/v1/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) });
@@ -145,7 +126,7 @@ function bind() {
   });
   const ranges = { setMinZones: 'minZones', setMaxZones: 'maxZones', setPivotWidth: 'pivotWidth', setClusterAtr: 'clusterAtr', setZoneWidthAtr: 'zoneWidthAtr', setMaxDistanceAtr: 'maxDistanceAtr', setAtrPeriod: 'atrPeriod', setReactionBars: 'reactionBars' };
   for (const [id, key] of Object.entries(ranges)) $(id)?.addEventListener('input', e => change('zones', key, Number(e.target.value)));
-  const footprintRanges = { setImbalanceRatio: ['imbalanceRatio', Number], setAbsorptionMultiple: ['absorptionMultiple', Number], setValueAreaShare: ['valueAreaShare', v => Number(v) / 100], setImbalanceLevels: ['imbalanceLevels', Number], setMinLevelVolume: ['minLevelVolume', Number] };
+  const footprintRanges = { setImbalanceRatio: ['imbalanceRatio', Number], setAbsorptionMultiple: ['absorptionMultiple', Number], setValueAreaShare: ['valueAreaShare', v => Number(v) / 100], setImbalanceLevels: ['imbalanceLevels', Number], setMinLevelVolume: ['minLevelVolume', Number], setTicksPerRow: ['ticksPerRow', Number] };
   for (const [id, [key, cast]] of Object.entries(footprintRanges)) $(id)?.addEventListener('input', e => change('footprint', key, cast(e.target.value)));
   $('setLineWidth')?.addEventListener('input', e => change('mt5', 'lineWidth', Number(e.target.value)));
   $('setBuyColor')?.addEventListener('input', e => change('mt5', 'buyColor', e.target.value.toUpperCase()));
@@ -167,17 +148,11 @@ function bind() {
     if (response.ok) { settings = await response.json(); theme(settings.ui.theme); render(); publish(true); status('Настройки сброшены', 'ok'); }
     else status(`Не удалось сбросить (HTTP ${response.status})`, 'error');
   });
-  $('bridgeCopy')?.addEventListener('click', async () => {
-    const value = $('bridgeToken')?.textContent?.trim();
-    if (!value || value === '—') return status('Токен моста не получен', 'error');
-    try { await navigator.clipboard.writeText(value); status('Токен скопирован — вставьте его в IngestToken советника', 'ok'); }
-    catch { status('Скопируйте токен вручную: выделите его и нажмите Ctrl+C', 'error'); }
-  });
   const close = () => { if (saveTimer) { clearTimeout(saveTimer); save(); } dialog.close(); };
   $('settingsDone')?.addEventListener('click', close);
   $('settingsClose')?.addEventListener('click', close);
   dialog.addEventListener('click', e => { if (e.target === dialog) close(); });
-  const open = async () => { status(''); render(); dialog.showModal(); void renderBridge(); if (!(await load())) status('Настройки доступны после активации лицензии', 'error'); };
+  const open = async () => { status(''); render(); dialog.showModal(); if (!(await load())) status('Настройки доступны после активации лицензии', 'error'); };
   $('openSettings')?.addEventListener('click', open);
 
   // Navigation rail.

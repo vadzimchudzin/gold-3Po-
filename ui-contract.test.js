@@ -42,28 +42,30 @@ test('licence gate and setup library controls are wired',async()=>{
   assert.match(html,/setups-client\.js/);
 });
 
-test('MT5 connection dialog, tray-safe bridge and indicator installer are wired',async()=>{
+test('MT5 auto-connect uses the already-authorized terminal without a credential form',async()=>{
   const mt5Client=await readFile(new URL('./mt5-client.js',import.meta.url),'utf8');
   const preload=await readFile(new URL('./electron/preload.cjs',import.meta.url),'utf8');
   const main=await readFile(new URL('./electron/main.js',import.meta.url),'utf8');
-  for(const id of ['mt5Open','mt5Dialog','mt5Close','mt5Form','mt5Terminal','mt5Browse','mt5Connect','mt5Disconnect','mt5InstallIndicator','mt5Detail','mt5Password','marketSymbol'])assert.ok(html.includes('id="'+id+'"'),'Missing MT5 target '+id);
-  for(const id of ['mt5Open','mt5Close','mt5Browse','mt5Disconnect','mt5InstallIndicator'])assert.ok(mt5Client.includes("$('"+id+"').addEventListener"),'MT5 control has no handler: '+id);
-  assert.match(mt5Client,/mt5Form.*addEventListener\('submit'|form\.addEventListener\('submit'/s);
-  assert.match(mt5Client,/type="password"|mt5Password/);
-  for(const channel of ['mt5:state','mt5:choose-terminal','mt5:connect','mt5:disconnect','mt5:install-indicator']){
+  for(const id of ['mt5Open','mt5Dialog','mt5Close','mt5Connect','mt5Disconnect','mt5InstallIntegration','mt5Detail','marketSymbol'])assert.ok(html.includes('id="'+id+'"'),'Missing MT5 target '+id);
+  for(const id of ['mt5Form','mt5Terminal','mt5Browse','mt5Password'])assert.ok(!html.includes('id="'+id+'"'),'Credential/manual terminal control must be absent: '+id);
+  for(const id of ['mt5Open','mt5Close','mt5Disconnect','mt5InstallIntegration'])assert.ok(mt5Client.includes("$('"+id+"').addEventListener"),'MT5 control has no handler: '+id);
+  assert.match(mt5Client,/bridge\.connect\(\)/);
+  assert.match(mt5Client,/bridge\.installIntegration\(\)/);
+  for(const channel of ['mt5:state','mt5:connect','mt5:disconnect','mt5:install-integration']){
     assert.ok(preload.includes(channel),'Preload missing '+channel);
   }
-  assert.match(main,/ipcMain\.handle\(`mt5:\$\{name\}`/);
-  for(const name of ['state','choose-terminal','connect','disconnect','install-indicator'])assert.ok(main.includes("handle('"+name+"'"),'Main missing handler '+name);
+  assert.doesNotMatch(preload,/login|password|ingestToken|mt5:bridge/);
+  assert.ok(main.includes("handle('state'")&&main.includes("handle('connect'")&&main.includes("handle('install-integration'"),'Main must expose state/connect/repair handlers');
+  assert.match(main,/connectAndRepairMt5\(\)/);
+  assert.match(main,/installMt5Integration/);
   assert.match(main,/sandbox: true/);
   assert.match(main,/preload:/);
   assert.match(main,/new URL\(frame\.url\)\.origin !== localOrigin/);
   assert.match(html,/mt5-client\.js/);
 });
-
 test('settings sheet controls exist and are handled by settings-client',async()=>{
   const client=await readFile(new URL('./settings-client.js', import.meta.url),'utf8');
-  for(const id of ['settingsDialog','openSettings','settingsClose','settingsDone','settingsReset','settingsTabs','settingsStatus','setMinZones','setMaxZones','setTimeframe','setPivotWidth','setClusterAtr','setZoneWidthAtr','setMaxDistanceAtr','setAtrPeriod','setBuyColor','setSellColor','setLineStyle','setLineWidth','setFill','setLabels','setStrength','setTheme','stylePreview','railNav','bridgeBlock','bridgeToken','bridgeCopy']){
+  for(const id of ['settingsDialog','openSettings','settingsClose','settingsDone','settingsReset','settingsTabs','settingsStatus','setMinZones','setMaxZones','setTimeframe','setPivotWidth','setClusterAtr','setZoneWidthAtr','setMaxDistanceAtr','setAtrPeriod','setBuyColor','setSellColor','setLineStyle','setLineWidth','setFill','setLabels','setStrength','setTheme','stylePreview','railNav']){
     assert.ok(html.includes('id="'+id+'"'),'missing #'+id);
     assert.ok(client.includes("'"+id+"'"),'settings-client does not handle #'+id);
   }
@@ -72,14 +74,17 @@ test('settings sheet controls exist and are handled by settings-client',async()=
   assert.ok(html.indexOf('settings-client.js')<html.indexOf('market-client.js'),'settings must load before the market client reads the timeframe');
 });
 
-test('the EA bridge port and token are shown by the app, not only in settings.json',async()=>{
+test('EA bridge token is kept out of renderer IPC and handed to MT5 automatically',async()=>{
   const main=await readFile(new URL('./electron/main.js', import.meta.url),'utf8');
   const preload=await readFile(new URL('./electron/preload.cjs', import.meta.url),'utf8');
-  const client=await readFile(new URL('./settings-client.js', import.meta.url),'utf8');
-  assert.ok(html.includes('id="bridgeBlock"')&&html.includes('id="bridgeToken"')&&html.includes('id="bridgeCopy"'),'the MT5 pane must expose the bridge token');
-  assert.match(html,/id="bridgeBlock"[^>]*hidden/,'the bridge block starts hidden until the desktop API answers');
-  assert.match(preload,/bridge:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('mt5:bridge'\)/,'preload must expose mt5:bridge');
-  assert.match(main,/handle\('bridge',\s*\(\)\s*=>\s*\(\{[^}]*ingestToken:\s*marketIngestToken/,'main must answer with the live port and token');
-  assert.match(client,/window\.goldMt5\?\.bridge/);
-  assert.match(client,/if \(!api\) \{ block\.hidden = true/,'a browser without the desktop bridge must hide the block instead of showing an empty secret');
+  const integration=await readFile(new URL('./electron/mt5-integration.js', import.meta.url),'utf8');
+  const bridge=await readFile(new URL('./adapters/mt5/Gold3PoBridge.mq5', import.meta.url),'utf8');
+  const settings=await readFile(new URL('./settings-client.js', import.meta.url),'utf8');
+  assert.doesNotMatch(preload,/ingestToken|mt5:bridge|bridge:\s*\(/,'the renderer must not receive the private ingest token');
+  assert.doesNotMatch(main,/handle\('bridge'/,'there is no token IPC endpoint');
+  assert.match(integration,/bridge-token\.txt/,'the desktop main process writes the token to MT5 Common Files');
+  assert.match(integration,/commonDataPath/);
+  assert.match(bridge,/FILE_COMMON/,'the EA reads the bridge token from Common Files');
+  assert.match(html,/локальный токен передаёт через Common Files/i);
+  assert.doesNotMatch(settings,/clipboard|bridgeCopy|bridgeToken/);
 });

@@ -69,6 +69,40 @@ test('three imbalanced levels in a row make a stack, two do not', () => {
   assert.deepEqual(pair.stackedImbalances, [], 'two levels are not a stack');
 });
 
+test('imbalance compares neighbouring price steps, not neighbouring array rows', () => {
+  // 103 never traded, so 104 and 102 are two steps apart: there is no diagonal pair to compare.
+  const gapped = footprintOf(rows([[104, 1, 12], [102, 2, 1]]), { h: 104, l: 102, c: 103, priceStep: 1 });
+  assert.deepEqual(gapped.imbalances, [], 'rows two steps apart must not be compared as neighbours');
+  const adjacent = footprintOf(rows([[104, 1, 12], [103, 2, 1]]), { h: 104, l: 103, c: 103, priceStep: 1 });
+  assert.equal(adjacent.imbalances.filter(item => item.side === 'buy').length, 1, 'the same rows one step apart are compared');
+  // The step is taken from the rows when the caller does not pass it.
+  const inferred = footprintOf(rows([[104, 1, 12], [103.5, 1, 1], [102, 2, 1]]), { h: 104, l: 102, c: 103 });
+  assert.ok(!inferred.imbalances.some(item => item.price === 103.5 && item.side === 'buy'), 'with a 0.5 step, 103.5 and 102 are not neighbours');
+  // Here the inferred step alone decides: the smallest gap is 1, so 104 and 103 are compared and
+  // 103 and 101 (two steps apart) are not.
+  const onlyInferred = footprintOf(rows([[104, 1, 12], [103, 2, 12], [101, 2, 1]]), { h: 104, l: 101, c: 103 });
+  assert.ok(onlyInferred.imbalances.some(item => item.price === 104 && item.side === 'buy'), '104 against 103 is one inferred step and is compared');
+  assert.ok(!onlyInferred.imbalances.some(item => item.price === 103 && item.side === 'buy'), '103 against 101 is two inferred steps and is not compared');
+});
+
+test('a stack is broken by an untraded price step', () => {
+  const split = footprintOf(rows([[107, 1, 10], [106, 1, 10], [104, 1, 10], [103, 1, 1]]), { h: 107, l: 103, c: 105, priceStep: 1 });
+  assert.deepEqual(split.stackedImbalances, [], '107, 106 and 104 are not three consecutive steps');
+  const whole = footprintOf(rows([[107, 1, 10], [106, 1, 10], [105, 1, 10], [104, 1, 1]]), { h: 107, l: 104, c: 106, priceStep: 1 });
+  assert.deepEqual(whole.stackedImbalances[0].prices, [107, 106, 105]);
+});
+
+test('volume without a known aggressor never creates absorption on its own', () => {
+  const unknown = footprintOf([{ price: 104, bid: 0, ask: 0, unknown: 40 }, ...rows([[103, 2, 2], [102, 2, 2]])], { h: 104, l: 102, c: 103 });
+  assert.deepEqual(unknown.absorbedLevels, [], 'unclassified broker ticks cannot prove absorption');
+  const known = footprintOf(rows([[104, 20, 20], [103, 2, 2], [102, 2, 2]]), { h: 104, l: 102, c: 103 });
+  assert.equal(known.absorbedLevels.length, 1, 'the same row with a known aggressor is still flagged');
+  // Unclassified ticks on the inner rows must not raise the bar a real absorption is measured against.
+  const noisy = footprintOf([{ price: 104, bid: 10, ask: 10, unknown: 0 }, { price: 103, bid: 2, ask: 2, unknown: 30 }, { price: 102, bid: 2, ask: 2, unknown: 30 }], { h: 104, l: 102, c: 103 });
+  assert.equal(noisy.absorbedLevels.length, 1, 'aggressive volume is compared with the median aggressive row');
+  assert.equal(noisy.absorbedLevels[0].multiple, 5);
+});
+
 test('an unfinished auction is an extreme that still shows both sides', () => {
   const open = footprintOf(rows([[104, 5, 5], [103, 2, 2], [102, 4, 4]]), { h: 104, l: 102, c: 103 });
   assert.equal(open.unfinishedHigh, true);
@@ -94,6 +128,42 @@ test('footprint options are validated', () => {
   assert.throws(() => validateFootprintOptions({ valueAreaShare: 1.5 }), /valueAreaShare/);
   assert.throws(() => validateFootprintOptions({ imbalanceLevels: 1 }), /imbalanceLevels/);
   assert.throws(() => validateFootprintOptions({ minLevelVolume: 0 }), /minLevelVolume/);
+  assert.throws(() => validateFootprintOptions({ ticksPerRow: 0 }), /ticksPerRow/);
+  assert.throws(() => validateFootprintOptions({ ticksPerRow: 1.5 }), /ticksPerRow/);
+});
+
+test('ticks per row groups source price steps into wider rows without losing volume', () => {
+  const source = [];
+  for (let i = 0; i <= 20; i++) source.push({ price: Number((2648 + i * 0.1).toFixed(1)), bid: 2, ask: 3, unknown: 1 });
+  const fine = footprintOf(source, { priceStep: 0.1, h: 2650, l: 2648, c: 2649 });
+  const coarse = footprintOf(source, { priceStep: 0.1, ticksPerRow: 5, h: 2650, l: 2648, c: 2649 });
+  assert.equal(fine.levels.length, 21, 'one row per source step by default');
+  assert.deepEqual(coarse.levels.map(row => row.price), [2650, 2649.5, 2649, 2648.5, 2648], 'rows sit on the 0.5 grid');
+  assert.equal(coarse.total, fine.total, 'grouping sums volume, it never re-estimates it');
+  assert.equal(coarse.levels.reduce((sum, row) => sum + row.bid, 0), fine.bid);
+  // Imbalance neighbours follow the row grid: 0.5 apart rows are adjacent once grouped.
+  const ladder = rows([[2650, 0, 0], [2649.9, 0, 12], [2649.5, 1, 1], [2649.4, 2, 1]]).filter(row => row.bid || row.ask);
+  const grouped = footprintOf(ladder, { priceStep: 0.1, ticksPerRow: 5, h: 2650, l: 2649.4, c: 2649.5 });
+  assert.ok(grouped.imbalances.some(item => item.side === 'buy' && item.price === 2650), 'the 2650 row is compared with the 2649.5 row one grouped step below');
+});
+
+test('a bar built tick by tick shows the same grouped ladder as the whole bar', () => {
+  // The live view feeds the forming bar's raw level map to footprintOf after every tick; the server
+  // groups the finished bar's raw rows once. Both must land on the same rows and volumes.
+  const options = { priceStep: 0.1, ticksPerRow: 5 };
+  const ticks = [[2648.3, 'sell'], [2648.4, 'buy'], [2648.7, 'buy'], [2649.1, 'sell'], [2648.2, 'buy'], [2649.4, 'buy'], [2648.8, 'sell']];
+  const forming = emptyBar(0, ticks[0][0]);
+  let live = null;
+  for (const [last, direction] of ticks) {
+    applyTickToBar(forming, { last, volume: 2, direction }, 0.1);
+    live = footprintOf(forming.levels, { ...options, h: forming.h, l: forming.l, c: forming.c });
+  }
+  const whole = emptyBar(0, ticks[0][0]);
+  for (const [last, direction] of ticks) applyTickToBar(whole, { last, volume: 2, direction }, 0.1);
+  const server = footprintOf([...whole.levels.values()], { ...options, h: whole.h, l: whole.l, c: whole.c });
+  assert.deepEqual(live.levels, server.levels);
+  assert.deepEqual(live.levels.map(row => row.price), [2649.5, 2649, 2648.5, 2648], 'the forming bar sits on the grouped 0.5 grid');
+  assert.equal(live.poc, server.poc);
 });
 
 test('a session profile has its own point of control and reports naked ones', () => {
@@ -124,4 +194,22 @@ test('cumulative delta that disagrees with price is a divergence, noise is not',
   const noise = [bar(100, 101, 10, 10), bar(101, 102, 10, 20), bar(102, 103, 10, 30), bar(103, 104, 2, 32)];
   assert.equal(cumulativeDivergence(noise).side, null, 'agreeing price and delta is not a divergence');
   assert.equal(cumulativeDivergence([bar(100, 101, 1, 1)]).side, null);
+});
+
+test('each footprint display mode shows a value taken from the row itself', async () => {
+  const { footprintCell, FOOTPRINT_MODES } = await import('./footprint-engine.js');
+  const row = { bid: 3, ask: 9, unknown: 2 };
+  assert.deepEqual(footprintCell(row, 'bidask'), { text: '3 9', tone: 'positive', value: null });
+  assert.deepEqual(footprintCell(row, 'delta'), { text: '+6', tone: 'positive', value: 6 });
+  assert.deepEqual(footprintCell(row, 'deltaPct'), { text: '+50%', tone: 'positive', value: 50 }, 'delta share of the volume with a known side');
+  assert.deepEqual(footprintCell(row, 'volume'), { text: '14', tone: 'neutral', value: 14 }, 'total includes unclassified ticks');
+  assert.deepEqual(footprintCell(row, 'buy'), { text: '9', tone: 'positive', value: 9 });
+  assert.deepEqual(footprintCell(row, 'sell'), { text: '3', tone: 'negative', value: 3 });
+  assert.equal(footprintCell({ bid: 5, ask: 1, unknown: 0 }, 'deltaPct').text, '-67%');
+  // Only unclassified ticks: side-based modes stay empty instead of inventing a split.
+  const unknownOnly = { bid: 0, ask: 0, unknown: 7 };
+  for (const mode of ['delta', 'deltaPct', 'buy', 'sell']) assert.equal(footprintCell(unknownOnly, mode).text, '', mode);
+  assert.equal(footprintCell(unknownOnly, 'volume').text, '7');
+  for (const mode of FOOTPRINT_MODES) assert.equal(footprintCell({ bid: 0, ask: 0, unknown: 0 }, mode).text, '', 'an empty row shows nothing in ' + mode);
+  assert.throws(() => footprintCell(row, 'heatmap'), /Unknown footprint mode/);
 });

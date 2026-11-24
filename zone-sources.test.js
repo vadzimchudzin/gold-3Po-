@@ -66,6 +66,51 @@ test('the prior day extremes match the actual previous session', () => {
   assert.equal(levels.find(level => level.label === 'Prior day low').price, expectedLow);
 });
 
+test('calendar levels point at the candle that formed them in the original series', () => {
+  const bars = history();
+  const levels = collectSourceLevels(bars, { priceStep: 0.1 });
+  const byLabel = label => levels.find(level => level.label === label);
+  const lastDay = bars.at(-1).time.slice(0, 10);
+  const previousDay = bars.filter(bar => bar.time < lastDay).at(-1).time.slice(0, 10);
+  const checks = [
+    ['Prior day high', 'h', bar => bar.time.startsWith(previousDay)],
+    ['Prior day low', 'l', bar => bar.time.startsWith(previousDay)],
+    ['London high', 'h', bar => { const hour = new Date(bar.time).getUTCHours(); return hour >= 7 && hour < 12; }],
+    ['Prior week high', 'h', bar => bar.time >= '2026-01-05' && bar.time < '2026-01-12'],
+    ['Prior week low', 'l', bar => bar.time >= '2026-01-05' && bar.time < '2026-01-12']
+  ];
+  for (const [label, field, inPeriod] of checks) {
+    const level = byLabel(label);
+    assert.ok(level, 'missing source: ' + label);
+    const candle = bars[level.index];
+    assert.ok(candle && inPeriod(candle), label + ' must point at a candle inside its own period');
+    assert.equal(candle[field], level.price, label + ' must point at the candle that set the price');
+  }
+  const weeklyOpen = byLabel('Weekly open');
+  assert.equal(bars[weeklyOpen.index].time, '2026-01-12T00:00:00.000Z', 'the weekly open is the first candle of the week');
+  assert.equal(bars[weeklyOpen.index].o, weeklyOpen.price);
+});
+
+test('a zone built from a calendar source reports when that candle formed it', () => {
+  // The finder runs on the closed candles (all but the forming one), so its source levels are the same
+  // as collectSourceLevels on that slice, and formedAt must be the time of the candle that set them.
+  const bars = history();
+  const sources = collectSourceLevels(bars.slice(0, -1), { priceStep: 0.1 });
+  const zones = detectLiquidityZones(bars, 0.1, { minZones: 3, maxZones: 12, maxDistanceAtr: 100 });
+  const calendar = zones.filter(zone => /^(Prior day|Two days ago|Asia|London|New York|Prior week|Weekly open)/.test(zone.label));
+  assert.ok(calendar.length >= 2, 'the sample must surface calendar source zones, got ' + zones.map(zone => zone.label).join(', '));
+  const closed = bars.slice(0, -1);
+  for (const zone of calendar) {
+    const source = sources.find(level => level.label === zone.label);
+    assert.ok(source, 'zone label must come from a source level: ' + zone.label);
+    assert.equal(zone.formedAt, bars[source.index].time, zone.label + ' must report the time of the candle that set it');
+    // That candle is one that actually traded at the level, not a candle from an unrelated day.
+    const formed = closed.find(bar => bar.time === zone.formedAt);
+    const touched = /high$/.test(zone.label) ? formed.h : /low$/.test(zone.label) ? formed.l : formed.o;
+    assert.equal(touched, source.price, zone.label + ' formedAt must be the candle that printed the level');
+  }
+});
+
 test('the volume profile is ordered and inside the traded range', () => {
   const bars = history();
   const levels = collectSourceLevels(bars, { priceStep: 0.1 });

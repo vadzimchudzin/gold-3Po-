@@ -44,7 +44,53 @@ test('timeframe aggregation separates bars and orders ticks chronologically',()=
   assert.equal(five.bars.length,2,'5m groups should split ticks at 10:10 into a new bar');
   assert.equal(fifteen.bars.length,1,'15m groups should keep both ticks in the 10:00 bar');
 });
-test('analysis validates its inputs',()=>assert.throws(()=>buildMarketAnalysis([], {priceStep:0}),/Invalid analysis input/));
+test('analysis metadata and aggregation use the selected timeframe', () => {
+  const ticks = [
+    tick('2026-11-17T10:01:00.000Z', 2649),
+    tick('2026-11-17T10:10:00.000Z', 2651)
+  ];
+  const five = buildMarketAnalysis(ticks, { intervalMs: 5 * 60_000 });
+  const fifteen = buildMarketAnalysis(ticks, { intervalMs: 15 * 60_000 });
+  assert.equal(five.intervalMs, 5 * 60_000);
+  assert.equal(five.timeframeMinutes, 5);
+  assert.equal(five.bars.length, 2);
+  assert.equal(fifteen.timeframeMinutes, 15);
+  assert.equal(fifteen.bars.length, 1);
+});
+test('analysis validates its inputs',()=>{
+ assert.throws(()=>buildMarketAnalysis([], {priceStep:0}),/Invalid analysis input/);
+ assert.throws(()=>buildMarketAnalysis([], {footprintStep:0}),/Invalid analysis input/);
+});
+
+test('a finer footprint grid changes footprint rows only, not exhaustion or zones',()=>{
+ // A one-sided bar 0.4 wide: within 5 x 0.1 it is exhaustion; that must not depend on the broker tick.
+ const events=[];let seq=1;
+ for(let i=0;i<5;i++)events.push({source:'mt5',symbol:'XAUUSD',timestamp:new Date(Date.UTC(2026,0,5,10,1,i)).toISOString(),sequence:seq++,bid:2648+i*0.1-0.05,ask:2648+i*0.1+0.05,last:+(2648+i*0.1).toFixed(2),tickVolume:3,realVolume:0,flags:32,aggressorSide:'buy'});
+ const coarse=buildMarketAnalysis(events);
+ const fine=buildMarketAnalysis(events,{footprintStep:0.01});
+ assert.equal(coarse.bars[0].exhaustion,true,'the fixture is an exhaustion bar on the 0.1 analysis grid');
+ assert.equal(fine.bars[0].exhaustion,true,'a 0.01 broker tick must not switch exhaustion off');
+ assert.deepEqual(fine.zones,coarse.zones,'zone geometry follows the analysis grid');
+ // The rows really move to the finer grid: an off-0.1 trade keeps its own row instead of rounding.
+ const offGrid=[...events,{...events[4],sequence:seq++,timestamp:new Date(Date.UTC(2026,0,5,10,1,6)).toISOString(),last:2648.43,bid:2648.38,ask:2648.48}];
+ assert.ok(buildMarketAnalysis(offGrid,{footprintStep:0.01}).bars[0].levels.some(row=>Math.abs(row.price-2648.43)<1e-6),'the 0.01 footprint grid keeps 2648.43 as its own row');
+ assert.ok(!buildMarketAnalysis(offGrid).bars[0].levels.some(row=>Math.abs(row.price-2648.43)<1e-6),'the default grid rounds it to 0.1');
+});
+
+test('the session profile follows the footprint options, including the row size',()=>{
+ const events=[];let seq=1;
+ for(let i=0;i<120;i++){const p=2648+(i%23)*0.1;const n=i%7===0?9:1;for(let k=0;k<n;k++)events.push({source:'mt5',symbol:'XAUUSD',timestamp:new Date(Date.UTC(2026,0,5,10,i,k)).toISOString(),sequence:seq++,bid:+(p-0.1).toFixed(2),ask:+(p+0.1).toFixed(2),last:+p.toFixed(2),tickVolume:1,realVolume:0});}
+ const fine=buildMarketAnalysis(events,{footprintOptions:{ticksPerRow:1}});
+ const coarse=buildMarketAnalysis(events,{footprintOptions:{ticksPerRow:5}});
+ const onHalfGrid=price=>Math.abs(price*2-Math.round(price*2))<1e-6;
+ assert.ok(fine.profile.current.levels.some(row=>!onHalfGrid(row.price)),'the fixture trades between half points at source precision');
+ assert.ok(coarse.profile.current.levels.every(row=>onHalfGrid(row.price)),'the profile rows sit on the same 0.5 grid as the grouped ladder');
+ const narrow=buildMarketAnalysis(events,{footprintOptions:{valueAreaShare:0.5}}).profile.current.valueArea;
+ const wide=buildMarketAnalysis(events,{footprintOptions:{valueAreaShare:0.95}}).profile.current.valueArea;
+ assert.ok(narrow.share>=0.5&&narrow.share<0.7,'a 50% setting covers at least half the volume and stops short of the 70% default, got '+narrow.share);
+ assert.ok(wide.share>=0.95,'a 95% setting covers at least 95% of the volume, got '+wide.share);
+ assert.ok(wide.rows>narrow.rows,'the wider share spans more rows: '+narrow.rows+' at 50% vs '+wide.rows+' at 95%');
+});
 
 test('analysis calculates cumulative delta and leaves absorption unavailable without aggressor data',()=>{
  const out=buildMarketAnalysis([

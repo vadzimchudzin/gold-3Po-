@@ -3,9 +3,6 @@ import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { publishSnapshot } from './mt5-snapshot.js';
 
-const LIVE_POLL_INTERVAL_MS = 450;
-const MAX_RETRY_DELAY_MS = 10_000;
-
 function startWorker(command, args) {
   let child;
   try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
@@ -44,6 +41,7 @@ function startWorker(command, args) {
   });
   return {
     stop,
+    stopped: () => stopped,
     request(op, values = {}, timeout = 25_000) {
       if (stopped || current) return Promise.reject(new Error('Модуль MT5 недоступен или занят.'));
       return new Promise((resolve, reject) => {
@@ -55,7 +53,8 @@ function startWorker(command, args) {
   };
 }
 
-export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, makeWorker = startWorker, request = fetch, publish = publishSnapshot }) {
+export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, makeWorker = startWorker, request = fetch, publish = publishSnapshot,
+  now = () => Date.now(), pollMs = 1800, maxFailures = 5, maxBackoffMs = 30_000, staleAfterMs = 120_000, maxUnsent = 20_000 }) {
   let session = null;
   let status = { state: 'offline', message: 'MT5 не подключён.' };
   const fetchApi = (route, init = {}) => request(apiOrigin + route, { ...init, signal: AbortSignal.timeout(15_000) });
@@ -74,39 +73,48 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       unique.add(identity);
       records.push({ timestamp, bid, ask, last, tickVolume, realVolume, flags, eventId: `MT5-${identity}`, sequence: ++owner.sequence });
     }
+    // Live ticks the local service did not accept are kept and sent first next time: the connector has
+    // already moved past them, so dropping them would leave a hole. The service skips duplicates by
+    // event id, so a resend is safe. The queue is bounded; the oldest ticks go first if it fills.
+    if (!historical && owner.unsent?.length) {
+      records.unshift(...owner.unsent);
+      owner.unsent = [];
+    }
+    if (!historical && records.length > maxUnsent) {
+      owner.droppedTicks = (owner.droppedTicks || 0) + records.length - maxUnsent;
+      owner.droppedThisOutage = (owner.droppedThisOutage || 0) + records.length - maxUnsent;
+      records.splice(0, records.length - maxUnsent);
+    }
     for (let i = 0; i < records.length && session === owner; i += 1000) {
       const route = historical ? 'history' : 'live-batch';
       const send = () => fetchApi(`/v1/ingest/mt5/${route}`, {
         method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ source: 'mt5', symbol: owner.symbol, ticks: records.slice(i, i + 1000) })
+        body: JSON.stringify({ source: 'mt5', symbol: owner.symbol, spec: owner.spec ?? null, ticks: records.slice(i, i + 1000) })
       });
-      let response = await send();
-      if (response.status === 409 && !historical) {
-        const { lastAcceptedSequence } = await response.json();
-        if (!Number.isSafeInteger(lastAcceptedSequence)) throw new Error('Не удалось синхронизировать поток котировок.');
-        owner.sequence = Math.max(owner.sequence, lastAcceptedSequence);
-        for (let j = i; j < records.length; j++) records[j].sequence = ++owner.sequence;
-        response = await send();
+      // Any failure from here on (network, a 409 that cannot be resequenced, a rejected resend, an
+      // unreadable answer) keeps this batch and the rest for the next poll instead of losing them.
+      try {
+        let response = await send();
+        if (response.status === 409 && !historical) {
+          const { lastAcceptedSequence } = await response.json();
+          if (!Number.isSafeInteger(lastAcceptedSequence)) throw new Error('Не удалось синхронизировать поток котировок.');
+          owner.sequence = Math.max(owner.sequence, lastAcceptedSequence);
+          for (let j = i; j < records.length; j++) records[j].sequence = ++owner.sequence;
+          response = await send();
+        }
+        if (!response.ok) throw new Error(`Локальный сервис отклонил котировки (HTTP ${response.status}).`);
+        await response.json();
+      } catch (error) {
+        if (!historical) owner.unsent = records.slice(i);
+        throw new Error(`MT5 ${route}: пакет из ${records.length-i} тиков сохранён в очереди для повторной отправки: ${error.message}`, { cause: error });
       }
-      if (!response.ok) throw new Error(`Локальный сервис отклонил котировки (HTTP ${response.status}).`);
-      await response.json();
     }
     return records.length;
   }
 
-  async function refreshLicense(owner) {
-    if (session !== owner || Date.now() - owner.licenseAt < 4500) return;
-    const response = await fetchApi('/v1/license/status');
-    if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
-    if (!response.ok) throw new Error('Не удалось проверить лицензию.');
-    owner.licenseAt = Date.now();
-    if (!(await response.json()).valid) await disconnect('Лицензия GOLD-3Po недействительна.');
-  }
-
-  async function refreshLevels(owner) {
+  async function refreshLevels(owner, changed) {
     if (session !== owner) return;
-    // Zone snapshots are throttled separately from the live tick poll and licence heartbeat.
-    if (owner.cachedZones && Date.now() - owner.levelAt < 4500) return;
+    // Refetch every ~4.5 s even without new ticks, so changed settings reach MT5 on a quiet market too.
     if (!owner.cachedZones || Date.now() - owner.levelAt >= 4500) {
       const response = await fetchApi('/v1/chart/zones?' + new URLSearchParams({ symbol: owner.symbol }));
       if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
@@ -114,6 +122,17 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const body = await response.json();
       owner.cachedZones = body.zones;
       owner.cachedStyle = body.style;
+    } else if (!changed) {
+      const response = await fetchApi('/v1/license/status');
+      // An answered "not valid" ends the session at once; only an unreachable service is retried.
+      let body;
+      try { body = await response.json(); }
+      catch { throw new Error('Не удалось проверить лицензию: ответ сервиса не является JSON.'); }
+      if (response.status === 402 || body?.valid === false) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
+      // An unreachable service, or an answer that cannot be read, is a failed check: it never counts as valid.
+      if (!response.ok || body?.valid !== true) throw new Error('Не удалось проверить лицензию.');
+    } else {
+      return;
     }
     if (session !== owner) return;
     owner.levelWrite = publish(owner.commonDataPath, owner.symbol, owner.cachedZones, owner.cachedStyle);
@@ -123,43 +142,35 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     set(owner, { zoneCount: owner.cachedZones.length });
   }
 
+  // A failed poll (terminal briefly gone, the local service restarting, HTTP 5xx) is retried with a
+  // growing pause instead of ending the session; after `maxFailures` in a row the session gives up.
+  // No new tick for `staleAfterMs` marks the feed stale in the status, without disconnecting.
   async function poll(owner) {
-    let delay = LIVE_POLL_INTERVAL_MS;
+    let delay = pollMs;
     try {
-      // Apply backpressure: do not advance the MT5 cursor while an earlier batch
-      // is waiting for API delivery. The worker can page the untouched cursor later.
-      if (owner.pendingTicks.length === 0) {
-        const result = await owner.worker.request('poll');
-        if (session !== owner) return;
-        if (Array.isArray(result.ticks) && result.ticks.length) owner.pendingTicks.push(...result.ticks);
-      }
-      if (owner.pendingTicks.length > 0) {
-        const batch = owner.pendingTicks.splice(0, 1000);
-        try {
-          const count = await ingest(owner, batch, false);
-          if (count) {
-            owner.dirty = true;
-            owner.lastTick = batch.at(-1)?.timestamp || owner.lastTick;
-          }
-        } catch (error) {
-          // MT5 has advanced its native cursor. Keep failed batches locally until
-          // the loop can deliver them; this prevents silent holes in live candles.
-          owner.pendingTicks.unshift(...batch);
-          throw error;
-        }
-      }
-      await refreshLicense(owner);
+      const result = await owner.worker.request('poll');
       if (session !== owner) return;
-      await refreshLevels(owner);
-      owner.failures = 0;
-      const online = !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'MT5 синхронизирован. График и футпринт получают одну ленту тиков.';
-      set(owner, { state: 'online', lastTick: owner.lastTick ?? null, message: owner.historyNote ? `${online} ${owner.historyNote}` : online, queuedTicks: owner.pendingTicks.length });
-    } catch (error) {
-      if (session === owner) {
-        owner.failures = (owner.failures || 0) + 1;
-        delay = Math.min(MAX_RETRY_DELAY_MS, LIVE_POLL_INTERVAL_MS * (2 ** Math.min(owner.failures, 5)));
-        set(owner, { state: 'online', message: `Временный сбой MT5/API: ${error.message}. Повтор через ${Math.ceil(delay/1000)} с; очередь тиков сохранена.`, queuedTicks: owner.pendingTicks.length });
+      const count = await ingest(owner, result.ticks, false);
+      if (count) {
+        owner.dirty = true;
+        owner.lastTick = result.ticks.at(-1).timestamp;
+        owner.lastTickAt = now();
       }
+      await refreshLevels(owner, owner.dirty);
+      owner.failures = 0;
+      const stale = owner.lastTickAt !== undefined && now() - owner.lastTickAt > staleAfterMs;
+      const online = stale ? `Нет новых тиков более ${Math.round(staleAfterMs / 1000)} с: рынок закрыт или терминал не получает котировки.`
+        : !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'Вход подтверждён. Уровни обновляются по таймфрейму из настроек.';
+      // The loss is reported once, for the outage that just ended; droppedTicks keeps the session total.
+      const lost = owner.droppedThisOutage ? ` Потеряно тиков за время сбоя: ${owner.droppedThisOutage}.` : '';
+      if (!owner.unsent?.length) owner.droppedThisOutage = 0;
+      set(owner, { state: 'online', feed: stale ? 'stale' : 'live', retries: 0, droppedTicks: owner.droppedTicks || 0, lastTick: owner.lastTick ?? null, message: (owner.historyNote ? `${online} ${owner.historyNote}` : online) + lost });
+    } catch (error) {
+      if (session !== owner) return;
+      owner.failures = (owner.failures || 0) + 1;
+      if (owner.failures >= maxFailures || owner.worker.stopped?.()) { await disconnect(error.message); return; }
+      delay = Math.min(pollMs * 2 ** owner.failures, maxBackoffMs);
+      set(owner, { state: 'reconnecting', retries: owner.failures, message: `Связь прервалась (${error.message}). Повтор ${owner.failures} из ${maxFailures} через ${Math.round(delay / 1000)} с${owner.failures === maxFailures - 1 ? ', последний: при новой ошибке соединение будет закрыто' : ''}.` });
     } finally {
       if (session === owner) owner.timer = setTimeout(() => void poll(owner), delay);
     }
@@ -183,31 +194,42 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       owner.worker.stop();
       await owner.levelWrite?.catch(() => {});
       if (owner.commonDataPath) await publish(owner.commonDataPath, owner.symbol, [], owner.cachedStyle).catch(() => {});
+      await fetchApi('/v1/ingest/mt5/spec/reset', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: owner.symbol }) }).catch(() => {});
     }
     if (!session) status = { state: 'offline', symbol: owner?.symbol, message };
     return state();
   }
 
-  async function connect({ terminalPath, login, password, server, symbol } = {}) {
+  async function connect() {
     if (session) throw new Error('Сначала отключите текущее соединение.');
     if (!workerCommand) throw new Error('Модуль MT5 не установлен.');
-    if (typeof terminalPath !== 'string' || !/terminal64\.exe$/i.test(terminalPath) || terminalPath.length > 1024 ||
-      typeof login !== 'string' || !/^\d{1,15}$/.test(login) || Number(login) < 1 ||
-      typeof password !== 'string' || !password || password.length > 256 || typeof server !== 'string' || !server.trim() || server.length > 128 ||
-      typeof symbol !== 'string' || !/^(?:XAUUSD|GOLD)[A-Z0-9._#+-]{0,20}$/i.test(symbol) || symbol.includes('..')) {
-      throw new Error('Заполните путь к terminal64.exe, номер счёта, пароль, сервер и точное имя символа золота.');
-    }
     const worker = makeWorker(workerCommand, workerArgs);
-    const owner = { worker, server: server.trim(), symbol: symbol.toUpperCase(), sequence: Date.now() * 1000, levelAt: 0, licenseAt: 0, dirty: true, pendingTicks: [], failures: 0 };
+    const owner = { worker, symbol: 'XAUUSD', sequence: Date.now() * 1000, levelAt: 0, dirty: true };
     session = owner;
-    status = { state: 'connecting', symbol: owner.symbol, message: 'Подключение к терминалу MT5…' };
+    status = { state: 'connecting', symbol: owner.symbol, message: 'Поиск уже авторизованного терминала MT5…' };
     try {
-      const result = await worker.request('connect', { terminalPath, login, password, server: owner.server, symbol }, 80_000);
+      const result = await worker.request('connect', {}, 80_000);
       if (session !== owner) return state();
-      if (result.symbol?.toUpperCase() !== owner.symbol || !result.commonDataPath || !result.dataPath) throw new Error('MT5 не подтвердил инструмент или папку данных.');
+      if (!result.symbol?.toUpperCase() || !result.commonDataPath || !result.dataPath || !result.terminalPath) {
+        throw new Error('MT5 не подтвердил авторизованный терминал, инструмент или каталог данных.');
+      }
+      owner.symbol = result.symbol.toUpperCase();
+      owner.server = result.server;
+      owner.accountLogin = result.accountLogin;
+      owner.terminalPath = result.terminalPath;
       owner.commonDataPath = result.commonDataPath;
       owner.dataPath = result.dataPath;
-      status = { state: 'online', symbol: owner.symbol, message: 'Вход подтверждён. Загружаются котировки…', zoneCount: 0 };
+      // The broker's tick size, when MT5 reported a usable one: the server builds footprint rows on it.
+      // Without it the status says why, so a failing MT5 call is visible instead of silent 0.1 rows.
+      const tickSize = Number(result.spec?.tickSize);
+      if (Number.isFinite(tickSize) && tickSize > 0 && tickSize <= 100) owner.spec = { tickSize };
+      const specNote = owner.spec ? {} : { tickSize: null, tickSizeIssue: typeof result.specUnavailable === 'string' ? result.specUnavailable.slice(0, 40) : 'not_reported' };
+      status = {
+        state: 'online', symbol: owner.symbol,
+        accountLabel: (owner.accountLogin ? 'Счёт ···' + String(owner.accountLogin).slice(-4) : 'Счёт MT5') + (owner.server ? ' · ' + owner.server : ''),
+        message: 'Подключено к уже авторизованному MT5. Загружаются котировки…',
+        zoneCount: 0, ...(owner.spec ? { tickSize: owner.spec.tickSize } : specNote)
+      };
       void seed(owner);
       return state();
     } catch (error) {
@@ -216,5 +238,15 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     }
   }
 
-  return { connect, disconnect, state, terminalDataPath: () => session?.dataPath };
+  function setIntegrationMessage(message) {
+    status = { ...status, integrationMessage: typeof message === 'string' ? message.slice(0, 600) : '' };
+    return state();
+  }
+
+  return {
+    connect, disconnect, state, setIntegrationMessage,
+    terminalPath: () => session?.terminalPath,
+    terminalDataPath: () => session?.dataPath,
+    commonDataPath: () => session?.commonDataPath
+  };
 }

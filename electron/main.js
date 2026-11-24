@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } f
 import { fileURLToPath } from 'node:url';
 import { createMt5Session } from './mt5-session.js';
 import { workerPath } from './mt5-runtime.js';
-import { installIndicator } from './mt5-indicator.js';
+import { installMt5Integration } from './mt5-integration.js';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -32,7 +32,7 @@ let isClosingServer = false;
 let isQuitting = false;
 let quitReady = false;
 let mt5;
-let mt5TerminalPath;
+let mt5ConnectTask = null;
 let marketIngestToken;
 let localApiPort = null;
 const adapterDir = app.isPackaged ? path.join(process.resourcesPath, 'adapters', 'mt5') : fileURLToPath(new URL('../adapters/mt5/', import.meta.url));
@@ -52,45 +52,45 @@ function registerMt5Ipc() {
     return callback(value);
   });
   handle('state', () => mt5.state());
-  handle('choose-terminal', async () => {
-    if (mt5.state().state !== 'offline') return null;
-    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: 'Выберите terminal64.exe вашего брокера', properties: ['openFile'], filters: [{ name: 'Терминал MetaTrader 5', extensions: ['exe'] }]
-    });
-    if (canceled) return null;
-    if (path.basename(filePaths[0]).toLowerCase() !== 'terminal64.exe') throw new Error('Выберите terminal64.exe из папки MetaTrader 5.');
-    mt5TerminalPath = filePaths[0];
-    return mt5TerminalPath;
-  });
-  handle('connect', async input => {
-    if (!mt5TerminalPath || input?.terminalPath !== mt5TerminalPath) throw new Error('Сначала выберите терминал кнопкой «Выбрать…».');
-    const response = await fetch(`${localOrigin}/v1/license/status`, { signal: AbortSignal.timeout(5000) });
-    if (!response.ok || !(await response.json()).valid) throw new Error('Сначала активируйте лицензию GOLD-3Po.');
-    if (isQuitting) throw new Error('Приложение завершает работу.');
-    const connected = await mt5.connect({ terminalPath: mt5TerminalPath, login: input.login, password: input.password, server: input.server, symbol: input.symbol?.trim() });
-    if (connected.state !== 'online') return connected;
-    const terminalDataPath = mt5.terminalDataPath();
-    try {
-      const patch = await installIndicator({
-        source: path.join(adapterDir, 'Gold3PoLevels.mq5'),
-        bridgeSource: path.join(adapterDir, 'Gold3PoBridge.mq5'),
-        terminalPath: mt5TerminalPath,
-        terminalDataPath
-      });
-      return { ...connected, message: `${connected.message} ${patch}` };
-    } catch (error) {
-      return { ...connected, message: `${connected.message} Автопатч не завершён: ${error.message}` };
-    }
-  });
+  handle('connect', () => connectAndRepairMt5());
   handle('disconnect', () => mt5.disconnect());
-  handle('install-indicator', () => {
-    const terminalDataPath = mt5.terminalDataPath();
-    if (!terminalDataPath) throw new Error('Сначала подключите терминал MT5.');
-    return installIndicator({ source: path.join(adapterDir, 'Gold3PoLevels.mq5'), bridgeSource: path.join(adapterDir, 'Gold3PoBridge.mq5'), terminalPath: mt5TerminalPath, terminalDataPath });
+  handle('install-integration', () => repairMt5Integration());
+}
+
+async function repairMt5Integration() {
+  if (mt5.state().state !== 'online') throw new Error('Сначала подключите уже авторизованный терминал MT5.');
+  const result = await installMt5Integration({
+    sourceDir: adapterDir,
+    terminalPath: mt5.terminalPath(),
+    terminalDataPath: mt5.terminalDataPath(),
+    commonDataPath: mt5.commonDataPath(),
+    token: marketIngestToken
   });
-  // The EA bridge (Gold3PoBridge.mq5) authenticates with the same token the local API expects,
-  // so the window shows it instead of sending the user into settings.json.
-  handle('bridge', () => ({ port: localApiPort, ingestToken: marketIngestToken }));
+  mt5.setIntegrationMessage(result.message);
+  return result;
+}
+
+async function connectAndRepairMt5() {
+  if (mt5ConnectTask) return mt5ConnectTask;
+  mt5ConnectTask = (async () => {
+    if (isQuitting) throw new Error('Приложение завершает работу.');
+    const response = await fetch(`${localOrigin}/v1/license/status`, { signal: AbortSignal.timeout(5000) });
+    const licence = response.ok ? await response.json() : null;
+    if (!licence?.valid) {
+      mt5.setIntegrationMessage('Сначала активируйте лицензию GOLD-3Po. Подключение к MT5 не выполнялось.');
+      return mt5.state();
+    }
+    const connected = await mt5.connect();
+    if (connected.state !== 'online') return connected;
+    try {
+      await repairMt5Integration();
+    } catch (error) {
+      mt5.setIntegrationMessage('MT5 подключён, но автообновление MQL5-компонентов не завершено: ' + (error?.message || String(error)));
+    }
+    return mt5.state();
+  })();
+  try { return await mt5ConnectTask; }
+  finally { mt5ConnectTask = null; }
 }
 
 function logError(error) {
@@ -331,7 +331,7 @@ async function runSmokeTest() {
     throw new Error('The packaged application HTML is missing required workspace elements.');
   }
 
-  for (const asset of ['/app.js', '/market-client.js', '/research-client.js', '/license-client.js', '/setups-client.js', '/mt5-client.js', '/styles.css']) {
+  for (const asset of ['/app.js', '/market-client.js', '/research-client.js', '/license-client.js', '/setups-client.js', '/mt5-client.js', '/mt5-status.js', '/footprint-candle.js', '/styles.css']) {
     const response = await fetch(localOrigin + asset, { signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error(`Application asset ${asset} returned HTTP ${response.status}.`);
   }
@@ -371,6 +371,9 @@ async function bootstrap() {
   registerMt5Ipc();
   createTray();
   await createMainWindow(splashStartedAt);
+  // On every launch, attach only to the already-authorized running terminal and repair
+  // the MQL5 files there. The MT5 account itself is never logged into or switched.
+  void connectAndRepairMt5().catch(error => mt5?.setIntegrationMessage('Автоподключение MT5: ' + (error?.message || String(error))));
 }
 
 function handleStartupFailure(error) {
