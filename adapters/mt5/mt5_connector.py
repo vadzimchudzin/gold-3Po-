@@ -256,15 +256,18 @@ def choose_gold_symbol(api, requested=None):
         match = next((name for name, _ in candidates if name.casefold() == requested.casefold()), None)
         if match:
             return match
-    candidates.sort(key=lambda item: (
-        0 if item[1] else 1,
-        0 if item[0].upper() == "XAUUSD" else 1,
-        0 if item[0].upper().startswith("XAUUSD") else 1,
-        len(item[0]),
-        item[0].casefold()
-    ))
-    if candidates:
-        return candidates[0][0]
+    # Prefer the broker's exact XAUUSD when present. Otherwise use one visible gold
+    # symbol only; never silently choose an arbitrary suffix if several are listed.
+    exact = next((name for name, _ in candidates if name.casefold() == "xauusd"), None)
+    if exact:
+        return exact
+    visible = [name for name, is_visible in candidates if is_visible]
+    pool = visible or [name for name, _ in candidates]
+    if len(pool) == 1:
+        return pool[0]
+    if len(pool) > 1:
+        raise WorkerError("ambiguous_gold_symbol",
+                          "В MT5 найдено несколько инструментов золота. Оставьте видимым только нужный XAUUSD в «Обзоре рынка» и повторите подключение.")
     # Some older terminals only expose a symbol through symbol_info before it is in symbols_get().
     fallbacks = [requested] if requested else []
     fallbacks.extend(["XAUUSD", "GOLD"])
@@ -365,7 +368,8 @@ class Worker:
             except Exception:
                 symbol_info = _SYMBOL_INFO_FAILED
             chart_mode = getattr(symbol_info, "chart_mode", None) if symbol_info not in (None, _SYMBOL_INFO_FAILED) else None
-            self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else None
+            # RoboForex spot gold is OTC; MT5's standard chart is Bid. Midpoint fallback shifts all OHLC values.
+            self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else SYMBOL_CHART_MODE_BID
             for path in (terminal.commondata_path, terminal.data_path):
                 if not isinstance(path, str) or not path or len(path) > 4096:
                     raise WorkerError("terminal_paths_unavailable", "MT5 did not provide its terminal data directories.")

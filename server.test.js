@@ -130,6 +130,25 @@ test('live MT5 batch preserves sequence order and safely retries an already inge
   const first=await (await send()).json();assert.equal(first.accepted,2);assert.equal(first.duplicates,0);assert.equal(first.lastAcceptedSequence,102);
   const retry=await (await send()).json();assert.equal(retry.accepted,0);assert.equal(retry.duplicates,2);
 });
+test('MT5 account feeds stay isolated and analysis returns the latest broker quote',async()=>{
+  const feedA='a'.repeat(32),feedB='b'.repeat(32);
+  const send=async(feedId,last,sequence)=>fetch(base+'/v1/ingest/mt5/history',{
+    method:'POST',headers:auth,body:JSON.stringify({source:'mt5',symbol:'XAUUSD',feedId,ticks:[{
+      timestamp:'2026-11-24T10:00:00.000Z',sequence,bid:last-0.1,ask:last+0.1,last,tickVolume:1,realVolume:0,flags:0
+    }]})
+  });
+  assert.equal((await send(feedA,4100,1)).status,202);
+  assert.equal((await send(feedB,4360,1)).status,202);
+  const read=async(feedId)=>(await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&feedId='+feedId+'&intervalMs=900000')).json());
+  const a=await read(feedA),b=await read(feedB);
+  assert.equal(a.bars.at(-1).c,4100,'feed A must see only its own bars');
+  assert.equal(a.lastQuote.last,4100,'the exact latest quote is returned separately from the candle');
+  assert.equal(b.bars.at(-1).c,4360,'feed B must not inherit feed A history');
+  assert.equal(b.lastQuote.last,4360);
+  const active=await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json();
+  assert.equal(active.feedId,feedB,'the most recently ingested account feed is the unqualified default');
+});
+
 test('COMEX events can be analysed as actual exchange trades, not broker quotes',async()=>{
   const event={source:'comex',symbol:'GCZ6',timestamp:'2026-11-17T18:00:00.000Z',sequence:1,tradeId:'gc-trade-1',price:2650.1,size:3,aggressorSide:'buy'};
   const ingest=await fetch(base+'/v1/ingest/comex/trade',{method:'POST',headers:auth,body:JSON.stringify(event)});

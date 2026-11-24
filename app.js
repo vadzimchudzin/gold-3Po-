@@ -56,7 +56,7 @@ function bindChartNavigation(){
  if(!chartViewport||chartViewport.dataset.navigationBound==='1')return;
  chartViewport.dataset.navigationBound='1';
  chartViewport.addEventListener('wheel',event=>{
-  if(!bars.length)return;
+  if(!bars.length||!event.ctrlKey)return;
   event.preventDefault();
   const factor=event.deltaY<0?1.12:1/1.12;
   if(event.shiftKey)changeVerticalZoom(verticalZoom*factor);
@@ -264,8 +264,9 @@ $('#footZoomYOut')?.addEventListener('click',()=>changeFootprintZoom('y',footpri
 $('#footZoomYIn')?.addEventListener('click',()=>changeFootprintZoom('y',footprintZoomY*1.2));
 $('#footZoomYReset')?.addEventListener('click',()=>changeFootprintZoom('y',1));
 grid.addEventListener('wheel',event=>{
- if(event.ctrlKey){event.preventDefault();changeFootprintZoom('x',footprintZoomX*(event.deltaY<0?1.12:1/1.12));}
- else if(event.shiftKey){event.preventDefault();changeFootprintZoom('y',footprintZoomY*(event.deltaY<0?1.12:1/1.12));}
+ const factor=event.deltaY<0?1.12:1/1.12;
+ if(event.ctrlKey){event.preventDefault();changeFootprintZoom(event.shiftKey?'y':'x',(event.shiftKey?footprintZoomY:footprintZoomX)*factor);}
+ else if(event.shiftKey){event.preventDefault();changeFootprintZoom('y',footprintZoomY*factor);}
 },{passive:false});
 $('#footprintModes').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{mode=b.dataset.mode;$('#footprintModes').querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===b));renderFootprint();}));
 $('#resetView').addEventListener('click',()=>{replayMode=false;showZones=true;showNumbers=true;mode='bidask';horizontalZoom=1;verticalZoom=1;footprintZoomX=1;footprintZoomY=1;selectedZone=null;$('#zonesToggle').setAttribute('aria-pressed','true');$('#numbersToggle').setAttribute('aria-pressed','true');$('#zonesToggle').classList.remove('is-off');renderZones();$('#footprintModes').querySelectorAll('button').forEach(b=>b.classList.toggle('selected',b.dataset.mode==='bidask'));select(bars.length-1);chartViewport.scrollLeft=chartViewport.scrollWidth;updateChartZoomControls();notify('Вид сброшен');});
@@ -354,6 +355,14 @@ window.addEventListener('market-replay',e=>{
 });
 window.addEventListener('market-replay-step',e=>{if(replayMode)select(Number(e.detail?.index));});
 window.addEventListener('exit-replay',()=>{replayMode=false;});
+window.addEventListener('market-feed-clear',()=>{
+ bars=[];zones=[];selected=-1;selectedZone=null;levels=[];analysisMeta=null;live=false;replayMode=false;hasAutoScrolled=false;
+ grid.dataset.autoScroll='1';
+ const count=$('#barCount');if(count)count.textContent='ОЖИДАНИЕ ИСТОРИИ';
+ const range=$('#sessionRange');if(range)range.textContent='Ожидание истории';
+ const status=$('#chartStatus');if(status){status.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';status.className='warning';}
+ renderZones();renderInspector();renderChart();renderFootprint();
+});
 const initialStatus=$('#chartStatus');if(initialStatus&&!live){initialStatus.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';initialStatus.className='warning';}
 let resizeTimer=null;
 window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=window.setTimeout(()=>{renderChart();renderFootprint();},150);});

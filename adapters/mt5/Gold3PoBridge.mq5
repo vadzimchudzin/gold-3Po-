@@ -7,7 +7,6 @@ input string HistoryUrl = "http://127.0.0.1:8787/v1/ingest/mt5/history";
 input string LiveBatchUrl = "http://127.0.0.1:8787/v1/ingest/mt5/live-batch";
 input string IngestToken = "";          // Optional override; normally read from the app's Common Files token
 input bool AppConnectionFeedsLive = true; // The desktop connector owns recent/live ticks when connected
-input bool AppConnectionFeedsLive = true; // The desktop connector owns the recent/live feed when enabled.
 input int MinIntervalMs = 100;
 input int RequestTimeoutMs = 5000;
 input int HistoryDays = 30;
@@ -92,6 +91,14 @@ string TickStamp(const long timeMsc)
    return stamp + StringFormat(".%03dZ", (int)(timeMsc % 1000));
 }
 
+double TickChartPrice(const MqlTick &tick)
+{
+   long chartMode = SymbolInfoInteger(_Symbol, SYMBOL_CHART_MODE);
+   if(chartMode == SYMBOL_CHART_MODE_BID)
+      return tick.bid;
+   return tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
+}
+
 int PostJson(const string url, const string body, string &response)
 {
    response = "";
@@ -132,7 +139,7 @@ bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong 
    {
       MqlTick tick = ticks[first+i];
       sequenceCursor++;
-      double lastPrice = tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
+      double lastPrice = TickChartPrice(tick);
       string eventId = StringFormat("%s-%I64d-%.10f-%.10f-%.10f-%I64u-%.4f-%u", _Symbol, tick.time_msc, tick.bid, tick.ask, lastPrice, tick.volume, tick.volume_real, tick.flags);
       if(i > 0) body += ",";
       body += StringFormat(
@@ -148,8 +155,8 @@ bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong 
 void StartHistorySync()
 {
    int days = MathMax(1, MathMin(HistoryDays, 90));
-   historyEnd = TimeGMT() - (AppConnectionFeedsLive ? 8 * 60 * 60 : 0);
-   // Avoid duplicating the recent window already supplied by the desktop connector.
+   historyEnd = TimeGMT();
+   // The desktop connector owns the latest 8 hours. Start EA history exactly before that window.
    if(AppConnectionFeedsLive) historyEnd -= 8 * 60 * 60;
    historyCursor = historyEnd - days * 86400;
    historySequence = 0;

@@ -116,9 +116,14 @@ test('session connects, ingests, publishes zones and clears them on disconnect',
   const state = await session.connect();
   assert.equal(state.state, 'online');
   assert.equal(state.symbol, 'XAUUSDM');
+  assert.match(state.feedId, /^[a-f0-9]{32}$/i, 'the account/symbol session has a stable feed identity');
   await new Promise(resolve => setTimeout(resolve, 2600));
   assert.ok(api.calls.some(c => c.path === '/v1/ingest/mt5/history'), 'history must be ingested');
   assert.ok(api.calls.some(c => c.path === '/v1/ingest/mt5/live-batch'), 'live ticks must be ingested');
+  const tickBatches = api.calls.filter(c => c.path.endsWith('/history') || c.path.endsWith('/live-batch'));
+  assert.ok(tickBatches.every(c => c.body.feedId === state.feedId), 'history and live data carry the same isolated feed identity');
+  assert.ok(tickBatches.every(c => c.body.ticks.every(t => t.feedId === state.feedId)), 'each tick carries the feed identity too');
+  assert.ok(api.calls.filter(c => c.path === '/v1/chart/zones').every(c => new URL(c.url).searchParams.get('feedId') === state.feedId), 'zones are calculated for the connected account only');
   assert.ok(published.some(p => p.symbol === 'XAUUSDM' && p.count === 1), 'zones must be published for the canonical broker symbol');
   assert.ok(published.some(p => p.count === 1 && p.width === 3), 'the drawing style from settings must reach the snapshot');
   const zoneCalls = api.calls.filter(c => c.path === '/v1/chart/zones');
