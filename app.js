@@ -2,12 +2,15 @@ import { barDelta, totalVolume } from './market-data.js';
 import { footprintOf, footprintCell, sessionProfile, applyTickToBar, emptyBar, tickVolume as footprintTickVolume, DEFAULT_FOOTPRINT_OPTIONS } from './footprint-engine.js';
 import { zoneLabelRu, zoneStateRu } from './zone-labels.js';
 import { candlePart } from './footprint-candle.js';
-import { chartScale } from './chart-scale.js';
+import { chartScale, priceRange, wheelIntent, zoomScrollAnchor, CHART_AXIS, CHART_ZOOM } from './chart-scale.js';
 const $ = s => document.querySelector(s);
 const chart=$('#priceChart'), grid=$('#footprintGrid'), zoneList=$('#zoneList'), toast=$('#toast'), chartEmpty=$('#chartEmpty');
 let bars=[], zones=[], selected=-1, selectedZone=null, showZones=true, showNumbers=true, mode='bidask', live=false, replayMode=false, toastTimer;
 let levels=[], analysisMeta=null, hasAutoScrolled=false;
 let horizontalZoom=1, verticalZoom=1, footprintZoomX=1, footprintZoomY=1, chartDrag=null, suppressChartClickUntil=0;
+// The vertical band the price axis is currently showing. Kept between renders so a tick inside it
+// does not move the series; only a new extreme, a zoom change or another instrument rebuilds it.
+let chartRange=null;
 const chartViewport=chart.parentElement;
 // The user's footprint options (published by settings-client at module init and on every save).
 // The live path recomputes the forming bar with them, so a changed setting shows at once.
@@ -32,16 +35,23 @@ function updateChartZoomControls(){
 }
 function changeHorizontalZoom(next,anchorClientX=null){
  const oldWidth=Math.max(1,chart.getBoundingClientRect().width);
+ const before=chartViewport.scrollLeft;
  const rect=chartViewport.getBoundingClientRect();
  const localX=anchorClientX===null?chartViewport.clientWidth/2:clamp(anchorClientX-rect.left,0,chartViewport.clientWidth);
- const contentX=chartViewport.scrollLeft+localX;
- horizontalZoom=clamp(next,0.25,8);
+ horizontalZoom=clamp(next,CHART_ZOOM.min,CHART_ZOOM.max);
  renderChart();
  const newWidth=Math.max(1,chart.getBoundingClientRect().width);
- chartViewport.scrollLeft=Math.max(0,contentX*newWidth/oldWidth-localX);
+ chartViewport.scrollLeft=zoomScrollAnchor({scrollLeft:before,viewportWidth:chartViewport.clientWidth,widthBefore:oldWidth,widthAfter:newWidth,anchorX:localX});
  updateChartZoomControls();
 }
-function changeVerticalZoom(next){verticalZoom=clamp(next,0.25,8);renderChart();updateChartZoomControls();}
+function changeVerticalZoom(next){verticalZoom=clamp(next,CHART_ZOOM.min,CHART_ZOOM.max);chartRange=null;renderChart();updateChartZoomControls();}
+// Dragging the price scale fires on every pointermove; one render per frame keeps the drag smooth.
+let verticalDragFrame=0,pendingVerticalZoom=null;
+function scheduleVerticalZoom(next){
+ pendingVerticalZoom=clamp(next,CHART_ZOOM.min,CHART_ZOOM.max);
+ if(verticalDragFrame)return;
+ verticalDragFrame=requestAnimationFrame(()=>{verticalDragFrame=0;if(pendingVerticalZoom===null)return;changeVerticalZoom(pendingVerticalZoom);pendingVerticalZoom=null;});
+}
 function updateFootprintZoomControls(){
  const x=$('#footZoomXReset'),y=$('#footZoomYReset');
  if(x)x.textContent='X '+Math.round(footprintZoomX*100)+'%';
@@ -55,30 +65,62 @@ function changeFootprintZoom(axis,next){
 function bindChartNavigation(){
  if(!chartViewport||chartViewport.dataset.navigationBound==='1')return;
  chartViewport.dataset.navigationBound='1';
+ // TradingView gesture set: the wheel zooms the time axis around the cursor (Shift zooms price),
+ // dragging pans, dragging the price scale stretches it, and a double click fits both back to 100%.
  chartViewport.addEventListener('wheel',event=>{
-  if(!bars.length||!event.ctrlKey)return;
+  if(!bars.length)return;
+  const intent=wheelIntent({deltaY:event.deltaY,shiftKey:event.shiftKey});
+  if(!intent)return;
   event.preventDefault();
-  const factor=event.deltaY<0?1.12:1/1.12;
-  if(event.shiftKey)changeVerticalZoom(verticalZoom*factor);
-  else changeHorizontalZoom(horizontalZoom*factor,event.clientX);
+  if(intent.axis==='price')scheduleVerticalZoom(verticalZoom*intent.factor);
+  else changeHorizontalZoom(horizontalZoom*intent.factor,event.clientX);
  },{passive:false});
+ // A double click is recognised here rather than from the dblclick event: selecting a candle
+ // re-renders the SVG between the two clicks, and the browser then never reports a dblclick.
+ let lastTapAt=0,lastTapX=0,lastTapY=0;
+ function fitScales(){
+  if(!bars.length)return;
+  horizontalZoom=1;verticalZoom=1;chartRange=null;renderChart();
+  chartViewport.scrollLeft=chartViewport.scrollWidth;updateChartZoomControls();
+ }
  chartViewport.addEventListener('pointerdown',event=>{
   if(event.button!==0)return;
+  const tapAt=performance.now();
+  if(tapAt-lastTapAt<320&&Math.abs(event.clientX-lastTapX)<8&&Math.abs(event.clientY-lastTapY)<8){
+   lastTapAt=0;fitScales();return;
+  }
+  lastTapAt=tapAt;lastTapX=event.clientX;lastTapY=event.clientY;
+  // The price scale is drawn at the end of the series, so it is only grabbable while the chart is
+  // pinned to the newest bar. Scrolled back into history, a drag pans instead.
+  const viewportRect=chartViewport.getBoundingClientRect();
+  const atNewest=chartViewport.scrollLeft+chartViewport.clientWidth>=chartViewport.scrollWidth-2;
+  if(atNewest&&event.clientX>viewportRect.right-CHART_AXIS.right){
+   chartDrag={axis:'price',startY:event.clientY,startZoom:verticalZoom,moved:false};
+   chartViewport.classList.add('chart-price-panning');
+   return;
+  }
   chartDrag={startX:event.clientX,startScrollLeft:chartViewport.scrollLeft,moved:false};
   chartViewport.classList.add('chart-panning');
  });
  window.addEventListener('pointermove',event=>{
   if(!chartDrag)return;
+  if(chartDrag.axis==='price'){
+   const delta=chartDrag.startY-event.clientY;
+   if(Math.abs(delta)>2)chartDrag.moved=true;
+   if(chartDrag.moved)scheduleVerticalZoom(chartDrag.startZoom*Math.exp(delta/260));
+   return;
+  }
   const delta=event.clientX-chartDrag.startX;
   if(Math.abs(delta)>3)chartDrag.moved=true;
   if(chartDrag.moved){chartViewport.scrollLeft=chartDrag.startScrollLeft-delta;chartViewport.classList.add('is-dragging');}
  });
  const endDrag=()=>{
   if(chartDrag?.moved)suppressChartClickUntil=performance.now()+250;
-  chartDrag=null;chartViewport.classList.remove('chart-panning','is-dragging');
+  chartDrag=null;chartViewport.classList.remove('chart-panning','is-dragging','chart-price-panning');
  };
  window.addEventListener('pointerup',endDrag);
  window.addEventListener('pointercancel',endDrag);
+ chartViewport.addEventListener('dblclick',fitScales);
 }
 bindChartNavigation();
 $('#chartZoomOut')?.addEventListener('click',()=>changeHorizontalZoom(horizontalZoom/1.2));
@@ -101,10 +143,12 @@ function renderChart(){
  // Include every plotted liquidity zone in the visible price extent. Otherwise zones above/below
  // the candle range are clipped by the chart's auto-scale and appear to be missing in MT5 parity checks.
  if(showZones)for(const zone of zones){if(Number.isFinite(Number(zone.high)))allPrices.push(Number(zone.high));if(Number.isFinite(Number(zone.low)))allPrices.push(Number(zone.low));}
- if(!allPrices.length){setEmptyState(true);return;}
- const rawMin=Math.min(...allPrices),rawMax=Math.max(...allPrices),rawRange=Math.max(0.01,rawMax-rawMin),padding=Math.max(0.02,rawRange*.04),center=(rawMin+rawMax)/2;
- const paddedRange=rawRange+padding*2;
- const visibleRange=paddedRange/verticalZoom,min=center-visibleRange/2,max=center+visibleRange/2;
+ const plotted=allPrices.map(Number).filter(value=>Number.isFinite(value));
+ if(!plotted.length){setEmptyState(true);return;}
+ // A sticky band: the axis only grows when price leaves it, so a live tick never shifts the series.
+ const range=priceRange({prices:plotted,previous:chartRange,zoom:verticalZoom});
+ chartRange=range;
+ const min=range.min,max=range.max;
  const x=i=>left+step*(i+.5),y=p=>34+(max-p)/(max-min)*315,cw=Math.max(1,Math.min(26,step*.62));
  const rawStep=(max-min)/8,mag=10**Math.floor(Math.log10(rawStep)),gridStep=[1,2,2.5,5,10].map(m=>m*mag).find(v=>v>=rawStep);
  let html=''; for(let p=Math.ceil(min/gridStep)*gridStep;p<=max;p+=gridStep)html+=`<line x1="${left}" y1="${y(p)}" x2="${left+width}" y2="${y(p)}" class="grid-line"/><text x="${left+width+12}" y="${y(p)+4}" class="axis-label">${fmt(p,gridStep<1?2:gridStep<10?1:0)}</text>`;
@@ -143,8 +187,138 @@ function barFootprint(b){
  if(!Array.isArray(b?.levels))return b;
  return {...b,...footprintOf(b.levels,{...footprintOptions(),h:b.h,l:b.l,c:b.c,priceStep:footprintStep()})};
 }
+// One footprint cell's contents: the bid/ask halves plus the unclassified marker. The full render
+// and the live column patch both call it, so a patched cell prints exactly what a rebuild would.
+function footCellContent(v,{mode,showNumbers,bidAlpha=0,askAlpha=0}){
+ if(mode!=='bidask')return null;
+ if(!showNumbers)return '<span class="foot-side bid-side" data-side="bid"></span><span class="foot-side ask-side" data-side="ask"></span>';
+ let content='<span class="foot-side bid-side" data-side="bid" style="--side-intensity:'+bidAlpha.toFixed(3)+'">'+(v.bid>0?fmt(v.bid,0):'')+'</span><span class="foot-side ask-side" data-side="ask" style="--side-intensity:'+askAlpha.toFixed(3)+'">'+(v.ask>0?fmt(v.ask,0):'')+'</span>';
+ if(v.unknown>0){
+  const hasSides=v.bid>0||v.ask>0;
+  content+='<span class="foot-unknown '+(hasSides?'mixed':'only')+'" title="Неопределённая сторона: '+fmt(v.unknown,0)+'">'+(hasSides?'?':'? '+fmt(v.unknown,0))+'</span>';
+ }
+ return content;
+}
+const sideIntensity=(value,maximum)=>value>0?Math.min(.9,.08+.8*Math.pow(value/maximum,.58)):0;
+// One full footprint cell, including its marks and classes. A rebuild and a live patch both call
+// it, so a patched column is identical to a re-rendered one.
+function footCellMarkup(b,p,index,ctx){
+ const {mode,showNumbers,scale,bidScale,askScale,step,priceDigits,selected,formingIndex}=ctx;
+ const v=levelOf(b,p),total=v.total||(v.bid+v.ask+v.unknown),empty=total<=0;
+ const intensity=total>0?Math.min(.85,.07+.68*Math.pow(total/scale,.65)):0;
+ const bidAlpha=sideIntensity(v.bid,bidScale),askAlpha=sideIntensity(v.ask,askScale);
+ const priceLabel=value=>fmt(value,priceDigits);
+ const isPoc=b.poc!=null&&near(b.poc,p),inVa=!!b.valueArea&&p<=b.valueArea.high+1e-9&&p>=b.valueArea.low-1e-9;
+ const imbalance=b.imbalances?.find(x=>near(x.price,p))?.side||null;
+ const stacked=!!imbalance&&(b.stackedImbalances||[]).some(item=>item.side===imbalance&&Array.isArray(item.prices)&&item.prices.some(price=>near(price,p)));
+ const absorbed=(b.absorbedLevels||[]).some(x=>near(x.price,p));
+ const levelRows=Array.isArray(b.levels)?b.levels:[];
+ const unfinished=(levelRows.length&&near(levelRows[0].price,p)&&b.unfinishedHigh)||(levelRows.length&&near(levelRows.at(-1).price,p)&&b.unfinishedLow);
+ let content='',cls='';
+ if(mode==='bidask'){
+  content=footCellContent(v,{mode,showNumbers,bidAlpha,askAlpha});
+  cls='bidask';
+  if(v.unknown>0&&v.bid+v.ask===0)cls+=' unknown-only';
+ }else{
+  const cell=footprintCell(v,mode);
+  content=showNumbers?cell.text:'';
+  cls=cell.tone==='positive'?'delta-positive':cell.tone==='negative'?'delta-negative':'volume-cell';
+ }
+ if(empty)cls+=' empty-level';
+ if(imbalance)cls+=' imbalance-'+imbalance;
+ if(stacked)cls+=' foot-stacked-'+imbalance;
+ if(isPoc)cls+=' foot-poc';
+ if(inVa)cls+=' foot-va';
+ if(absorbed)cls+=' foot-absorbed';
+ if(unfinished)cls+=' foot-unfinished';
+ if(index===formingIndex)cls+=' foot-forming';
+ const part=candlePart(b,p,step);
+ cls+=' candle-'+part+(part==='body'?(b.c>=b.o?' candle-up':' candle-down'):'');
+ const marks=[isPoc?'POC':'',inVa?'зона стоимости':'',imbalance?(imbalance==='buy'?'имбаланс покупателей':'имбаланс продавцов'):'',stacked?'стек имбалансов':'',absorbed?'поглощение':'',unfinished?'незакрытый аукцион':'',v.unknown>0?'неопределённая сторона: '+fmt(v.unknown,0):''].filter(Boolean).join(' · ');
+ const title='Бид '+v.bid+'; аск '+v.ask+'; без стороны '+v.unknown+(marks?' · '+marks:'');
+ const aria='Свеча '+(index+1)+', цена '+priceLabel(p)+', бид '+v.bid+', аск '+v.ask+', без стороны '+v.unknown+(marks?', '+marks:'');
+ return '<button class="foot-cell '+cls+' '+(index===selected?'active':'')+'" data-index="'+index+'" data-price="'+p+'" data-bid="'+v.bid+'" data-ask="'+v.ask+'" data-unknown="'+v.unknown+'" style="--intensity:'+intensity.toFixed(3)+'" title="'+title.replace(/"/g,'&quot;')+'" aria-label="'+aria.replace(/"/g,'&quot;')+'" '+(empty?'disabled aria-hidden="true"':'')+'>'+content+(isPoc?'<i class="poc-mark">◆</i>':'')+'</button>';
+}
+// Marks that colour a whole column: while they stay identical, a tick can only change numbers.
+function footMarkSignature(foot){
+ if(!foot)return '';
+ const va=foot.valueArea?Number(foot.valueArea.low).toFixed(8)+':'+Number(foot.valueArea.high).toFixed(8):'';
+ const imb=(foot.imbalances||[]).map(x=>x.side+Number(x.price).toFixed(8)).join('|');
+ const stk=(foot.stackedImbalances||[]).map(x=>x.side+(x.prices||[]).length).join('|');
+ const abs=(foot.absorbedLevels||[]).map(x=>Number(x.price).toFixed(8)).join('|');
+ return [foot.poc!=null?Number(foot.poc).toFixed(8):'',va,imb,stk,abs,foot.unfinishedHigh?'H':'',foot.unfinishedLow?'L':''].join('/');
+}
+// What the last render left on screen, so a live tick can rewrite the forming column instead of
+// rebuilding every row of the ladder.
+let liveColumnState=null;
+function patchLiveFootprint(){
+ const state=liveColumnState;
+ if(!state||!bars.length||mode!=='bidask'||!showNumbers)return false;
+ if(state.index!==bars.length-1)return false;
+ const foot=barFootprint(bars[bars.length-1]);
+ if(!Array.isArray(foot.levels)||!foot.levels.length)return false;
+ // Rows carry the broker's own precision, so a level is matched to the rendered ladder by price
+ // within half a step instead of by an exact string: float noise must not force a rebuild.
+ const snap=price=>{
+  let best=null,delta=Infinity;
+  for(const candidate of state.rows){
+   const d=Math.abs(candidate-price);
+   if(d<delta){delta=d;best=candidate;}
+  }
+  return delta<=state.step/2+1e-9?best:null;
+ };
+ const index=state.index,targets=[];
+ for(const row of foot.levels){
+  const snapped=snap(Number(row.price));
+  // A price row the ladder does not carry yet changes the rows of every column: rebuild.
+  if(snapped===null)return false;
+  const cell=grid.querySelector('.foot-cell[data-index="'+index+'"][data-price="'+snapped+'"]');
+  if(!cell)return false;
+  targets.push({price:snapped,cell});
+ }
+ // The heat map is normalised over the whole window, so the scales the new column needs are taken
+ // before writing; rescaleFootprintHeat then keeps every other column's colour consistent.
+ let scale=state.scale,bidScale=state.bidScale,askScale=state.askScale;
+ for(const row of foot.levels){
+  const bid=Number(row.bid)||0,ask=Number(row.ask)||0,total=bid+ask+(Number(row.unknown)||0);
+  if(total>scale)scale=total;
+  if(bid>bidScale)bidScale=bid;
+  if(ask>askScale)askScale=ask;
+ }
+ const step=footprintStep();
+ const ctx={mode,showNumbers,scale,bidScale,askScale,step,priceDigits:clamp(Math.ceil(-Math.log10(step)),2,6),selected,formingIndex:index};
+ for(const {price,cell} of targets)cell.outerHTML=footCellMarkup(foot,price,index,ctx);
+ const scales=rescaleFootprintHeat();
+ state.scale=scales.scale;state.bidScale=scales.bidScale;state.askScale=scales.askScale;
+ state.marks=footMarkSignature(foot);
+ const deltaCell=grid.querySelector('.foot-delta[data-index="'+index+'"]');
+ if(deltaCell){
+  const d=(foot.unknown||0)>0?null:(foot.delta??barDelta(bars[bars.length-1]));
+  deltaCell.textContent=d===null?'—':((d>0?'+':'')+fmt(d,0));
+  deltaCell.className='foot-delta '+(d===null?'':d>=0?'positive':'negative')+(index===selected?' active':'');
+ }
+ return true;
+}
+// Renormalise the existing cells in place: same numbers a rebuild would print, no markup churn.
+function rescaleFootprintHeat(){
+ const cells=[...grid.querySelectorAll('.foot-cell[data-index][data-price]')];
+ const rows=cells.map(cell=>{
+  const bid=Number(cell.dataset.bid)||0,ask=Number(cell.dataset.ask)||0,unknown=Number(cell.dataset.unknown)||0;
+  return {cell,bid,ask,total:bid+ask+unknown};
+ });
+ let scale=1,bidScale=1,askScale=1;
+ for(const row of rows){if(row.total>scale)scale=row.total;if(row.bid>bidScale)bidScale=row.bid;if(row.ask>askScale)askScale=row.ask;}
+ for(const row of rows){
+  row.cell.style.setProperty('--intensity',(row.total>0?Math.min(.85,.07+.68*Math.pow(row.total/scale,.65)):0).toFixed(3));
+  const bidSide=row.cell.querySelector('.bid-side'),askSide=row.cell.querySelector('.ask-side');
+  if(bidSide)bidSide.style.setProperty('--side-intensity',sideIntensity(row.bid,bidScale).toFixed(3));
+  if(askSide)askSide.style.setProperty('--side-intensity',sideIntensity(row.ask,askScale).toFixed(3));
+ }
+ return {scale,bidScale,askScale};
+}
+
 function renderFootprint(){
- if(!bars.length){grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
+ if(!bars.length){liveColumnState=null;grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
  // Keep the footprint as a shared price ladder: every candle stays on the same vertical price scale.
  // Each traded cell is rendered as two independent heatmap sides (Bid / Ask), not one blended total.
  const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(46*footprintZoomX),30,112),maxCols=Math.max(3,Math.min(60,Math.floor((available-68-92)/(cellWidth+3)))),rowHeight=clamp(Math.round(23*footprintZoomY),14,64);
@@ -157,7 +331,7 @@ function renderFootprint(){
   if(!traded.has(key))traded.set(key,price);
  }
  const priceRows=[...traded.values()].sort((a,b)=>b-a);
- if(!priceRows.length){grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
+ if(!priceRows.length){liveColumnState=null;grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
  // Data quality is shown, never repaired by inventing prices or distributing OHLC over empty rows.
  const totalSourceTicks=feet.reduce((sum,b)=>sum+(Number(b.tickCount)||0),0);
  const totalSourceLevels=feet.reduce((sum,b)=>sum+(Array.isArray(b.levels)?b.levels.length:0),0);
@@ -174,7 +348,6 @@ function renderFootprint(){
  const scale=Math.max(1,...feet.map(b=>Number(b.maxLevelVolume)||0));
  const bidScale=Math.max(1,...allLevels.map(row=>Number(row.bid)||0));
  const askScale=Math.max(1,...allLevels.map(row=>Number(row.ask)||0));
- const sideIntensity=(value,maximum)=>value>0?Math.min(.9,.08+.8*Math.pow(value/maximum,.58)):0;
  const profile=sessionProfile(bars,{priceStep:footprintStep(),options:footprintOptions()});
  const currentProfile=profile.current;
  const profileRows=new Map((currentProfile?.levels||[]).map(row=>[Number(row.price).toFixed(8),row]));
@@ -183,47 +356,8 @@ function renderFootprint(){
  const step=footprintStep(),priceDigits=clamp(Math.ceil(-Math.log10(step)),2,6),priceLabel=p=>fmt(p,priceDigits);
  const cols=visible.length,template='68px repeat('+cols+','+cellWidth+'px) 92px',minWidth=68+cols*(cellWidth+3)+92;
  const head='<div class="foot-row foot-head" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ЦЕНА</div>'+visible.map((b,i)=>{const levels=Array.isArray(b.levels)?b.levels.length:0,ticks=Number(b.tickCount)||0;return '<div class="bar-head '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-source-ticks="'+ticks+'" data-source-levels="'+levels+'" title="'+timeLabel(b.time,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' · исходных тиков: '+ticks+' · фактических ценовых уровней: '+levels+'">#'+String(offset+i+1).padStart(3,'0')+'</div>';}).join('')+'<div class="foot-profile-head">ПРОФИЛЬ</div></div>';
- const rows=priceRows.map(p=>'<div class="foot-row" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level" data-price="'+p+'">'+priceLabel(p)+'</div>'+feet.map((b,i)=>{
-  const v=levelOf(b,p),total=v.total||(v.bid+v.ask+v.unknown),empty=total<=0;
-  const intensity=total>0?Math.min(.85,.07+.68*Math.pow(total/scale,.65)):0;
-  const bidAlpha=sideIntensity(v.bid,bidScale),askAlpha=sideIntensity(v.ask,askScale);
-  const isPoc=b.poc!=null&&near(b.poc,p),inVa=!!b.valueArea&&p<=b.valueArea.high+1e-9&&p>=b.valueArea.low-1e-9;
-  const imbalance=b.imbalances?.find(x=>near(x.price,p))?.side||null;
-  const stacked=!!imbalance&&(b.stackedImbalances||[]).some(item=>item.side===imbalance&&Array.isArray(item.prices)&&item.prices.some(price=>near(price,p)));
-  const absorbed=(b.absorbedLevels||[]).some(x=>near(x.price,p));
-  const levelRows=Array.isArray(b.levels)?b.levels:[];
-  const unfinished=(levelRows.length&&near(levelRows[0].price,p)&&b.unfinishedHigh)||(levelRows.length&&near(levelRows.at(-1).price,p)&&b.unfinishedLow);
-  let content='',cls='';
-  if(mode==='bidask'){
-   content=showNumbers
-    ?'<span class="foot-side bid-side" data-side="bid" style="--side-intensity:'+bidAlpha.toFixed(3)+'">'+(v.bid>0?fmt(v.bid,0):'')+'</span><span class="foot-side ask-side" data-side="ask" style="--side-intensity:'+askAlpha.toFixed(3)+'">'+(v.ask>0?fmt(v.ask,0):'')+'</span>'
-    :'<span class="foot-side bid-side" data-side="bid"></span><span class="foot-side ask-side" data-side="ask"></span>';
-   if(showNumbers&&v.unknown>0){
-    const hasSides=v.bid>0||v.ask>0;
-    content+='<span class="foot-unknown '+(hasSides?'mixed':'only')+'" title="Неопределённая сторона: '+fmt(v.unknown,0)+'">'+(hasSides?'?':'? '+fmt(v.unknown,0))+'</span>';
-   }
-   cls='bidask';
-   if(v.unknown>0&&v.bid+v.ask===0)cls+=' unknown-only';
-  }else{
-   const cell=footprintCell(v,mode);
-   content=showNumbers?cell.text:'';
-   cls=cell.tone==='positive'?'delta-positive':cell.tone==='negative'?'delta-negative':'volume-cell';
-  }
-  if(empty)cls+=' empty-level';
-  if(imbalance)cls+=' imbalance-'+imbalance;
-  if(stacked)cls+=' foot-stacked-'+imbalance;
-  if(isPoc)cls+=' foot-poc';
-  if(inVa)cls+=' foot-va';
-  if(absorbed)cls+=' foot-absorbed';
-  if(unfinished)cls+=' foot-unfinished';
-  if(offset+i===bars.length-1)cls+=' foot-forming';
-  const part=candlePart(b,p,step);
-  cls+=' candle-'+part+(part==='body'?(b.c>=b.o?' candle-up':' candle-down'):'');
-  const marks=[isPoc?'POC':'',inVa?'зона стоимости':'',imbalance?(imbalance==='buy'?'имбаланс покупателей':'имбаланс продавцов'):'',stacked?'стек имбалансов':'',absorbed?'поглощение':'',unfinished?'незакрытый аукцион':'',v.unknown>0?'неопределённая сторона: '+fmt(v.unknown,0):''].filter(Boolean).join(' · ');
-  const title='Бид '+v.bid+'; аск '+v.ask+'; без стороны '+v.unknown+(marks?' · '+marks:'');
-  const aria='Свеча '+(offset+i+1)+', цена '+priceLabel(p)+', бид '+v.bid+', аск '+v.ask+', без стороны '+v.unknown+(marks?', '+marks:'');
-  return '<button class="foot-cell '+cls+' '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-price="'+p+'" data-bid="'+v.bid+'" data-ask="'+v.ask+'" data-unknown="'+v.unknown+'" style="--intensity:'+intensity.toFixed(3)+'" title="'+title.replace(/"/g,'&quot;')+'" aria-label="'+aria.replace(/"/g,'&quot;')+'" '+(empty?'disabled aria-hidden="true"':'')+'>'+content+(isPoc?'<i class="poc-mark">◆</i>':'')+'</button>';
- }).join('')+(function(){
+ const cellCtx={mode,showNumbers,scale,bidScale,askScale,step,priceDigits,selected,formingIndex:bars.length-1};
+const rows=priceRows.map(p=>'<div class="foot-row" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level" data-price="'+p+'">'+priceLabel(p)+'</div>'+feet.map((b,i)=>footCellMarkup(b,p,offset+i,cellCtx)).join('')+(function(){
   const row=profileRows.get(Number(p).toFixed(8));
   if(!row||!row.total)return '<div class="foot-profile empty"></div>';
   const isPoc=va&&near(currentProfile.poc,p),inVa=va&&p<=va.high+1e-9&&p>=va.low-1e-9;
@@ -231,7 +365,7 @@ function renderFootprint(){
   const width=Math.max(1,Math.round(100*row.total/profileMax));
   return '<div class="foot-profile '+(inVa?'va ':'')+(isPoc?'poc':'')+'" title="Профиль сессии: '+fmt(row.total,0)+' · '+(isPoc?'POC':'внутри зоны стоимости')+'"><i style="width:'+width+'%"></i>'+(isVah?'<b>VAH</b>':isVal?'<b>VAL</b>':isPoc?'<b>POC</b>':'')+'</div>';
  })()+'</div>').join('');
- const deltas='<div class="foot-row foot-deltas" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">Δ СВЕЧИ</div>'+feet.map((b,i)=>{const d=b.unknown>0?null:(b.delta??barDelta(b));return '<div class="foot-delta '+(d===null?'':d>=0?'positive':'negative')+' '+(offset+i===selected?'active':'')+'">'+(d===null?'—':((d>0?'+':'')+fmt(d,0)))+'</div>';}).join('')+'<div class="foot-profile-total">'+(currentProfile?fmt(currentProfile.volume,0):'—')+'</div></div>';
+ const deltas='<div class="foot-row foot-deltas" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">Δ СВЕЧИ</div>'+feet.map((b,i)=>{const d=b.unknown>0?null:(b.delta??barDelta(b));return '<div class="foot-delta '+(d===null?'':d>=0?'positive':'negative')+' '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'">'+(d===null?'—':((d>0?'+':'')+fmt(d,0)))+'</div>';}).join('')+'<div class="foot-profile-total">'+(currentProfile?fmt(currentProfile.volume,0):'—')+'</div></div>';
  const times='<div class="foot-row foot-times" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ВРЕМЯ</div>'+visible.map((b,i)=>'<button class="bar-time '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'">'+timeLabel(b.time,{hour:'2-digit',minute:'2-digit',timeZone:'UTC'},'toLocaleTimeString')+'</button>').join('')+'<div class="foot-profile-head">СЕССИЯ</div></div>';
  grid.innerHTML=sourceStatus+'<div class="footprint-table" style="min-width:'+minWidth+'px;--footprint-row-height:'+rowHeight+'px">'+head+deltas+rows+times+'</div>';
  updateFootprintZoomControls();
@@ -241,6 +375,12 @@ function renderFootprint(){
   if(target){const row=target.closest('.foot-row'),box=grid.getBoundingClientRect(),rect=row.getBoundingClientRect();
    if(rect.top<box.top+50||rect.bottom>box.bottom-50)grid.scrollTop+=rect.top-box.top-Math.round((box.height-rect.height)/2);}
  }
+ // Remember what this render put on screen: while the ladder, the marks and the window hold, a
+ // live tick only has to rewrite the forming column.
+ const lastVisible=offset+visible.length-1;
+ liveColumnState=lastVisible===bars.length-1
+  ?{index:lastVisible,rows:priceRows.map(Number),step,scale,bidScale,askScale,marks:footMarkSignature(feet.at(-1))}
+  :null;
  grid.querySelectorAll('[data-index]').forEach(n=>n.addEventListener('click',()=>select(Number(n.dataset.index))));
 }
 // A wheel or touch scroll means the trader took over the view; stop re-centring the price axis.
@@ -298,7 +438,7 @@ grid.addEventListener('wheel',event=>{
  else if(event.shiftKey){event.preventDefault();changeFootprintZoom('y',footprintZoomY*factor);}
 },{passive:false});
 $('#footprintModes').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{mode=b.dataset.mode;$('#footprintModes').querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===b));renderFootprint();}));
-$('#resetView').addEventListener('click',()=>{replayMode=false;showZones=true;showNumbers=true;mode='bidask';horizontalZoom=1;verticalZoom=1;footprintZoomX=1;footprintZoomY=1;selectedZone=null;$('#zonesToggle').setAttribute('aria-pressed','true');$('#numbersToggle').setAttribute('aria-pressed','true');$('#zonesToggle').classList.remove('is-off');renderZones();$('#footprintModes').querySelectorAll('button').forEach(b=>b.classList.toggle('selected',b.dataset.mode==='bidask'));select(bars.length-1);chartViewport.scrollLeft=chartViewport.scrollWidth;updateChartZoomControls();notify('Вид сброшен');});
+$('#resetView').addEventListener('click',()=>{replayMode=false;showZones=true;showNumbers=true;mode='bidask';horizontalZoom=1;verticalZoom=1;chartRange=null;footprintZoomX=1;footprintZoomY=1;selectedZone=null;$('#zonesToggle').setAttribute('aria-pressed','true');$('#numbersToggle').setAttribute('aria-pressed','true');$('#zonesToggle').classList.remove('is-off');renderZones();$('#footprintModes').querySelectorAll('button').forEach(b=>b.classList.toggle('selected',b.dataset.mode==='bidask'));select(bars.length-1);chartViewport.scrollLeft=chartViewport.scrollWidth;updateChartZoomControls();notify('Вид сброшен');});
 const workspace=$('#workspace'),layoutButton=$('#layoutButton'),panelResizer=$('#chartPanelResizer');
 let layoutMode='stacked',splitRatio=0.5,splitPointer=false;
 try{layoutMode=localStorage.getItem('gold3po-layout')==='split'?'split':'stacked';splitRatio=clamp(Number(localStorage.getItem('gold3po-split')||0.5),0.32,0.68);}catch{}
@@ -339,8 +479,8 @@ applyWorkspaceLayout();
 let liveFrame=0,liveRenderedAt=0;
 function scheduleLiveRender(){
  if(liveFrame)return;
- const wait=Math.max(0,250-(performance.now()-liveRenderedAt));
- liveFrame=setTimeout(()=>{liveFrame=0;liveRenderedAt=performance.now();renderChart();renderFootprint();if(selected===bars.length-1)renderInspector();},wait);
+ const wait=Math.max(0,120-(performance.now()-liveRenderedAt));
+ liveFrame=setTimeout(()=>{liveFrame=0;liveRenderedAt=performance.now();renderChart();if(!patchLiveFootprint())renderFootprint();if(selected===bars.length-1)renderInspector();},wait);
 }
 function applyLiveTick(event){
  if(replayMode||!bars.length||!event)return;
@@ -385,7 +525,7 @@ window.addEventListener('market-replay',e=>{
 window.addEventListener('market-replay-step',e=>{if(replayMode)select(Number(e.detail?.index));});
 window.addEventListener('exit-replay',()=>{replayMode=false;});
 window.addEventListener('market-feed-clear',()=>{
- bars=[];zones=[];selected=-1;selectedZone=null;levels=[];analysisMeta=null;live=false;replayMode=false;hasAutoScrolled=false;
+ bars=[];zones=[];selected=-1;selectedZone=null;levels=[];analysisMeta=null;live=false;replayMode=false;hasAutoScrolled=false;chartRange=null;
  grid.dataset.autoScroll='1';
  const count=$('#barCount');if(count)count.textContent='ОЖИДАНИЕ ИСТОРИИ';
  const range=$('#sessionRange');if(range)range.textContent='Ожидание истории';

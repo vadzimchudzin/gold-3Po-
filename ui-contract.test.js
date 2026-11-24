@@ -91,11 +91,15 @@ test('EA bridge token is kept out of renderer IPC and handed to MT5 automaticall
 
 test('live quote strip displays BID, ASK and spread only for the active MT5 account',async()=>{
  const client=await readFile(new URL('./market-client.js',import.meta.url),'utf8');
- for(const id of ['bidPrice','askPrice','spreadPrice'])assert.ok(html.includes('id="'+id+'"'),'Missing live quote target '+id);
+ const quote=await readFile(new URL('./quote-display.js',import.meta.url),'utf8');
+ for(const id of ['bidPrice','askPrice','spreadPrice','referencePrice'])assert.ok(html.includes('id="'+id+'"'),'Missing live quote target '+id);
  assert.ok(client.includes("window.addEventListener('market-tick'"));
- assert.ok(client.includes('tick.bid'));
- assert.ok(client.includes('tick.ask'));
- assert.ok(client.includes('ask-bid'));
  assert.ok(client.includes('const activeFeedId=marketFeedId()'));
  assert.ok(client.includes('tick.feedId!==activeFeedId'));
+ // The strip and the reference price share one ordering gate and one formatter, so a replayed or
+ // late frame cannot move a quote backwards and every field prints the same decimals.
+ assert.match(client,/paintQuote\(quotes\.accept\(tick\)\)/);
+ for(const field of ['quote.bid','quote.ask','quote.spread'])assert.ok(client.includes(field),'Quote strip does not print '+field);
+ assert.ok(quote.includes('spread: ask - bid'),'The spread must be the ask minus the bid');
+ assert.match(quote,/stamp < lastTime/,'A late tick must be rejected');
 });

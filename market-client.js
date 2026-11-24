@@ -1,9 +1,14 @@
 import { marketSymbol, marketFeedId, hasMt5Bridge } from './mt5-client.js';
+import { priceDigits, priceText, createQuoteGate } from './quote-display.js';
 const api=document.querySelector('#apiStatus'),mt5=document.querySelector('#mt5Status'),comex=document.querySelector('#comexStatus');
 const labels={mt5,comex};let source;let analysisTimer=null;let lastAnalysisAt=0;let reconnectTimer=null;
 const STALE_MS=45000;
 const pill=document.querySelector('.demo-pill'),link=document.querySelector('.connection');
-let displayedQuoteTime=0,clearedWithoutFeed=false;
+let clearedWithoutFeed=false;
+// One gate and one formatter for every quote on the page: a tick that arrives late cannot move the
+// strip back, and every field prints the same price with the same decimals.
+const quotes=createQuoteGate();
+let quoteDigits=2;
 const feedStates={online:'ОНЛАЙН',stale:'УСТАРЕЛ',offline:'ОФФЛАЙН',waiting:'ОЖИДАНИЕ'};
 const feedText=status=>feedStates[String(status||'').toLowerCase()]||String(status||'ОЖИДАНИЕ').toUpperCase();
 function topStatus(label,state){
@@ -12,16 +17,23 @@ function topStatus(label,state){
 }
 function paint(node,label,state){if(node===mt5)topStatus(label,state);if(!node)return;node.textContent=label;node.className=state==='online'?'ok':state==='error'?'error':'warning';}
 function ageLabel(ms){if(!Number.isFinite(ms))return '—';if(ms<1000)return 'СЕЙЧАС';if(ms<60000)return Math.floor(ms/1000)+' с назад';return Math.floor(ms/60000)+' мин назад';}
+function paintQuote(quote,{strip=true}={}){
+ if(!quote)return;
+ const price=document.querySelector('#referencePrice');
+ if(price){price.textContent=priceText(quote.last,quoteDigits);price.title=quote.time?'Последняя котировка MT5 · '+new Date(quote.time).toLocaleString():'Котировка MT5';}
+ if(!strip)return;
+ const bidNode=document.querySelector('#bidPrice'),askNode=document.querySelector('#askPrice'),spreadNode=document.querySelector('#spreadPrice');
+ if(bidNode)bidNode.textContent=priceText(quote.bid,quoteDigits);
+ if(askNode)askNode.textContent=priceText(quote.ask,quoteDigits);
+ if(spreadNode)spreadNode.textContent=priceText(quote.spread,quoteDigits);
+}
 function updateReferencePrice(price,timestamp){
- const value=Number(price),stamp=Date.parse(timestamp||'');
+ const value=Number(price);
  if(!Number.isFinite(value)||value<=0)return;
- if(Number.isFinite(stamp)&&stamp>0&&stamp<displayedQuoteTime)return;
- if(Number.isFinite(stamp)&&stamp>0)displayedQuoteTime=stamp;
- const node=document.querySelector('#referencePrice');
- if(node){node.textContent=value.toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2});node.title=timestamp?'Последняя котировка MT5 · '+new Date(timestamp).toLocaleString():'Котировка MT5';}
+ paintQuote(quotes.accept({bid:value,ask:value,last:value,timestamp}),{strip:false});
 }
 function clearFeedDisplay(){
- displayedQuoteTime=0;
+ quotes.reset();
  const price=document.querySelector('#referencePrice');if(price){price.textContent='—';price.removeAttribute('title');}
  const range=document.querySelector('#sessionRange');if(range)range.textContent='Ожидание истории';
  const mode=document.querySelector('#dataMode');if(mode)mode.textContent='ОЖИДАНИЕ ROBOFOREX MT5';
@@ -42,10 +54,12 @@ async function refreshAnalysis(){
   if((data.feedId||null)!==(feedId||null))return;
   if(data.bars?.length){
    window.dispatchEvent(new CustomEvent('market-analysis',{detail:data}));
+   // The broker's tick size decides the decimals every quote on the page prints with.
+   quoteDigits=priceDigits(data.footprintStep);
    const mode=document.querySelector('#dataMode');if(mode)mode.textContent=data.feed?.status==='online'?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';
    if(data.lastQuote)updateReferencePrice(data.lastQuote.last,data.lastQuote.timestamp);
    else updateReferencePrice(data.bars.at(-1).c,data.bars.at(-1).time);
-   const range=document.querySelector('#sessionRange');if(range){const lo=Math.min(...data.bars.map(b=>b.l)),hi=Math.max(...data.bars.map(b=>b.h));range.textContent=lo.toFixed(2)+' — '+hi.toFixed(2);}
+   const range=document.querySelector('#sessionRange');if(range){const lo=Math.min(...data.bars.map(b=>b.l)),hi=Math.max(...data.bars.map(b=>b.h));range.textContent=priceText(lo,quoteDigits)+' — '+priceText(hi,quoteDigits);}
    const count=document.querySelector('#barCount');if(count)count.textContent=data.bars.length+' СВЕЧЕЙ';
   }
   lastAnalysisAt=Date.now();
@@ -92,28 +106,16 @@ function watchdog(){
   if(!source||source.readyState===EventSource.CLOSED)reconnect();
  }
 }
-window.addEventListener('mt5-symbol-change',()=>{lastAnalysisAt=0;displayedQuoteTime=0;refreshAnalysis();refreshHealth();});
-window.addEventListener('mt5-feed-change',()=>{lastAnalysisAt=0;displayedQuoteTime=0;clearedWithoutFeed=false;refreshAnalysis();refreshHealth();});
+window.addEventListener('mt5-symbol-change',()=>{lastAnalysisAt=0;quotes.reset();refreshAnalysis();refreshHealth();});
+window.addEventListener('mt5-feed-change',()=>{lastAnalysisAt=0;quotes.reset();clearedWithoutFeed=false;refreshAnalysis();refreshHealth();});
 window.addEventListener('gold3po-settings',e=>{if(e.detail?.zonesChanged){lastAnalysisAt=0;refreshAnalysis();}});
 refreshHealth();refreshAnalysis();connectStream();window.setInterval(refreshHealth,5000);window.setInterval(watchdog,10000);
 
 // Keep the quote strip in sync with the active account's live MT5 quote stream.
-function quoteText(value) {
- const number=Number(value);
- return Number.isFinite(number)
-  ? number.toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:4})
-  : '—';
-}
+// The same gate orders the strip, so a replayed or overlapping frame never rewinds bid/ask.
 window.addEventListener('market-tick',event=>{
  const tick=event.detail;
  const activeFeedId=marketFeedId();
  if(!activeFeedId||!tick||tick.source!=='mt5'||tick.symbol!==marketSymbol()||tick.feedId!==activeFeedId)return;
- const bid=Number(tick.bid),ask=Number(tick.ask);
- if(!Number.isFinite(bid)||!Number.isFinite(ask)||bid<=0||ask<=0||ask<bid)return;
- const bidNode=document.querySelector('#bidPrice');
- const askNode=document.querySelector('#askPrice');
- const spreadNode=document.querySelector('#spreadPrice');
- if(bidNode)bidNode.textContent=quoteText(bid);
- if(askNode)askNode.textContent=quoteText(ask);
- if(spreadNode)spreadNode.textContent=quoteText(ask-bid);
+ paintQuote(quotes.accept(tick));
 });
