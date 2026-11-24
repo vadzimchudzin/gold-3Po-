@@ -99,7 +99,7 @@ class ConnectorTests(unittest.TestCase):
                                          "commonDataPath": "common data", "dataPath": "terminal data",
                                          "terminalPath": self.terminal_path,
                                          "accountLogin": "1234", "server": "Broker-Demo",
-                                         "specUnavailable": "symbol_info_failed"})
+                                         "specUnavailable": "tick_size_unusable"})
         self.assertEqual(self.api.calls, [
             ("initialize", (self.terminal_path,), connector.MT5_TIMEOUT_MS),
             ("symbol_select", "XAUUSDm", True),
