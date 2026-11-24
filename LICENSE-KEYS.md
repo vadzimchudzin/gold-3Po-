@@ -78,6 +78,19 @@ development convenience, not a security boundary.
 - If the vendor private key leaks, anyone can issue keys. Keep it offline, back it up,
   and never commit it. `init` refuses to overwrite an existing keypair.
 
+## Key rotation
+
+The pair that was embedded up to 0.9.7.39 had no surviving private half (it was never
+committed and never backed up), so no key could be issued at all. On 2026-11-24 the pair
+was regenerated, `LICENSE_PUBLIC_KEY_PEM` was replaced, and the new private key was handed
+to the vendor for offline storage. Keys signed before that date no longer verify; keys
+signed after it verify only in builds from that commit onwards.
+
+When rotating again: `npm run license:init`, paste the printed public key into
+`license.js`, rebuild, and only then issue keys — the generator refuses to sign with a
+private key that does not match the embedded public key, while `make-key.js issue` does
+not check and will happily print an unusable key.
+
 ## API
 
 - `GET /v1/license/status` — `{ required, valid, reason, machineId, edition, keyId, issuedAt, expiresAt, daysTotal, daysLeft }` (always open).

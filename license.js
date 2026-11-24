@@ -7,7 +7,7 @@ import { getMachineId, normalizeMachineId } from './machine-id.js';
 // tools/license-private.pem on the vendor machine and is gitignored.
 // Anyone can verify keys with this public key; nobody can forge keys without the private half.
 export const LICENSE_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAnEGlPeB3SrPpS2yk/N4/mryA3hArrt19RekIFTnJ2iU=
+MCowBQYDK2VwAyEAJ5m7ZD0WB9jNgNsl9wxVG981Z5Z7ZjyLei6RgNAhPzs=
 -----END PUBLIC KEY-----`;
 
 export const KEY_PREFIX = 'GOLD1';
