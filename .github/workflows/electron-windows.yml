@@ -72,6 +72,8 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --quiet pyinstaller MetaTrader5
+          python -m unittest discover -s adapters/mt5 -p test_mt5_connector.py
+          if ($LASTEXITCODE -ne 0) { throw "MT5 connector tests failed." }
           python adapters/mt5/mt5_connector.py --selftest
           python -m PyInstaller --noconfirm --clean --onedir --console --name gold3po-mt5 --hidden-import MetaTrader5 --collect-all numpy --distpath release/mt5-runtime --workpath release/mt5-build --specpath release adapters/mt5/mt5_connector.py
           if (-not (Test-Path release/mt5-runtime/gold3po-mt5/gold3po-mt5.exe)) { throw "Standalone MT5 connector was not created." }
@@ -128,6 +130,11 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath (Join-Path $installDir "resources\gold3po-icon.ico"))) {
             throw "The packaged C-3PO icon resource is missing."
+          }
+          foreach ($adapter in @("Gold3PoBridge.mq5", "Gold3PoLevels.mq5")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $installDir ("resources\adapters\mt5\" + $adapter)))) {
+              throw "The packaged MT5 integration source is missing: $adapter"
+            }
           }
           $connector = Join-Path $installDir "resources\mt5-runtime\gold3po-mt5\gold3po-mt5.exe"
           if (-not (Test-Path -LiteralPath $connector)) {

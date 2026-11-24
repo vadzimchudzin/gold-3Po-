@@ -71,6 +71,11 @@ export function runBacktest(bars, options = {}) {
   const grossWins = wins.reduce((sum, trade) => sum + trade.netPnl, 0);
   const grossLosses = Math.abs(losses.reduce((sum, trade) => sum + trade.netPnl, 0));
   const netPnl = trades.reduce((sum, trade) => sum + trade.netPnl, 0);
+  // Slippage is charged on entry and exit, in price units, per unit of quantity.
+  const slippageCost = trades.reduce((sum, trade) => sum + 2 * slippage * trade.quantity * pointValue, 0);
+  const firstTime = bars.find(bar => bar && bar.time)?.time ?? null;
+  const lastTime = bars.findLast(bar => bar && bar.time)?.time ?? null;
+  const limitations = ['Сигналы рассчитываются на закрытии свечи, вход — по открытию следующей.', 'Если стоп и цель задеты в одной свече, первым считается стоп.', 'Результаты — историческая симуляция, а не прогноз; проверяйте их вне выборки и скользящим окном.'];
   return {
     config: { initialEquity, riskPct, maxRiskPct, atrPeriod, stopAtr, targetR, maxBars, pointValue, feePerUnit, slippage, minScore },
     summary: {
@@ -79,9 +84,16 @@ export function runBacktest(bars, options = {}) {
       profitFactor: grossLosses ? grossWins / grossLosses : grossWins ? null : 0,
       expectancyR: trades.length ? trades.reduce((sum, trade) => sum + trade.netR, 0) / trades.length : null,
       netPnl, finalEquity: equity, maxDrawdownPct: maxDrawdown,
-      avgR: trades.length ? trades.reduce((sum, trade) => sum + trade.netR, 0) / trades.length : null
+      avgR: trades.length ? trades.reduce((sum, trade) => sum + trade.netR, 0) / trades.length : null,
+      avgWin: wins.length ? grossWins / wins.length : null,
+      avgLoss: losses.length ? -grossLosses / losses.length : null,
+      totalFees: trades.reduce((sum, trade) => sum + trade.fees, 0),
+      slippageCost,
+      bars: bars.length,
+      periodStart: firstTime,
+      periodEnd: lastTime
     },
     trades,
-    limitations: ['Сигналы рассчитываются на закрытии свечи, вход — по открытию следующей.', 'Если стоп и цель задеты в одной свече, первым считается стоп.', 'Результаты — историческая симуляция, а не прогноз; проверяйте их вне выборки и скользящим окном.']
+    limitations
   };
 }

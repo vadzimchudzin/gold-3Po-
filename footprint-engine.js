@@ -15,7 +15,8 @@ export const DEFAULT_FOOTPRINT_OPTIONS = Object.freeze({
   imbalanceLevels: 3,     // consecutive imbalanced levels that make a stack
   minLevelVolume: 3,      // a row thinner than this is noise, never an imbalance
   valueAreaShare: 0.7,    // share of the bar's volume the value area must cover
-  absorptionMultiple: 2   // an edge row carrying this many median rows was absorbed
+  absorptionMultiple: 2,  // an edge row carrying this many median rows was absorbed
+  ticksPerRow: 1          // price steps grouped into one footprint row (1 = the source precision)
 });
 
 export function validateFootprintOptions(input = {}) {
@@ -35,7 +36,21 @@ export function validateFootprintOptions(input = {}) {
   };
   int('imbalanceLevels', 2, 10);
   int('minLevelVolume', 1, 100);
+  int('ticksPerRow', 1, 50);
   return o;
+}
+
+// Row grouping: the source keeps its own precision (one price step per tick row); the user chooses how
+// many of those steps one footprint row shows. Volumes are summed, never re-estimated.
+function groupRows(rows, rowStep) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const price = Number((Math.round(row.price / rowStep) * rowStep).toFixed(8));
+    const target = grouped.get(price) || { price, bid: 0, ask: 0, unknown: 0 };
+    target.bid += row.bid; target.ask += row.ask; target.unknown += row.unknown;
+    grouped.set(price, target);
+  }
+  return [...grouped.values()].sort((a, b) => b.price - a.price);
 }
 
 export function tickSide(event = {}) {
@@ -111,6 +126,16 @@ function valueAreaAround(rows, pocIndex, total, share) {
   };
 }
 
+// The ladder's price step when the caller did not pass one: the smallest distance between rows.
+function smallestGap(levels) {
+  let gap = Infinity;
+  for (let i = 1; i < levels.length; i++) {
+    const d = Math.abs(levels[i - 1].price - levels[i].price);
+    if (d > 1e-9 && d < gap) gap = d;
+  }
+  return finite(gap) ? gap : 0;
+}
+
 function median(values) {
   const sorted = values.filter(finite).sort((a, b) => a - b);
   if (!sorted.length) return 0;
@@ -120,7 +145,10 @@ function median(values) {
 
 export function footprintOf(input, options = {}) {
   const o = validateFootprintOptions(options);
-  const rows = sortedRows(input);
+  const sourceRows = sortedRows(input);
+  const sourceStep = positive(options.priceStep) ? options.priceStep : smallestGap(sourceRows);
+  const rowStep = o.ticksPerRow > 1 && sourceStep > 0 ? sourceStep * o.ticksPerRow : sourceStep;
+  const rows = o.ticksPerRow > 1 && sourceStep > 0 ? groupRows(sourceRows, rowStep) : sourceRows;
   const total = rows.reduce((sum, row) => sum + volumeOf(row), 0);
   const bid = rows.reduce((sum, row) => sum + row.bid, 0);
   const ask = rows.reduce((sum, row) => sum + row.ask, 0);
@@ -144,10 +172,15 @@ export function footprintOf(input, options = {}) {
     if (better || (tie && Math.abs(levels[i].price - mid) < Math.abs(levels[pocIndex].price - mid))) pocIndex = i;
   }
 
-  // Diagonal imbalance: buy volume here against sell volume one level lower, and the mirror.
+  // Diagonal imbalance: buy volume here against sell volume one price step lower, and the mirror.
+  // Neighbours are compared only when they really are one step apart: rows with an untraded price
+  // between them are not adjacent levels, even though they sit next to each other in the array.
+  const step = rowStep;
+  const adjacent = (a, b) => !!a && !!b && step > 0 && Math.abs(Math.abs(a.price - b.price) - step) < step * 1e-6;
   const imbalances = [];
   for (let i = 0; i < levels.length; i++) {
-    const below = levels[i + 1], above = levels[i - 1];
+    const below = adjacent(levels[i], levels[i + 1]) ? levels[i + 1] : null;
+    const above = adjacent(levels[i], levels[i - 1]) ? levels[i - 1] : null;
     if (below && levels[i].ask >= o.minLevelVolume && below.bid > 0 && levels[i].ask >= o.imbalanceRatio * below.bid) {
       imbalances.push({ side: 'buy', price: levels[i].price, ratio: Number((levels[i].ask / below.bid).toFixed(2)) });
     }
@@ -161,6 +194,11 @@ export function footprintOf(input, options = {}) {
     let run = [];
     for (let i = 0; i < levels.length; i++) {
       const hit = imbalances.some(item => item.side === side && item.price === levels[i].price);
+      // A stack is consecutive price steps: a gap in the ladder ends the run.
+      if (hit && run.length && !adjacent(levels[i], levels[i - 1])) {
+        if (run.length >= o.imbalanceLevels) stackedImbalances.push({ side, prices: run });
+        run = [];
+      }
       if (hit) run.push(levels[i].price);
       else {
         if (run.length >= o.imbalanceLevels) stackedImbalances.push({ side, prices: run });
@@ -176,18 +214,24 @@ export function footprintOf(input, options = {}) {
   const unfinishedHigh = top.bid > 0 && top.ask > 0;
   const unfinishedLow = bottom.bid > 0 && bottom.ask > 0;
 
-  // Absorption: an outer row carrying far more than a typical row while price closed back
-  // inside the bar. That is a passive order soaking up the aggression, not a breakout.
+  // Absorption: an outer row carrying far more aggressive volume than a typical row while price
+  // closed back inside the bar. That is a passive order soaking up the aggression, not a breakout.
+  // Only volume with a known aggressor counts: ticks the broker did not classify cannot show that
+  // anyone was absorbed, so they never create an absorption mark on their own.
+  // The threshold compares like with like: aggressive volume against the median aggressive row, so
+  // unclassified ticks neither create a mark nor inflate the bar it is measured against.
   const rowVolumes = levels.map(row => row.total).filter(value => value > 0);
   const medianLevelVolume = median(rowVolumes);
+  const medianAggressive = median(levels.map(row => row.bid + row.ask).filter(value => value > 0));
   const absorbedLevels = [];
-  if (medianLevelVolume > 0 && finite(options.c)) {
+  if (medianAggressive > 0 && finite(options.c)) {
     for (const row of levels) {
       const edge = row === top || row === bottom || Math.abs(row.price - options.h) < 1e-9 || Math.abs(row.price - options.l) < 1e-9;
       if (!edge) continue;
-      if (row.total < o.absorptionMultiple * medianLevelVolume) continue;
+      const aggressive = row.bid + row.ask;
+      if (aggressive < o.absorptionMultiple * medianAggressive) continue;
       if (Math.abs(options.c - row.price) < 1e-9) continue;
-      absorbedLevels.push({ price: row.price, volume: row.total, multiple: Number((row.total / medianLevelVolume).toFixed(2)) });
+      absorbedLevels.push({ price: row.price, volume: aggressive, multiple: Number((aggressive / medianAggressive).toFixed(2)) });
     }
   }
 
@@ -272,4 +316,28 @@ export function cumulativeDivergence(bars, { lookback = 20, minDeltaShare = 0.05
   if (priceChange > 0 && deltaChange < 0) return { side: 'bearish', priceChange, deltaChange, window: window.length };
   if (priceChange < 0 && deltaChange > 0) return { side: 'bullish', priceChange, deltaChange, window: window.length };
   return { side: null, priceChange, deltaChange, window: window.length };
+}
+
+// What one footprint cell shows in each display mode. Every value comes from the same price row; a
+// mode never invents a number the row does not hold. Without a known aggressor (only unclassified
+// ticks) the side-based modes show nothing rather than a fake split.
+export const FOOTPRINT_MODES = Object.freeze(['bidask', 'delta', 'deltaPct', 'volume', 'buy', 'sell']);
+export function footprintCell(row, mode) {
+  if (!FOOTPRINT_MODES.includes(mode)) throw new TypeError('Unknown footprint mode: ' + mode);
+  const bid = Number(row?.bid) || 0, ask = Number(row?.ask) || 0, unknown = Number(row?.unknown) || 0;
+  const total = bid + ask + unknown, sided = bid + ask, delta = ask - bid;
+  const tone = delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'neutral';
+  if (total <= 0) return { text: '', tone: 'neutral', value: null };
+  switch (mode) {
+    case 'bidask': return { text: sided ? `${bid} ${ask}` : '·', tone, value: null };
+    case 'delta': return { text: sided ? (delta > 0 ? '+' : '') + delta : '', tone, value: sided ? delta : null };
+    case 'deltaPct': {
+      if (!sided) return { text: '', tone: 'neutral', value: null };
+      const pct = Math.round(100 * delta / sided);
+      return { text: (pct > 0 ? '+' : '') + pct + '%', tone, value: pct };
+    }
+    case 'volume': return { text: String(total), tone: 'neutral', value: total };
+    case 'buy': return { text: ask ? String(ask) : '', tone: ask ? 'positive' : 'neutral', value: ask };
+    case 'sell': return { text: bid ? String(bid) : '', tone: bid ? 'negative' : 'neutral', value: bid };
+  }
 }

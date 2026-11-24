@@ -37,17 +37,16 @@ class FakeMT5:
         self.info = SimpleNamespace(chart_mode=connector.SYMBOL_CHART_MODE_BID)
         self.rows = [tick(SECOND, 800)]
         self.calls = []
-        self.login_ok = True
         self.select_ok = True
         self.copy_error = False
+
+    def symbols_get(self):
+        return [SimpleNamespace(name="EURUSD", visible=True),
+                SimpleNamespace(name="XAUUSDm", visible=True)]
 
     def initialize(self, *args, timeout):
         self.calls.append(("initialize", args, timeout))
         return True
-
-    def login(self, number, *, password, server, timeout):
-        self.calls.append(("login", number, password, server, timeout))
-        return self.login_ok
 
     def shutdown(self):
         self.calls.append(("shutdown",))
@@ -83,7 +82,8 @@ class FakeMT5:
 class ConnectorTests(unittest.TestCase):
     def setUp(self):
         self.api = FakeMT5()
-        self.worker = connector.Worker(lambda: self.api)
+        self.terminal_path = os.path.join(self.api.install, "terminal64.exe")
+        self.worker = connector.Worker(lambda: self.api, lambda: [self.terminal_path])
         self.addCleanup(self.worker.close)
         self.addCleanup(self.api.temp_dir.cleanup)
 
@@ -92,38 +92,47 @@ class ConnectorTests(unittest.TestCase):
         return connector.handle_line(self.worker, line)
 
     def connect(self, **fields):
-        return self.command("connect", **{"terminalPath": os.path.join(self.api.install, "terminal64.exe"),
-                                           "login": "1234", "password": SECRET, "server": "Broker-Demo",
-                                           "symbol": "XAUUSDm", **fields})
+        return self.command("connect", **fields)
 
-    def test_connect_investor_account_and_exact_suffix(self):
+    def test_connect_uses_the_already_authorized_account_without_credentials(self):
         self.assertEqual(self.connect(), {"id": "request-1", "ok": True, "symbol": "XAUUSDm",
-                                         "commonDataPath": "common data", "dataPath": "terminal data"})
+                                         "commonDataPath": "common data", "dataPath": "terminal data",
+                                         "terminalPath": self.terminal_path,
+                                         "accountLogin": "1234", "server": "Broker-Demo",
+                                         "specUnavailable": "symbol_info_failed"})
         self.assertEqual(self.api.calls, [
-            ("initialize", (os.path.join(self.api.install, "terminal64.exe"),), connector.MT5_TIMEOUT_MS),
-            ("login", 1234, SECRET, "Broker-Demo", connector.MT5_TIMEOUT_MS),
+            ("initialize", (self.terminal_path,), connector.MT5_TIMEOUT_MS),
             ("symbol_select", "XAUUSDm", True),
             ("symbol_info", "XAUUSDm"),
         ])
+        self.assertNotIn("login", [call[0] for call in self.api.calls])
 
-    def test_auto_discover_and_clean_failure(self):
-        self.api.login_ok = False
-        result = self.connect(terminalPath=None)
-        self.assertEqual(self.api.calls[0], ("initialize", (), connector.MT5_TIMEOUT_MS))
-        self.assertEqual(result["error"], "login_failed")
-        self.assertEqual(result["mt5Code"], -6)
-        self.assertNotIn(SECRET, json.dumps(result))
+    def test_auto_discovery_requires_one_running_terminal(self):
+        worker = connector.Worker(lambda: self.api, lambda: [])
+        result = connector.handle_line(worker, b'{"id":"request-1","op":"connect"}')
+        self.assertEqual(result["error"], "terminal_not_running")
+        worker.close()
+        worker = connector.Worker(lambda: self.api, lambda: [self.terminal_path, self.terminal_path + ".other"])
+        result = connector.handle_line(worker, b'{"id":"request-1","op":"connect"}')
+        self.assertEqual(result["error"], "multiple_terminal_instances")
+        worker.close()
+
+    def test_auto_discovery_never_logs_into_an_unauthorized_terminal(self):
+        self.api.terminal.connected = False
+        result = self.connect()
+        self.assertEqual(result["error"], "terminal_not_authorized")
+        self.assertNotIn("login", [call[0] for call in self.api.calls])
         self.assertEqual(self.command("poll")["error"], "not_connected")
 
-    def test_wrong_terminal_does_not_receive_login(self):
+    def test_wrong_running_terminal_is_rejected(self):
         self.api.terminal.path = os.path.abspath("Other terminal")
         self.assertEqual(self.connect()["error"], "terminal_mismatch")
         self.assertNotIn("login", [call[0] for call in self.api.calls])
 
-    def test_requires_confirmed_account_and_symbol(self):
+    def test_uses_the_account_already_open_in_mt5_and_requires_a_gold_symbol(self):
         self.api.account.login = 9876
-        self.assertEqual(self.connect()["error"], "account_mismatch")
-        self.api.account.login = 1234
+        result = self.connect()
+        self.assertEqual(result["accountLogin"], "9876", "the connector reports, but never changes, the active account")
         self.api.select_ok = False
         self.assertEqual(self.connect()["error"], "symbol_select_failed")
         self.assertEqual(self.command("history")["error"], "not_connected")
@@ -192,6 +201,30 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in lines], [None, None, 2, " 1 "])
         self.assertEqual([item["error"] for item in lines],
                          ["invalid_json", "command_too_large", "not_connected", "unknown_operation"])
+
+    def test_symbol_spec_reports_the_broker_tick_size(self):
+        api = lambda value: SimpleNamespace(symbol_info=lambda s: value)
+        info = SimpleNamespace(trade_tick_size=0.01, point=0.01, digits=2)
+        self.assertEqual(connector.symbol_spec(api(info), "XAUUSDm"), ({"tickSize": 0.01}, None))
+        # A zero tick size falls back to the point; nothing usable means no spec, never an invented one.
+        point_only = SimpleNamespace(trade_tick_size=0.0, point=0.05, digits=2)
+        self.assertEqual(connector.symbol_spec(api(point_only), "GOLD"), ({"tickSize": 0.05}, None))
+        self.assertEqual(connector.symbol_spec(api(None), "GOLD"), (None, "symbol_info_empty"))
+        empty = SimpleNamespace(trade_tick_size=0.0, point=0.0, digits=2)
+        self.assertEqual(connector.symbol_spec(api(empty), "GOLD"), (None, "tick_size_unusable"))
+        # A failing MT5 call is reported as such, without the library's own text.
+        def broken(_):
+            raise RuntimeError(SECRET)
+        spec, missing = connector.symbol_spec(SimpleNamespace(symbol_info=broken), "GOLD")
+        self.assertEqual((spec, missing), (None, "symbol_info_failed"))
+
+    def test_connect_reports_the_tick_size_or_why_it_is_missing(self):
+        self.api.symbol_info = lambda symbol: SimpleNamespace(trade_tick_size=0.01, point=0.01, digits=2)
+        result = self.connect()
+        self.assertEqual(result["spec"], {"tickSize": 0.01})
+        self.assertNotIn("specUnavailable", result)
+        self.api.symbol_info = lambda symbol: None
+        self.assertEqual(self.connect()["specUnavailable"], "symbol_info_empty")
 
     def test_unexpected_library_exception_does_not_disclose_its_text(self):
         self.connect()

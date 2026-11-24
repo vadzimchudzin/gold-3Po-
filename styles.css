@@ -228,15 +228,37 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .poc-mark{position:absolute;right:2px;top:0;font-size:6px;color:var(--gold);line-height:1.4;font-style:normal}
 .foot-cell.foot-absorbed::after{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--red)}
 .foot-cell.foot-unfinished::before{content:'';position:absolute;left:2px;right:2px;height:2px;background:repeating-linear-gradient(90deg,var(--cyan) 0 3px,transparent 3px 6px);opacity:.75}
-.foot-row .foot-cell.foot-forming{animation:foot-live 2.4s ease-in-out infinite}
-@keyframes foot-live{0%,100%{box-shadow:inset 0 0 0 1px rgba(153,255,228,.22)}50%{box-shadow:inset 0 0 0 1px rgba(153,255,228,.55)}}
+.foot-row .foot-cell.foot-forming{animation:foot-live 2.6s ease-in-out infinite}
+@keyframes foot-live{0%,100%{background-color:rgba(153,255,228,.04)}50%{background-color:rgba(153,255,228,.16)}}
+
+/* Footprint reads as one continuous ladder, not a grid of boxes: no gaps, hairline separators, and
+   room that is not traded stays empty instead of painting a tile. */
+.foot-row{gap:0;margin-bottom:0}
+.foot-cell{border:0;border-radius:0;border-bottom:1px solid rgba(165,180,210,.05);border-right:1px solid rgba(165,180,210,.05);background:transparent;font-variant-numeric:tabular-nums;letter-spacing:.01em;transition:background-color .15s ease;height:22px}
+.foot-cell:hover{background:rgba(255,255,255,.045)}
+.foot-cell.bidask{display:flex;align-items:center;justify-content:space-between;gap:2px;background:linear-gradient(90deg,rgba(219,105,119,var(--intensity)) 0 49.6%,rgba(165,180,210,.14) 49.6% 50.4%,rgba(78,194,167,var(--intensity)) 50.4% 100%)}
+.foot-cell.delta-positive{background:linear-gradient(180deg,rgba(67,190,158,calc(var(--intensity) * .55)),rgba(67,190,158,var(--intensity)));color:#e5fff7}
+.foot-cell.delta-negative{background:linear-gradient(180deg,rgba(211,102,119,calc(var(--intensity) * .55)),rgba(211,102,119,var(--intensity)));color:#ffe5e5}
+.foot-cell.volume-cell{background:rgba(126,146,184,calc(var(--intensity) * .8));color:var(--text)}
+.foot-cell.active{outline:0;box-shadow:inset 0 0 0 1px var(--gold)}
+.foot-cell.foot-va{box-shadow:inset 0 0 0 999px rgba(153,255,228,.05)}
+.foot-cell.foot-va.foot-poc{box-shadow:inset 0 0 0 1px var(--gold),inset 0 0 0 999px rgba(153,255,228,.05)}
+.foot-row:hover .price-level{color:var(--text)}
+/* Each footprint column reads as its candle: the open-close body carries a coloured edge in the bar's
+   direction, wick rows sit in a narrower centred strip, and prices the bar never reached stay blank. */
+.foot-cell.candle-body.candle-up{border-left:2px solid rgba(78,194,167,.85)}
+.foot-cell.candle-body.candle-down{border-left:2px solid rgba(219,105,119,.85)}
+.foot-cell.candle-wick:not(.imbalance-buy):not(.imbalance-sell){box-shadow:inset 0 0 0 0 transparent;background-image:linear-gradient(rgba(255,255,255,.05),rgba(255,255,255,.05))}
+.foot-cell.candle-wick:not(.foot-unfinished)::before{content:'';position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(165,180,210,.16);pointer-events:none;z-index:0}
+.foot-cell.candle-out{background:transparent;cursor:default}
+.price-level{transition:color .15s ease}
 .foot-deltas{height:20px;margin-top:2px;border-top:1px solid var(--line);padding-top:3px}
-.foot-delta{font:8px var(--mono);text-align:center;align-content:center;color:var(--muted-2);border-radius:3px}
+.foot-delta{font:8px var(--mono);text-align:center;align-content:center;color:var(--muted-2);border-radius:0;font-variant-numeric:tabular-nums}
 .foot-delta.positive{color:var(--cyan)}
 .foot-delta.negative{color:var(--red)}
 .foot-delta.active{background:var(--surface-2);color:var(--text)}
 .foot-profile-head{font:6px var(--mono);letter-spacing:.03em;color:var(--muted-2);display:flex;align-items:center;justify-content:center;border-bottom:1px solid var(--line);text-align:center}
-.foot-profile{position:relative;display:flex;align-items:center;height:23px;border-radius:3px;background:transparent;overflow:hidden}
+.foot-profile{position:relative;display:flex;align-items:center;height:23px;border-radius:0;background:transparent;overflow:hidden;border-bottom:1px solid rgba(165,180,210,.05)}
 .foot-profile i{position:absolute;left:0;top:5px;bottom:5px;background:rgba(126,146,184,.45);border-radius:2px}
 .foot-profile.va i{background:rgba(153,255,228,.45)}
 .foot-profile.poc i{background:var(--gold);opacity:.75}
@@ -288,7 +310,21 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .price-chart-wrap.is-dragging .candle{pointer-events:none}
 @media(max-width:850px){.chart-zoom-controls button{min-width:20px;padding:4px 4px}.chart-zoom-controls #chartZoomReset{min-width:33px}}
 
-/* GOLD-3Po 0.9 workspace: independent footprint X/Y scale and TradingView-like split panes. */
+/* ATAS-style cluster ladder: keep bid/ask values distinct inside each candle body. */
+.foot-cell{position:relative;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.foot-cell.bidask>span:first-child{color:#ffaaa9;text-align:right;flex:1}
+.foot-cell.bidask>span:last-child{color:#9df2d6;text-align:left;flex:1}
+.foot-cell.candle-body.candle-up.bidask{background-image:linear-gradient(90deg,rgba(220,104,120,.24) 0 49%,rgba(73,190,158,.30) 51% 100%)}
+.foot-cell.candle-body.candle-down.bidask{background-image:linear-gradient(90deg,rgba(220,104,120,.30) 0 49%,rgba(73,190,158,.24) 51% 100%)}
+.foot-cell.foot-poc{outline:1px solid rgba(255,199,153,.75);outline-offset:-2px}
+.foot-cell.foot-va{border-top-color:rgba(255,199,153,.25);border-bottom-color:rgba(255,199,153,.25)}
+.foot-cell.imbalance-buy{background-color:rgba(73,190,158,.24)}
+.foot-cell.imbalance-sell{background-color:rgba(220,104,120,.24)}
+.foot-cell.foot-forming{border-bottom:1px solid var(--gold)}
+@media(max-width:700px){.footprint-wrap{max-height:58vh}.foot-cell{height:25px;font-size:8px}.foot-row{gap:2px}}
+
+
+/* GOLD-3Po 0.9.0 workspace: split price/footprint panes and independent footprint X/Y scale. */
 .footprint-zoom-controls{flex:none}
 .footprint-zoom-controls button{min-width:27px}
 .footprint-table{--footprint-row-height:23px}
@@ -308,12 +344,5 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .trading-layout .footprint-header{align-items:flex-start;flex-wrap:wrap}
 .trading-layout .footprint-header .panel-tools{flex-wrap:wrap;justify-content:flex-end}
 .trading-layout .footprint-zoom-controls button{padding:4px 5px;font-size:8px}
-@media(max-width:1120px){
- .trading-layout .chart-column{grid-template-columns:minmax(0,1fr);gap:14px}
- .trading-layout .price-panel,.trading-layout .footprint-panel{grid-column:1}
- .trading-layout .panel-resizer{display:none}
-}
-@media(max-width:850px){
- .trading-layout .chart-column{display:flex}
- .footprint-zoom-controls button{padding:4px 5px}
-}
+@media(max-width:1120px){.trading-layout .chart-column{grid-template-columns:minmax(0,1fr);gap:14px}.trading-layout .price-panel,.trading-layout .footprint-panel{grid-column:1}.trading-layout .panel-resizer{display:none}}
+@media(max-width:850px){.trading-layout .chart-column{display:flex}.footprint-zoom-controls button{padding:4px 5px}}

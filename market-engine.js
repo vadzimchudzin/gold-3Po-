@@ -20,8 +20,11 @@ export function normalizeTick(input) {
   return { timestamp:new Date(time).toISOString(), time, bid:input.bid, ask:input.ask, last, volume:tickVolume({ ...input, direction }), direction, source, symbol:String(input.symbol||'XAUUSD').toUpperCase(), type:'quote' };
 }
 
-export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceStep = 0.1, limit = 10000, maxZones, zoneOptions = {}, footprintOptions = {} } = {}) {
-  if (!Array.isArray(events) || !finite(intervalMs) || intervalMs <= 0 || !finite(priceStep) || priceStep <= 0) throw new TypeError('Invalid analysis input');
+// priceStep is the analysis grid for zones and bar heuristics (exhaustion range, zone padding).
+// footprintStep is the footprint's source precision (the broker tick size when known); it only
+// decides how traded prices fall into footprint rows, so a fine broker grid does not change zones.
+export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceStep = 0.1, footprintStep = priceStep, limit = 10000, maxZones, zoneOptions = {}, footprintOptions = {} } = {}) {
+  if (!Array.isArray(events) || !finite(intervalMs) || intervalMs <= 0 || !finite(priceStep) || priceStep <= 0 || !finite(footprintStep) || footprintStep <= 0) throw new TypeError('Invalid analysis input');
   const ticks = events.map(e => normalizeTick(e)).sort((a,b) => a.time-b.time).slice(-1000000);
   const bars = new Map();
   for (const t of ticks) {
@@ -29,7 +32,7 @@ export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceSte
     let bar = bars.get(start);
     // The same builder the browser uses for the forming bar, so live and historical bars agree.
     if (!bar) { bar = { ...emptyBar(start, t.last), time: new Date(start).toISOString() }; bars.set(start, bar); }
-    applyTickToBar(bar, t, priceStep);
+    applyTickToBar(bar, t, footprintStep);
   }
   let cumulativeDelta = 0;
   const result = [...bars.values()].slice(-Math.max(1,limit)).map((bar, barIndex, allBars) => {
@@ -38,7 +41,7 @@ export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceSte
     cumulativeDelta += delta;
     // POC, value area, diagonal imbalance, stacked imbalance, absorption and the unfinished
     // auction all come from one module, shared with the live browser path.
-    const foot = footprintOf(bar.levels, { ...footprintOptions, h: bar.h, l: bar.l, c: bar.c });
+    const foot = footprintOf(bar.levels, { ...footprintOptions, priceStep: footprintStep, h: bar.h, l: bar.l, c: bar.c });
     const levels = foot.levels;
     const imbalances = foot.imbalances;
     const stacked = foot.stackedImbalances;
@@ -56,7 +59,7 @@ export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceSte
       sweeps,absorption,exhaustion};
   });
   const zones = detectLiquidityZones(result, priceStep, { ...zoneOptions, ...(maxZones === undefined ? {} : { maxZones }) });
-  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, profile:sessionProfile(result, { priceStep }), divergence:cumulativeDivergence(result), tickCount:ticks.length, volumeKind:ticks.some(t=>t.source==='comex')?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:ticks.length&&ticks.every(t=>t.source==='comex')?'licensed_vendor_aggressor_side; unknown_when_unavailable':'only_explicit_mt5_tick_flags; otherwise_unknown', generatedAt:new Date().toISOString() };
+  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, profile:sessionProfile(result, { priceStep: footprintStep, options: footprintOptions }), divergence:cumulativeDivergence(result), tickCount:ticks.length, volumeKind:ticks.some(t=>t.source==='comex')?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:ticks.length&&ticks.every(t=>t.source==='comex')?'licensed_vendor_aggressor_side; unknown_when_unavailable':'only_explicit_mt5_tick_flags; otherwise_unknown', generatedAt:new Date().toISOString() };
 }
 
 export const DEFAULT_ZONE_OPTIONS = Object.freeze({

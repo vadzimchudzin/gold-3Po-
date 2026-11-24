@@ -14,14 +14,12 @@ import { createPatternStore } from './pattern-store.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_EVENTS = 1000000;
-const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/zone-labels.js': ['zone-labels.js', 'text/javascript; charset=utf-8'], '/chart-scale.js': ['chart-scale.js', 'text/javascript; charset=utf-8'], '/footprint-engine.js': ['footprint-engine.js', 'text/javascript; charset=utf-8'], '/market-data.js': ['market-data.js', 'text/javascript; charset=utf-8'], '/market-client.js': ['market-client.js', 'text/javascript; charset=utf-8'], '/research-client.js': ['research-client.js', 'text/javascript; charset=utf-8'], '/market-engine.js': ['market-engine.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/c3po.png': ['c3po.png', 'image/png'], '/license-client.js': ['license-client.js', 'text/javascript; charset=utf-8'], '/setups-client.js': ['setups-client.js', 'text/javascript; charset=utf-8'], '/settings-client.js': ['settings-client.js', 'text/javascript; charset=utf-8'], '/assets/atmosphere.jpg': ['assets/atmosphere.jpg', 'image/jpeg'], '/mt5-client.js': ['mt5-client.js', 'text/javascript; charset=utf-8'] };
+const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/zone-labels.js': ['zone-labels.js', 'text/javascript; charset=utf-8'], '/chart-scale.js': ['chart-scale.js', 'text/javascript; charset=utf-8'], '/footprint-engine.js': ['footprint-engine.js', 'text/javascript; charset=utf-8'], '/market-data.js': ['market-data.js', 'text/javascript; charset=utf-8'], '/market-client.js': ['market-client.js', 'text/javascript; charset=utf-8'], '/research-client.js': ['research-client.js', 'text/javascript; charset=utf-8'], '/market-engine.js': ['market-engine.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/c3po.png': ['c3po.png', 'image/png'], '/license-client.js': ['license-client.js', 'text/javascript; charset=utf-8'], '/setups-client.js': ['setups-client.js', 'text/javascript; charset=utf-8'], '/settings-client.js': ['settings-client.js', 'text/javascript; charset=utf-8'], '/assets/atmosphere.jpg': ['assets/atmosphere.jpg', 'image/jpeg'], '/mt5-client.js': ['mt5-client.js', 'text/javascript; charset=utf-8'], '/mt5-status.js': ['mt5-status.js', 'text/javascript; charset=utf-8'], '/footprint-candle.js': ['footprint-candle.js', 'text/javascript; charset=utf-8'] };
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
 const positive = n => Number.isFinite(n) && n > 0;
 const validTimestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
 
-// Read only the newest retained JSONL records. The old whole-file readFile()+split() path
-// built one giant JavaScript string from an append-only tick archive and could fail at startup
-// with RangeError: Invalid string length. Scan backwards in bounded byte chunks instead.
+// Read only the latest retained JSONL records. Never materialize a growing archive as one JS string.
 async function readRecentLines(file, maxLines, chunkSize = 1024 * 1024) {
   const handle = await open(file, 'r');
   try {
@@ -101,8 +99,6 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   const dedupeKey = (event, id) => `${event.source}:${event.symbol}:${id}`;
   const storageReady = dataFile ? (async () => {
     try {
-      // Only the newest eventBufferCap records are useful to the rolling in-memory market
-      // window. The JSONL file may have grown for months, so never materialize the whole archive.
       const recentLines = await readRecentLines(dataFile, eventBufferCap);
       for (const rawLine of recentLines) {
         const line = rawLine.toString('utf8');
@@ -139,6 +135,36 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     // Oldest-inserted eviction when the bound is reached (re-setting an existing key refreshes it).
     if (analogueCache.size >= ANALOGUE_CACHE_MAX) analogueCache.delete(analogueCache.keys().next().value);
     analogueCache.set(key, entry);
+  }
+  // Broker symbol specifications (tick size) reported by the MT5 connector with each tick batch.
+  // Only gold symbols are stored and the map is capped, so the ingest token cannot grow it without
+  // bound. A batch with spec: null clears the stored one, so after a reconnect to a broker that does
+  // not report a tick size rows fall back to the default instead of keeping the previous broker's grid.
+  const symbolSpecs = new Map();
+  const SYMBOL_SPECS_MAX = 16;
+  function rememberSpec(source, symbol, spec) {
+    if (typeof symbol !== 'string') return;
+    const name = symbol.trim().toUpperCase();
+    if (!isGoldSymbol(source, name)) return;
+    const key = source + ':' + name;
+    const tickSize = Number(spec?.tickSize);
+    // Only an explicit null clears: the MT5 session sends it when the broker gave no tick size. A batch
+    // without the field (an older connector) leaves a size another batch reported alone.
+    if (spec === undefined) return;
+    if (spec === null) { symbolSpecs.delete(key); return; }
+    if (!Number.isFinite(tickSize) || tickSize <= 0 || tickSize > 100) return;
+    if (!symbolSpecs.has(key) && symbolSpecs.size >= SYMBOL_SPECS_MAX) symbolSpecs.delete(symbolSpecs.keys().next().value);
+    symbolSpecs.set(key, { tickSize });
+  }
+  // The footprint's source precision: the broker's tick size when MT5 reported it, otherwise the
+  // analysis step. The user's row grouping is applied on top of this, never instead.
+  function footprintStepFor(source, symbol, analysisStep) {
+    return symbolSpecs.get(source + ':' + symbol)?.tickSize ?? analysisStep;
+  }
+  // The analysis grid for zones and bar heuristics: the caller's priceStep, otherwise 0.1.
+  function analysisStep(requested) {
+    const asked = Number(requested);
+    return Number.isFinite(asked) && asked > 0 ? Math.min(100, Math.max(0.001, asked)) : 0.1;
   }
   function health() {
     const at = now();
@@ -179,7 +205,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const intervalMs = rawInterval === null ? current.zones.timeframeMinutes * 60000 : Number(rawInterval);
       if (!Number.isInteger(intervalMs) || intervalMs < 60000 || intervalMs > 86400000) return json(res,400,{error:'invalid_interval',message:'intervalMs must be an integer between 60000 and 86400000.'});
       const selected = events.filter(e => e.symbol === symbol && e.source === source);
-      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint });
+      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, 0.1), limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint });
       const zones = analysis.zones.map(zone => ({
         id: zone.id, side: zone.side, low: zone.low, high: zone.high,
         strength: zone.strength, label: zone.label, distance: zone.distance, state: zone.state
@@ -229,19 +255,20 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/analysis') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
-      const priceStep = Math.min(100, Math.max(0.001, Number(url.searchParams.get('priceStep') || 0.1)));
+      
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
       const selected = events.filter(e => e.symbol === symbol && e.source === source);
+      const priceStep = analysisStep(url.searchParams.get('priceStep'));
+      const footprintStep = footprintStepFor(source, symbol, priceStep);
       const current = await settings.get();
-      const intervalMs = current.zones.timeframeMinutes * 60000;
-      return json(res, 200, { symbol, source, intervalMs, timeframeMinutes: current.zones.timeframeMinutes, ...buildMarketAnalysis(selected, { intervalMs, priceStep, zoneOptions: current.zones, footprintOptions: current.footprint }), feed: health().feeds.find(f => f.source === source && f.symbol === symbol) || null });
+      const intervalMs = Math.min(86400000, Math.max(60000, Number(current.zones.timeframeMinutes || 15) * 60000));
+      return json(res, 200, { symbol, source, intervalMs, timeframeMinutes: intervalMs / 60000, ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, zoneOptions: current.zones, footprintOptions: current.footprint }), feed: health().feeds.find(f => f.source === source && f.symbol === symbol) || null });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/replay') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
       const intervalMs = Math.min(86400000, Math.max(60000, Number(url.searchParams.get('intervalMs') || 900000)));
-      const priceStep = Math.min(100, Math.max(0.001, Number(url.searchParams.get('priceStep') || 0.1)));
       const from = url.searchParams.get('from'), to = url.searchParams.get('to');
       const fromMs = from ? Date.parse(from) : -Infinity, toMs = to ? Date.parse(to) : Infinity;
       if ((from && !Number.isFinite(fromMs)) || (to && !Number.isFinite(toMs)) || fromMs > toMs) return json(res, 400, { error: 'invalid_replay_range' });
@@ -249,20 +276,23 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
       const selected = events.filter(e => e.source === source && e.symbol === symbol && Date.parse(e.timestamp) >= fromMs && Date.parse(e.timestamp) <= toMs).sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp));
+      const priceStep = analysisStep(url.searchParams.get('priceStep'));
+      const footprintStep = footprintStepFor(source, symbol, priceStep);
       const replaySettings = await settings.get();
-      return json(res, 200, { symbol, source, from: from || null, to: to || null, eventCount: selected.length, replayLimit: 20000, ...buildMarketAnalysis(selected, { intervalMs, priceStep, limit: 20000, zoneOptions: replaySettings.zones, footprintOptions: replaySettings.footprint }) });
+      return json(res, 200, { symbol, source, from: from || null, to: to || null, eventCount: selected.length, replayLimit: 20000, ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, limit: 20000, zoneOptions: replaySettings.zones, footprintOptions: replaySettings.footprint }) });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/backtest') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
       const intervalMs = Math.min(86400000, Math.max(60000, Number(url.searchParams.get('intervalMs') || 900000)));
-      const priceStep = Math.min(100, Math.max(0.001, Number(url.searchParams.get('priceStep') || 0.1)));
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
       const selected = events.filter(e => e.source === source && e.symbol === symbol);
       const active = await setups.activeDefinition();
+      const priceStep = analysisStep(url.searchParams.get('priceStep'));
+      const footprintStep = footprintStepFor(source, symbol, priceStep);
       const backtestSettings = await settings.get();
-      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep, limit: 20000, zoneOptions: backtestSettings.zones, footprintOptions: backtestSettings.footprint });
+      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, limit: 20000, zoneOptions: backtestSettings.zones, footprintOptions: backtestSettings.footprint });
       const options = {
         initialEquity: Number(url.searchParams.get('initialEquity') || 10000),
         riskPct: Number(url.searchParams.get('riskPct') || active.backtest.riskPct),
@@ -289,7 +319,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const selected = events.filter(e => e.source === source && e.symbol === symbol);
       const active = await setups.activeDefinition();
       const signalSettings = await settings.get();
-      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, limit: 20000, zoneOptions: signalSettings.zones, footprintOptions: signalSettings.footprint });
+      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, 0.1), limit: 20000, zoneOptions: signalSettings.zones, footprintOptions: signalSettings.footprint });
       const signals = generateSignals(analysis.bars, active.strategy);
       const simulation = runBacktest(analysis.bars, { ...active.backtest, minScore: active.strategy.minScore, atrPeriod: active.strategy.atrPeriod, strategyConditions: active.strategy });
       const calibrated = attachWalkForwardCalibration(signals, simulation.trades);
@@ -324,7 +354,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const cacheKey = source + ':' + symbol + ':' + intervalMs + ':' + settingsRevision;
       let cached = analogueCache.get(cacheKey);
       if (!cached || cached.watermark !== ingestWatermark) {
-        const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, limit: 20000, zoneOptions: analogueSettings.zones, footprintOptions: analogueSettings.footprint });
+        const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, 0.1), limit: 20000, zoneOptions: analogueSettings.zones, footprintOptions: analogueSettings.footprint });
         const signals = generateSignals(analysis.bars, active.strategy);
         cached = { watermark: ingestWatermark, reference: signals.at(-1) || null, bars: analysis.bars };
         cachePut(cacheKey, cached);
@@ -353,6 +383,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         const body = await readJson(req);
         if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000 || typeof body.symbol !== 'string') return json(res, 422, { error:'invalid_live_batch', message:'Expected 1..1000 MT5 ticks and a symbol.' });
         const key = 'mt5:' + body.symbol.trim().toUpperCase();
+        rememberSpec('mt5', body.symbol, body.spec);
         let sequenceCursor = lastSequence.get(key) || 0;
         let duplicates = 0;
         const additions = [];
@@ -381,12 +412,25 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         return json(res, 202, { accepted:additions.length, duplicates, total:body.ticks.length, lastAcceptedSequence:lastSequence.get(key)||0 });
       } catch(error) { return json(res,error.status||422,{error:'invalid_live_batch',message:error.message}); }
     }
+    if (req.method === 'POST' && url.pathname === '/v1/ingest/mt5/spec/reset') {
+      if (!token) return json(res, 503, { error: 'ingest_not_configured' });
+      if (!tokenMatches(req.headers.authorization, token)) return json(res, 401, { error: 'unauthorized' });
+      try {
+        const body = await readJson(req);
+        if (body?.source !== 'mt5' || typeof body.symbol !== 'string' || !isGoldSymbol('mt5', body.symbol.trim().toUpperCase())) {
+          return json(res, 422, { error: 'invalid_symbol', message: 'Expected a supported gold symbol.' });
+        }
+        symbolSpecs.delete('mt5:' + body.symbol.trim().toUpperCase());
+        return json(res, 200, { reset: true, symbol: body.symbol.trim().toUpperCase() });
+      } catch (error) { return json(res, 400, { error: 'invalid_request', message: error.message }); }
+    }
     if (req.method === 'POST' && url.pathname === '/v1/ingest/mt5/history') {
       if (!token) return json(res, 503, { error: 'ingest_not_configured' });
       if (!tokenMatches(req.headers.authorization, token)) return json(res, 401, { error: 'unauthorized' });
       try {
         const body = await readJson(req);
         if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000) return json(res, 422, { error: 'invalid_history_batch', message: 'Expected 1..1000 MT5 ticks.' });
+        if (typeof body.symbol === 'string') rememberSpec('mt5', body.symbol, body.spec);
         let accepted = 0; let duplicates = 0; let rejected = 0;
         const additions = [];
         for (const raw of body.ticks) {
@@ -419,7 +463,9 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     if (!token) return json(res, 503, { error: 'ingest_not_configured', message: 'Set MARKET_INGEST_TOKEN before accepting market events.' });
     if (!tokenMatches(req.headers.authorization, token)) return json(res, 401, { error: 'unauthorized' });
     try {
-      const event = normalize(await readJson(req));
+      const body = await readJson(req);
+      const event = normalize(body);
+      if (event.source === 'mt5') rememberSpec('mt5', event.symbol, body.spec);
       const eventId = event.eventId || eventFingerprint(event);
       const legacyId = eventFingerprint(event);
       if (seenEventIds.has(dedupeKey(event, eventId)) || seenEventIds.has(dedupeKey(event, legacyId))) return json(res, 409, { error: 'duplicate_event', eventId });

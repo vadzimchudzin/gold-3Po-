@@ -155,7 +155,7 @@ async function runBacktest() {
     const s = data.summary;
     $('backtestSummary').textContent = `${s.trades} сделок · ${s.wins} прибыльных / ${s.losses} убыточных · винрейт ${s.winRate===null?'—':(s.winRate*100).toFixed(1)+'%'} · P&L ${s.netPnl>=0?'+':''}${money(s.netPnl)} · макс. просадка ${s.maxDrawdownPct.toFixed(2)}%`;
     $('backtestDetails').textContent = s.trades
-      ? `Итоговый капитал ${money(s.finalEquity)} · профит-фактор ${s.profitFactor===null?'∞':s.profitFactor.toFixed(2)} · матожидание ${s.expectancyR.toFixed(3)}R · свечей: ${data.bars}`
+      ? `Итоговый капитал ${money(s.finalEquity)} · профит-фактор ${s.profitFactor===null?'∞':s.profitFactor.toFixed(2)} · матожидание ${s.expectancyR.toFixed(3)}R · средняя прибыль ${s.avgWin===null?'—':money(s.avgWin)} · средний убыток ${s.avgLoss===null?'—':money(s.avgLoss)} · комиссии ${money(s.totalFees)} · проскальзывание ${money(s.slippageCost)} · свечей: ${data.bars}${s.periodStart?` · период ${new Date(s.periodStart).toLocaleDateString('ru-RU')} — ${new Date(s.periodEnd).toLocaleDateString('ru-RU')}`:''}`
       : `Подходящих сетапов нет среди ${data.bars} доступных свечей. Нужны прогрев и корректные снятия ликвидности.`;
     $('backtestCaveat').textContent = data.limitations.join(' ');
     const rows = (data.trades||[]).slice(-8).reverse().map(t=>`${sideText(t.side)} · ${new Date(t.entryTime).toLocaleString('ru-RU')} → ${new Date(t.exitTime).toLocaleString('ru-RU')} · ${exitText(t.exitReason)} · ${t.netR.toFixed(2)}R`);

@@ -63,10 +63,16 @@ test('publishSnapshot writes atomically into the common files folder', async () 
 function fakeWorker(responses) {
   return () => ({
     stop() {},
-    async request(op) {
+    async request(op, payload = {}) {
       const value = responses[op];
-      if (typeof value === 'function') return value();
+      if (typeof value === 'function') return value(payload);
       if (!value) throw new Error('unexpected op ' + op);
+      if (op === 'connect') return {
+        terminalPath: 'C:\\MT5\\terminal64.exe',
+        accountLogin: '12345',
+        server: 'RoboForex-Demo',
+        ...value
+      };
       return value;
     }
   });
@@ -107,7 +113,7 @@ test('session connects, ingests, publishes zones and clears them on disconnect',
     request: api.request,
     publish: async (common, symbol, zones, style) => { published.push({ symbol, count: zones.length, width: style?.lineWidth }); }
   });
-  const state = await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '12345', password: 'secret', server: 'RoboForex-Demo', symbol: 'XAUUSDm' });
+  const state = await session.connect();
   assert.equal(state.state, 'online');
   assert.equal(state.symbol, 'XAUUSDM');
   await new Promise(resolve => setTimeout(resolve, 2600));
@@ -122,6 +128,36 @@ test('session connects, ingests, publishes zones and clears them on disconnect',
   assert.ok(published.at(-1).count === 0, 'disconnect must clear the indicator snapshot');
 });
 
+test('the broker tick size from MT5 travels with every tick batch', async () => {
+  const cases = [
+    [{ spec: { tickSize: 0.01, digits: 2 } }, { tickSize: 0.01 }, { tickSize: 0.01 }],
+    // Without a usable tick size every batch says so explicitly (null), so the server drops an old broker's grid.
+    [{ specUnavailable: 'symbol_info_failed' }, null, { tickSize: null, tickSizeIssue: 'symbol_info_failed' }],
+    [{}, null, { tickSize: null, tickSizeIssue: 'not_reported' }],
+    [{ spec: { tickSize: 0 } }, null, { tickSize: null, tickSizeIssue: 'not_reported' }]
+  ];
+  for (const [reported, expected, status] of cases) {
+    const api = fakeApi();
+    const session = createMt5Session({
+      workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
+      makeWorker: fakeWorker({
+        connect: { ok: true, symbol: 'XAUUSDm', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data', ...reported },
+        history: { ok: true, ticks: [tick] },
+        poll: { ok: true, ticks: [tick] }
+      }),
+      request: api.request,
+      publish: async () => {}
+    });
+    const online = await session.connect();
+    for (const [key, value] of Object.entries(status)) assert.equal(online[key], value, key + ' in the status for ' + JSON.stringify(reported));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await session.disconnect();
+    const batches = api.calls.filter(call => call.path.endsWith('/history') || call.path.endsWith('/live-batch'));
+    assert.ok(batches.length >= 1, 'ticks must be sent');
+    for (const batch of batches) assert.deepEqual(batch.body.spec, expected, 'spec sent with ' + JSON.stringify(reported));
+  }
+});
+
 test('session recovers from a live sequence collision', async () => {
   const api = fakeApi({ failFirstLive: true });
   const session = createMt5Session({
@@ -134,7 +170,7 @@ test('session recovers from a live sequence collision', async () => {
     request: api.request,
     publish: async () => {}
   });
-  await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' });
+  await session.connect();
   await new Promise(resolve => setTimeout(resolve, 2600));
   const liveCalls = api.calls.filter(c => c.path === '/v1/ingest/mt5/live-batch');
   assert.ok(liveCalls.length >= 2, 'a 409 must trigger a resequenced resend');
@@ -184,7 +220,7 @@ test('session disconnects when the licence becomes invalid', async () => {
     request: api.request,
     publish: async () => {}
   });
-  await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' });
+  await session.connect();
   await new Promise(resolve => setTimeout(resolve, 2200));
   valid = false;
   await new Promise(resolve => setTimeout(resolve, 3400));
@@ -205,7 +241,7 @@ test('a truncated MT5 history is reported instead of passed off as complete', as
     request: api.request,
     publish: async () => {}
   });
-  await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' });
+  await session.connect();
   await new Promise(resolve => setTimeout(resolve, 2600));
   const state = session.state();
   assert.match(state.message, /неполная/, 'a partial history must be labelled as partial');
@@ -213,18 +249,37 @@ test('a truncated MT5 history is reported instead of passed off as complete', as
   await session.disconnect();
 });
 
-test('session rejects malformed connect input without starting a worker', async () => {
+test('connect attaches to the authenticated terminal without account credentials', async () => {
   let started = false;
+  let connectPayload;
   const session = createMt5Session({
     workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
-    makeWorker: () => { started = true; return fakeWorker({})(); },
-    request: async () => { throw new Error('no network expected'); },
+    makeWorker: () => {
+      started = true;
+      return {
+        stop() {},
+        async request(op, payload) {
+          if (op === 'connect') {
+            connectPayload = payload;
+            return { ok: true, symbol: 'XAUUSD', terminalPath: 'C:\\MT5\\terminal64.exe',
+              accountLogin: '12345', server: 'RoboForex-Demo', commonDataPath: 'C:\\Common',
+              dataPath: 'C:\\Data', specUnavailable: 'not_reported' };
+          }
+          if (op === 'history') return { ok: true, ticks: [] };
+          if (op === 'poll') return { ok: true, ticks: [] };
+          throw new Error('unexpected op ' + op);
+        }
+      };
+    },
+    request: async () => ({ ok: true, status: 200, json: async () => ({ valid: true }) }),
     publish: async () => {}
   });
-  await assert.rejects(() => session.connect({ terminalPath: 'C:\\evil.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' }), /terminal64/);
-  await assert.rejects(() => session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: 'abc', password: 'p', server: 'S', symbol: 'XAUUSD' }), /Заполните/);
-  await assert.rejects(() => session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'EURUSD' }), /Заполните/);
-  assert.equal(started, false);
+  const state = await session.connect();
+  assert.equal(started, true);
+  assert.deepEqual(connectPayload, {}, 'no login, password, server or account selector is sent to the connector');
+  assert.equal(state.state, 'online');
+  assert.equal(state.accountLabel, 'Счёт ···2345 · RoboForex-Demo');
+  await session.disconnect();
 });
 
 test('a connector that is not on disk says so, and names the path', async () => {
@@ -232,9 +287,260 @@ test('a connector that is not on disk says so, and names the path', async () => 
     workerCommand: join('/definitely-missing', 'gold3po-mt5.exe'), workerArgs: [],
     apiOrigin: 'http://127.0.0.1:9', token: 't', publish: async () => {}
   });
-  const state = await session.connect({ terminalPath: '/terminals/terminal64.exe', login: '5000123', password: 'secret', server: 'Broker-Demo', symbol: 'XAUUSD' });
+  const state = await session.connect();
   assert.equal(state.state, 'offline');
   assert.match(state.message, /Модуль подключения MT5 не найден: .*gold3po-mt5\.exe/, 'the window must name the missing module');
   assert.match(state.message, /переустановите приложение/, 'and not send the user looking for a MetaTrader5 package to install');
   assert.doesNotMatch(state.message, /Установите официальный пакет/, 'the old message blamed the user for our packaging');
+});
+
+test('a failed poll is retried with backoff instead of ending the session', async () => {
+  let failing = 2;
+  const api = fakeApi();
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 40, maxBackoffMs: 120, maxFailures: 5,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { if (failing > 0) { failing--; throw new Error('Терминал MT5 отключён от брокера.'); } return { ok: true, ticks: [tick] }; }
+    }),
+    request: api.request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const during = session.state();
+  assert.equal(during.state, 'reconnecting', 'a transient failure keeps the session and says it is retrying');
+  assert.match(during.message, /Повтор 1 из 5/);
+  await new Promise(resolve => setTimeout(resolve, 700));
+  const after = session.state();
+  assert.equal(after.state, 'online', 'the session recovers once polls succeed again');
+  assert.equal(after.retries, 0);
+  assert.ok(api.calls.some(c => c.path === '/v1/ingest/mt5/live-batch'), 'ticks flow again after recovery');
+  await session.disconnect();
+});
+
+test('repeated poll failures end the session with the last reason', async () => {
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, maxBackoffMs: 20, maxFailures: 3,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { throw new Error('Терминал MT5 закрыт.'); }
+    }),
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const state = session.state();
+  assert.equal(state.state, 'offline');
+  assert.match(state.message, /Терминал MT5 закрыт/);
+});
+
+test('no new ticks for a while marks the feed stale without disconnecting', async () => {
+  let clock = 1_000_000;
+  let first = true;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, staleAfterMs: 60_000, now: () => clock,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { if (first) { first = false; return { ok: true, ticks: [tick] }; } return { ok: true, ticks: [] }; }
+    }),
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(session.state().feed, 'live');
+  clock += 61_000;
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const state = session.state();
+  assert.equal(state.state, 'online', 'a quiet market is not a disconnect');
+  assert.equal(state.feed, 'stale');
+  assert.match(state.message, /Нет новых тиков более 60 с/);
+  await session.disconnect();
+});
+
+test('a connector process that has exited ends the session at once, without retries', async () => {
+  let stopped = false;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, maxFailures: 5,
+    makeWorker: () => ({
+      stop() {}, stopped: () => stopped,
+      async request(op) {
+        if (op === 'connect') return { ok: true, symbol: 'XAUUSD', terminalPath: 'C:\\MT5\\terminal64.exe', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' };
+        if (op === 'history') return { ok: true, ticks: [] };
+        stopped = true;
+        throw new Error('Модуль MT5 закрылся: crash');
+      }
+    }),
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const state = session.state();
+  assert.equal(state.state, 'offline', 'a dead connector cannot answer a retry');
+  assert.match(state.message, /Модуль MT5 закрылся/);
+});
+
+function licenceApi(answer) {
+  const base = fakeApi();
+  return async (url, init) => new URL(url).pathname === '/v1/license/status' ? answer() : base.request(url, init);
+}
+
+test('a licence check answering 200 with valid:false ends the session at once', async () => {
+  let checks = 0;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, maxFailures: 5,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: { ok: true, ticks: [] }
+    }),
+    request: licenceApi(() => { checks++; return { ok: true, status: 200, json: async () => ({ valid: false }) }; }),
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const state = session.state();
+  assert.ok(checks >= 1, 'the licence status endpoint was asked');
+  assert.equal(state.state, 'offline', 'an answered invalid licence is not retried');
+  assert.match(state.message, /Лицензия GOLD-3Po недействительна/);
+});
+
+test('an unreadable licence answer is a failed check, never treated as valid', async () => {
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, maxBackoffMs: 40, maxFailures: 5,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: { ok: true, ticks: [] }
+    }),
+    request: licenceApi(() => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } })),
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.notEqual(session.state().state, 'online', 'an unreadable licence answer must not leave the session online');
+  await new Promise(resolve => setTimeout(resolve, 600));
+  const state = session.state();
+  assert.equal(state.state, 'offline', 'after the retries it gives up');
+  assert.match(state.message, /Не удалось проверить лицензию/);
+});
+
+test('the last retry says the next failure closes the connection', async () => {
+  let failures = 4;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, maxBackoffMs: 20, maxFailures: 5,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { if (failures-- > 0) throw new Error('Терминал MT5 недоступен.'); return new Promise(() => {}); }
+    }),
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const state = session.state();
+  assert.equal(state.state, 'reconnecting');
+  assert.match(state.message, /Повтор 4 из 5.*последний: при новой ошибке соединение будет закрыто/);
+  await session.disconnect();
+});
+
+test('live ticks the service could not take are resent after it recovers', async () => {
+  let down = 2, n = 0;
+  const received = [];
+  const base = fakeApi();
+  const request = async (url, init) => {
+    if (new URL(url).pathname === '/v1/ingest/mt5/live-batch') {
+      if (down > 0) { down--; return { ok: false, status: 500, json: async () => ({}) }; }
+      for (const t of JSON.parse(init.body).ticks) received.push(t.timestamp);
+      return { ok: true, status: 202, json: async () => ({ accepted: 1 }) };
+    }
+    return base.request(url, init);
+  };
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 15, maxBackoffMs: 30, maxFailures: 5,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { n++; return n <= 4 ? { ok: true, ticks: [{ ...tick, timestamp: new Date(Date.UTC(2026, 0, 5, 10, 0, n)).toISOString() }] } : { ok: true, ticks: [] }; }
+    }),
+    request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 600));
+  const expected = [1, 2, 3, 4].map(s => new Date(Date.UTC(2026, 0, 5, 10, 0, s)).toISOString());
+  assert.deepEqual(received, expected, 'every polled tick reaches the service once, in order, after the outage');
+  assert.equal(session.state().state, 'online');
+  await session.disconnect();
+});
+
+test('the resend queue is bounded and says how many ticks it had to drop', async () => {
+  let down = 1, n = 0;
+  const received = [];
+  const base = fakeApi();
+  const request = async (url, init) => {
+    if (new URL(url).pathname === '/v1/ingest/mt5/live-batch') {
+      if (down > 0) { down--; throw new Error('connect ECONNREFUSED'); }
+      for (const t of JSON.parse(init.body).ticks) received.push(t.timestamp);
+      return { ok: true, status: 202, json: async () => ({ accepted: 1 }) };
+    }
+    return base.request(url, init);
+  };
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 15, maxBackoffMs: 30, maxUnsent: 3,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { n++; return n <= 2 ? { ok: true, ticks: [0, 1, 2].map(k => ({ ...tick, timestamp: new Date(Date.UTC(2026, 0, 5, 10, n, k)).toISOString() })) } : { ok: true, ticks: [] }; }
+    }),
+    request,
+    publish: async () => {}
+  });
+  await session.connect();
+  const messages = [];
+  const watch = setInterval(() => messages.push(session.state().message), 3);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  clearInterval(watch);
+  assert.equal(received.length, 3, 'only the newest ticks up to the bound are kept');
+  assert.equal(received.at(-1), new Date(Date.UTC(2026, 0, 5, 10, 2, 2)).toISOString(), 'the newest ticks win');
+  const state = session.state();
+  assert.equal(state.droppedTicks, 3, 'the session keeps the total');
+  assert.ok(messages.some(message => /Потеряно тиков за время сбоя: 3/.test(message)), 'the recovery reports the loss');
+  assert.doesNotMatch(state.message, /Потеряно/, 'once recovered, the line no longer repeats an old loss');
+  await session.disconnect();
+});
+
+test('a 409 whose resend also fails keeps the batch for the next poll', async () => {
+  let collisions = 1, n = 0;
+  const received = [];
+  const base = fakeApi();
+  const request = async (url, init) => {
+    if (new URL(url).pathname === '/v1/ingest/mt5/live-batch') {
+      if (collisions > 0) { collisions--; return { ok: false, status: 409, json: async () => { throw new SyntaxError('bad body'); } }; }
+      for (const t of JSON.parse(init.body).ticks) received.push(t.timestamp);
+      return { ok: true, status: 202, json: async () => ({ accepted: 1 }) };
+    }
+    return base.request(url, init);
+  };
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 15, maxBackoffMs: 30,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [] },
+      poll: () => { n++; return n === 1 ? { ok: true, ticks: [{ ...tick, timestamp: new Date(Date.UTC(2026, 0, 5, 10, 0, 1)).toISOString() }] } : { ok: true, ticks: [] }; }
+    }),
+    request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(received, [new Date(Date.UTC(2026, 0, 5, 10, 0, 1)).toISOString()], 'the tick from the failed 409 round is sent on the next poll');
+  await session.disconnect();
 });

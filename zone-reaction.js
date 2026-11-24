@@ -3,9 +3,11 @@
 // cut through repeatedly cannot claim a high score.
 //
 // A "touch" is a run of consecutive candles overlapping the zone, entered from outside it.
-// From that run the measurement looks ahead up to `horizon` candles and takes the first outcome:
-//   respected — price left the zone by reactionAtr * ATR on the side it arrived from;
-//   broken    — price closed through the zone by breakAtr * ATR on the opposite side;
+// From the first candle of that run the measurement looks at most `horizon` candles ahead (the run
+// itself included, so a long run is not given extra look-ahead) and takes the first outcome:
+//   respected — price turned back and left the zone by reactionAtr * ATR on the side it arrived from
+//               (a touch from below must fall under zone.low, a touch from above must rise over zone.high);
+//   broken    — a candle closed through the zone by breakAtr * ATR on the opposite side;
 //   neutral   — neither happened inside the horizon (the level was left alone or drifted away).
 const finite = n => Number.isFinite(n);
 
@@ -31,19 +33,23 @@ export function measureZoneReactions(bars, zone, options = {}) {
     while (end + 1 < bars.length && bars[end + 1].h >= zone.low && bars[end + 1].l <= zone.high && finite(bars[end + 1].h) && finite(bars[end + 1].l)) end++;
 
     const previous = bars[i - 1];
-    const approachedFromBelow = previous && finite(previous.c) ? previous.c < zone.low : bar.c < zone.mid;
+    const approachedFromBelow = previous && finite(previous.c) ? previous.c < zone.low : bar.c < (zone.low + zone.high) / 2;
     touches++;
     lastTouchIndex = end;
 
     let outcome = 'neutral';
-    // Start at the last candle of the run: a bounce or a break usually happens ON the candle that leaves the zone.
-    const limit = Math.min(bars.length - 1, end + horizon);
-    for (let k = end; k <= limit; k++) {
+    // Scan from the first candle of the run so the first outcome wins. The horizon counts from the touch
+    // itself, so a wide zone that holds price for many candles gets no longer window than a thin one.
+    const limit = Math.min(bars.length - 1, i + horizon);
+    for (let k = i; k <= limit; k++) {
       const candle = bars[k];
       if (!finite(candle.c) || !finite(candle.h) || !finite(candle.l)) continue;
-      // A close through the zone is the stronger signal: assume the level failed even if the wick got there first.
+      // A close through the zone is the stronger signal: assume the level failed even if price also reacted.
       const brokeThrough = approachedFromBelow ? candle.c >= zone.high + breakOut : candle.c <= zone.low - breakOut;
-      const heldAway = approachedFromBelow ? candle.h >= zone.high + reach : candle.l <= zone.low - reach;
+      // The reaction is a move back to the side price arrived from. On candles of the touch itself only the
+      // close counts: their wick on that side may have printed before they reached the zone.
+      const away = approachedFromBelow ? (k <= end ? candle.c : candle.l) : (k <= end ? candle.c : candle.h);
+      const heldAway = approachedFromBelow ? away <= zone.low - reach : away >= zone.high + reach;
       if (brokeThrough) { outcome = 'broken'; break; }
       if (heldAway) { outcome = 'respected'; barsToReact += k - i + 1; break; }
     }
