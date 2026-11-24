@@ -350,10 +350,14 @@ class Worker:
             symbol = choose_gold_symbol(self.api, requested_symbol)
             if not self.api.symbol_select(symbol, True):
                 raise mt5_error(self.api, "symbol_select_failed", "MT5 не смог выбрать найденный инструмент золота из «Обзора рынка».")
-            symbol_info = self.api.symbol_info(symbol)
-            if symbol_info is None:
-                raise mt5_error(self.api, "symbol_info_failed", "MT5 could not read the selected symbol specification.")
-            chart_mode = getattr(symbol_info, "chart_mode", None)
+            # The session can still stream broker quotes when MT5 does not expose
+            # symbol metadata. Keep the connection and report the missing tick grid
+            # separately through specUnavailable below.
+            try:
+                symbol_info = self.api.symbol_info(symbol)
+            except Exception:
+                symbol_info = None
+            chart_mode = getattr(symbol_info, "chart_mode", None) if symbol_info is not None else None
             self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else None
             for path in (terminal.commondata_path, terminal.data_path):
                 if not isinstance(path, str) or not path or len(path) > 4096:
