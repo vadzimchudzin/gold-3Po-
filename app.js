@@ -158,6 +158,18 @@ function renderFootprint(){
  }
  const priceRows=[...traded.values()].sort((a,b)=>b-a);
  if(!priceRows.length){grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
+ // Data quality is shown, never repaired by inventing prices or distributing OHLC over empty rows.
+ const totalSourceTicks=feet.reduce((sum,b)=>sum+(Number(b.tickCount)||0),0);
+ const totalSourceLevels=feet.reduce((sum,b)=>sum+(Array.isArray(b.levels)?b.levels.length:0),0);
+ const sparseBars=feet.filter(b=>(Array.isArray(b.levels)?b.levels.length:0)<3).length;
+ const volumeKind=String(analysisMeta?.volumeKind||'');
+ const sourceLabel=volumeKind.includes('exchange_trade_size')
+  ?'ИСТОЧНИК · БИРЖЕВЫЕ СДЕЛКИ / ОБЪЁМ КОНТРАКТОВ'
+  :'ИСТОЧНИК · MT5 OTC / ТИКОВАЯ АКТИВНОСТЬ, НЕ БИРЖЕВОЙ ОБЪЁМ';
+ const sourceQuality=sparseBars
+  ?'РЕДКИЕ ДАННЫЕ · '+sparseBars+'/'+feet.length+' свечей имеют менее 3 реальных ценовых уровней · пропуски не интерполируются'
+  :'ПЛОТНОСТЬ · '+totalSourceTicks+' исходных тиков / '+totalSourceLevels+' фактических ценовых уровней';
+ const sourceStatus='<div class="footprint-source-status '+(sparseBars?'is-sparse':'is-dense')+'" role="status" aria-live="polite"><strong>'+sourceLabel+'</strong><span>'+sourceQuality+'</span></div>';
  const allLevels=feet.flatMap(b=>Array.isArray(b.levels)?b.levels:[]);
  const scale=Math.max(1,...feet.map(b=>Number(b.maxLevelVolume)||0));
  const bidScale=Math.max(1,...allLevels.map(row=>Number(row.bid)||0));
@@ -170,7 +182,7 @@ function renderFootprint(){
  const va=currentProfile?.valueArea||null;
  const step=footprintStep(),priceDigits=clamp(Math.ceil(-Math.log10(step)),2,6),priceLabel=p=>fmt(p,priceDigits);
  const cols=visible.length,template='68px repeat('+cols+','+cellWidth+'px) 92px',minWidth=68+cols*(cellWidth+3)+92;
- const head='<div class="foot-row foot-head" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ЦЕНА</div>'+visible.map((b,i)=>'<div class="bar-head '+(offset+i===selected?'active':'')+'" title="'+timeLabel(b.time,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+'">#'+String(offset+i+1).padStart(3,'0')+'</div>').join('')+'<div class="foot-profile-head">ПРОФИЛЬ</div></div>';
+ const head='<div class="foot-row foot-head" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ЦЕНА</div>'+visible.map((b,i)=>{const levels=Array.isArray(b.levels)?b.levels.length:0,ticks=Number(b.tickCount)||0;return '<div class="bar-head '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-source-ticks="'+ticks+'" data-source-levels="'+levels+'" title="'+timeLabel(b.time,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' · исходных тиков: '+ticks+' · фактических ценовых уровней: '+levels+'">#'+String(offset+i+1).padStart(3,'0')+'</div>';}).join('')+'<div class="foot-profile-head">ПРОФИЛЬ</div></div>';
  const rows=priceRows.map(p=>'<div class="foot-row" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level" data-price="'+p+'">'+priceLabel(p)+'</div>'+feet.map((b,i)=>{
   const v=levelOf(b,p),total=v.total||(v.bid+v.ask+v.unknown),empty=total<=0;
   const intensity=total>0?Math.min(.85,.07+.68*Math.pow(total/scale,.65)):0;
@@ -221,7 +233,7 @@ function renderFootprint(){
  })()+'</div>').join('');
  const deltas='<div class="foot-row foot-deltas" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">Δ СВЕЧИ</div>'+feet.map((b,i)=>{const d=b.unknown>0?null:(b.delta??barDelta(b));return '<div class="foot-delta '+(d===null?'':d>=0?'positive':'negative')+' '+(offset+i===selected?'active':'')+'">'+(d===null?'—':((d>0?'+':'')+fmt(d,0)))+'</div>';}).join('')+'<div class="foot-profile-total">'+(currentProfile?fmt(currentProfile.volume,0):'—')+'</div></div>';
  const times='<div class="foot-row foot-times" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ВРЕМЯ</div>'+visible.map((b,i)=>'<button class="bar-time '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'">'+timeLabel(b.time,{hour:'2-digit',minute:'2-digit',timeZone:'UTC'},'toLocaleTimeString')+'</button>').join('')+'<div class="foot-profile-head">СЕССИЯ</div></div>';
- grid.innerHTML='<div class="footprint-table" style="min-width:'+minWidth+'px;--footprint-row-height:'+rowHeight+'px">'+head+deltas+rows+times+'</div>';
+ grid.innerHTML=sourceStatus+'<div class="footprint-table" style="min-width:'+minWidth+'px;--footprint-row-height:'+rowHeight+'px">'+head+deltas+rows+times+'</div>';
  updateFootprintZoomControls();
  // Keep the newest traded price in view unless the trader has taken over scrolling.
  if(grid.dataset.autoScroll!=='0'){

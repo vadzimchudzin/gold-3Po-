@@ -81,6 +81,18 @@ try {
   assert.ok(await page.locator('.candle').count() >= 30, 'live chart should render the ingested 30-day broker history');
   assert.equal(await page.locator('#chartEmpty').isHidden(), true, 'empty state must disappear once broker data arrives');
   assert.ok(await page.locator('.zone-row').count() > 0, 'liquidity zones should appear once broker history arrives');
+  await page.waitForSelector('.footprint-source-status', { timeout:5000 });
+  const dataProvenance = await page.evaluate(() => ({
+    status: document.querySelector('.footprint-source-status')?.innerText || '',
+    headers: [...document.querySelectorAll('#footprintGrid .bar-head')].map(node => ({
+      ticks: Number(node.dataset.sourceTicks),
+      levels: Number(node.dataset.sourceLevels)
+    }))
+  }));
+  assert.match(dataProvenance.status, /MT5 OTC.*ТИКОВАЯ АКТИВНОСТЬ.*НЕ БИРЖЕВОЙ ОБЪЁМ/, 'OTC data must not be represented as exchange trade volume');
+  assert.match(dataProvenance.status, /РЕДКИЕ ДАННЫЕ/, 'sparse source history must be called out instead of looking like a complete footprint');
+  assert.match(dataProvenance.status, /не интерполируются/, 'missing price levels must never be filled from OHLC');
+  assert.ok(dataProvenance.headers.length > 0 && dataProvenance.headers.every(item => item.levels >= 0 && item.ticks >= 0), 'each candle header must expose the number of actual source ticks and price levels');
   const chartWidthBeforeZoom=await page.locator('#priceChart').evaluate(el=>el.getBoundingClientRect().width);
   await page.locator('#chartZoomIn').click();
   const chartWidthAfterZoom=await page.locator('#priceChart').evaluate(el=>el.getBoundingClientRect().width);
