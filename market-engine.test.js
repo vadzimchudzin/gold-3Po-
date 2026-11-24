@@ -281,3 +281,16 @@ test('inferred sides land in the footprint instead of the unknown bucket',()=>{
   assert.ok(out.bars[0].ask>0&&out.bars[0].bid>0,'both sides get volume');
   assert.ok(out.bars[0].delta<0,'more selling than buying');
 });
+
+test('a limited build ignores ticks that could only feed bars the limit drops', () => {
+  const events = [];
+  for (let i = 0; i < 40 * 20; i += 1) {
+    const price = 3600 + Math.sin(i / 40) * 3;
+    events.push({ source: 'mt5', symbol: 'XAUUSD', feedId: 'f'.repeat(32), timestamp: new Date(Date.parse('2026-11-20T00:00:00Z') + i * 60_000).toISOString(), bid: price - 0.1, ask: price + 0.1, last: price, volume: 1, seq: i });
+  }
+  const full = buildMarketAnalysis(events, { intervalMs: 60_000, priceStep: 0.1, limit: 12 });
+  // The oldest 600 ticks can only produce bars the limit drops, so dropping them must change nothing.
+  const trimmed = buildMarketAnalysis(events.slice(-240), { intervalMs: 60_000, priceStep: 0.1, limit: 12 });
+  assert.deepEqual(trimmed.bars, full.bars);
+  assert.deepEqual(trimmed.zones, full.zones);
+});

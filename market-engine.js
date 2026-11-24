@@ -29,17 +29,55 @@ export function normalizeTick(input) {
 // priceStep is the analysis grid for zones and bar heuristics (exhaustion range, zone padding).
 // footprintStep is the footprint's source precision (the broker tick size when known); it only
 // decides how traded prices fall into footprint rows, so a fine broker grid does not change zones.
-export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceStep = 0.1, footprintStep = priceStep, limit = 10000, maxZones, zoneOptions = {}, footprintOptions = {} } = {}) {
-  if (!Array.isArray(events) || !finite(intervalMs) || intervalMs <= 0 || !finite(priceStep) || priceStep <= 0 || !finite(footprintStep) || footprintStep <= 0) throw new TypeError('Invalid analysis input');
-  const ticks = events.map(e => normalizeTick(e)).sort((a,b) => a.time-b.time).slice(-1000000);
+export function buildMarketAnalysis(events, options = {}) {
+  const { bars, ticks } = aggregateTicks(events, options);
+  return finishAnalysis(bars, {
+    ...options,
+    tickCount: ticks.length,
+    hasComex: ticks.some(event => event.source === 'comex'),
+    comexOnly: ticks.length > 0 && ticks.every(event => event.source === 'comex')
+  });
+}
+
+// Ticks into bars, and nothing else. Kept separate so a caller holding a long tick buffer can
+// aggregate once and only re-run the cheap derived part per request: aggregating is what costs
+// (470 ms for 300k ticks), while the footprint and zones over the resulting bars cost milliseconds.
+export function aggregateTicks(events, { intervalMs = 15 * 60_000, footprintStep = 0.1, limit = 10000 } = {}) {
+  if (!Array.isArray(events) || !finite(intervalMs) || intervalMs <= 0 || !finite(footprintStep) || footprintStep <= 0) throw new TypeError('Invalid analysis input');
+  // Newest tick first: the buffer is appended in arrival order but is not guaranteed sorted.
+  let lastMs = -Infinity;
+  for (const event of events) { const ms = Date.parse(event.timestamp); if (ms > lastMs) lastMs = ms; }
+  // Only the last `limit` bars survive the slice below, so a tick older than that window cannot
+  // change the answer. Two bars of margin keep the oldest kept bar complete instead of partial,
+  // which is what makes this cut identical to aggregating the whole archive.
+  const fromMs = Number.isFinite(lastMs) ? lastMs - (Math.max(1, limit) + 2) * intervalMs : -Infinity;
+  const windowed = events.filter(event => fromMs === -Infinity || Date.parse(event.timestamp) >= fromMs);
+  const ticks = windowed
+    .map(event => ({ at: Date.parse(event.timestamp), event }))
+    .sort((a, b) => a.at - b.at)
+    .map(item => item.event);
   const bars = new Map();
-  for (const t of ticks) {
+  addTicks(bars, ticks, intervalMs, footprintStep);
+  return { bars, ticks };
+}
+
+// Applies ticks in the order they are given. A buffer that only grew can be extended with the new
+// tail instead of being aggregated again from the start.
+export function addTicks(bars, events, intervalMs, footprintStep) {
+  for (const event of events) {
+    const t = normalizeTick(event);
     const start = floorTime(t.time, intervalMs);
     let bar = bars.get(start);
     // The same builder the browser uses for the forming bar, so live and historical bars agree.
     if (!bar) { bar = { ...emptyBar(start, t.last), time: new Date(start).toISOString() }; bars.set(start, bar); }
     applyTickToBar(bar, t, footprintStep);
   }
+  return bars;
+}
+
+// Everything derived from the bars: footprint columns, sweeps, zones, profile. Reading only.
+export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1, footprintStep = priceStep, limit = 10000, maxZones, zoneOptions = {}, footprintOptions = {}, tickCount = 0, hasComex = false, comexOnly = false } = {}) {
+  if (!(bars instanceof Map) || !finite(priceStep) || priceStep <= 0) throw new TypeError('Invalid analysis input');
   let cumulativeDelta = 0;
   const result = [...bars.values()].slice(-Math.max(1,limit)).map((bar, barIndex, allBars) => {
     const total=bar.bid+bar.ask+bar.unknown;
@@ -65,7 +103,7 @@ export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceSte
       sweeps,absorption,exhaustion};
   });
   const zones = detectLiquidityZones(result, priceStep, { ...zoneOptions, ...(maxZones === undefined ? {} : { maxZones }) });
-  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, profile:sessionProfile(result, { priceStep: footprintStep, options: footprintOptions }), divergence:cumulativeDivergence(result), tickCount:ticks.length, volumeKind:ticks.some(t=>t.source==='comex')?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:ticks.length&&ticks.every(t=>t.source==='comex')?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
+  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, profile:sessionProfile(result, { priceStep: footprintStep, options: footprintOptions }), divergence:cumulativeDivergence(result), tickCount, volumeKind:hasComex?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:comexOnly?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
 }
 
 export const DEFAULT_ZONE_OPTIONS = Object.freeze({

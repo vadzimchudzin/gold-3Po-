@@ -18,3 +18,4 @@ tools/keygen/license-issued.csv
 **/GOLD3Po-Keygen.exe
 
 __pycache__/
+.tmp/

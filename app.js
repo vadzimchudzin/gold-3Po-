@@ -492,7 +492,7 @@ panelResizer?.addEventListener('keydown',event=>{
 applyWorkspaceLayout();
 // A streamed tick updates the forming bar in place: the last footprint column and the last
 // candle move between authoritative refetches instead of waiting for the next 1.5 s poll.
-let liveFrame=0,liveRenderedAt=0;
+let liveFrame=0,liveRenderedAt=0,lastLiveTick=null;
 function scheduleLiveRender(){
  if(liveFrame)return;
  const wait=Math.max(0,120-(performance.now()-liveRenderedAt));
@@ -500,6 +500,7 @@ function scheduleLiveRender(){
 }
 function applyLiveTick(event){
  if(replayMode||!bars.length||!event)return;
+ lastLiveTick=event;
  const time=Date.parse(event.timestamp),interval=Number(analysisMeta?.intervalMs||window.gold3poIntervalMs?.()||900000);
  if(!Number.isFinite(time)||!(interval>0))return;
  const start=Math.floor(time/interval)*interval;
@@ -524,11 +525,23 @@ function applyLiveTick(event){
  bar.cumulativeDelta=(bars[bars.length-2]?.cumulativeDelta||0)+bar.delta;
  scheduleLiveRender();
 }
+// The aggregate is built on the server a moment before it reaches this listener, and a tick streamed
+// in between is newer than it. Replacing the forming bar wholesale would roll the chart back to a
+// price (and volume) the strip already passed; the newer local bar is kept for that one bucket.
+function mergeLiveBars(analysis){
+ const incoming=analysis.bars,local=bars.at(-1),tick=lastLiveTick,compared=incoming.at(-1);
+ if(!local||!tick||replayMode||!compared)return incoming;
+ const interval=Number(analysis.intervalMs||0);
+ const tickAt=Date.parse(tick.timestamp),builtAt=Date.parse(analysis.generatedAt||0);
+ if(!(interval>0)||!Number.isFinite(tickAt)||!(tickAt>=builtAt))return incoming;
+ if(Math.floor(tickAt/interval)!==Math.floor(compared.timeMs/interval)||local.timeMs!==compared.timeMs)return incoming;
+ return [...incoming.slice(0,-1),local];
+}
 window.addEventListener('market-tick',e=>applyLiveTick(e.detail));
 // Footprint settings changed: re-render with the new options. Bars served before the change carry
 // the old marks, so drop their cached footprint fields and recompute them from the level maps.
 window.addEventListener('gold3po-settings',()=>{for(const b of bars){if(Array.isArray(b.levels)&&b.poc!==undefined){delete b.poc;delete b.valueArea;delete b.imbalances;delete b.stackedImbalances;delete b.absorbedLevels;delete b.unfinishedHigh;delete b.unfinishedLow;delete b.delta;delete b.deltaRatio;delete b.maxLevelVolume;}}renderFootprint();renderInspector();});
-window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=a.bars;live=true;analysisMeta=a;const tf=Number(a.timeframeMinutes||Number(a.intervalMs)/60000);document.querySelectorAll('.timeframe-label').forEach(node=>{if(Number.isFinite(tf)&&tf>0){const caption=tf>=60?(tf%60===0?tf/60+'ч':tf+'м'):tf+'м';node.textContent=caption+(node.classList.contains('footprint-timeframe')?' · ЕДИНЫЙ ТФ':' · ТИКИ БРОКЕРА');}});zones=a.zones||[];selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
+window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=mergeLiveBars(a);live=true;analysisMeta=a;const tf=Number(a.timeframeMinutes||Number(a.intervalMs)/60000);document.querySelectorAll('.timeframe-label').forEach(node=>{if(Number.isFinite(tf)&&tf>0){const caption=tf>=60?(tf%60===0?tf/60+'ч':tf+'м'):tf+'м';node.textContent=caption+(node.classList.contains('footprint-timeframe')?' · ЕДИНЫЙ ТФ':' · ТИКИ БРОКЕРА');}});zones=a.zones||[];selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
 window.addEventListener('market-replay',e=>{
  const a=e.detail;if(!a?.bars?.length)return;
  replayMode=true;bars=a.bars;live=true;analysisMeta=a;zones=a.zones||[];selected=0;levels=currentLevels();hasAutoScrolled=false;

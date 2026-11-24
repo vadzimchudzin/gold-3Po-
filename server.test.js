@@ -720,3 +720,15 @@ test('licence status names the public key of this build, so an old build is iden
   assert.equal(body.reason, 'bad_signature');
   assert.equal(body.publicKeyId, data.publicKeyId);
 });
+
+test('a cached bar still takes the ticks that arrive after it was built', async () => {
+  const post = tick => fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: auth, body: JSON.stringify(tick) });
+  const read = async () => (await fetch(base + '/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json();
+  assert.equal((await post({ ...mt5(1), bid: 2648.1, ask: 2648.3, last: 2648.2 })).status, 202);
+  const first = await read();
+  assert.equal(first.bars.at(-1).c, 2648.2, 'the first request builds the bars');
+  assert.equal((await post({ ...mt5(2), timestamp: '2026-11-17T15:01:00.000Z', bid: 2651.1, ask: 2651.3, last: 2651.2 })).status, 202);
+  const second = await read();
+  assert.equal(second.bars.at(-1).c, 2651.2, 'the cached bar must still take the newest tick, or the chart freezes');
+  assert.equal(second.bars.at(-1).h, 2651.2, 'and its high moves with it');
+});

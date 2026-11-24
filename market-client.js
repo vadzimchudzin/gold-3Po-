@@ -85,7 +85,7 @@ async function refreshAnalysis(){
  // different market than the terminal. Without a known feed the server resolves the live one.
  const requestedFeedId=feedOverride||feedId||null;
  try{
-  const params=new URLSearchParams({symbol:marketSymbol(),priceStep:'0.1'});
+  const params=new URLSearchParams({symbol:marketSymbol(),priceStep:'0.1',limit:'1200'});
   if(requestedFeedId)params.set('feedId',requestedFeedId);
   const response=await fetch('/v1/market/analysis?'+params,{cache:'no-store'});
   if(!response.ok)throw new Error('HTTP '+response.status);

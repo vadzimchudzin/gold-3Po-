@@ -51,6 +51,7 @@ try {
   }, browserFeedId);
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
+  if (process.env.BROWSER_DEBUG) page.on('console', message => process.stdout.write('[browser] ' + message.text() + '\n'));
   await page.goto(base, { waitUntil: 'domcontentloaded' });
 
   // Data is empty until the selected account's broker ticks are ingested.
@@ -205,8 +206,12 @@ try {
   const liveTick = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2649.1, ask: 2649.3, last: 2649.2, tickVolume: 9, realVolume: 0, flags: 32 };
   const liveResponse = await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({...liveTick,feedId:browserFeedId}) });
   assert.equal(liveResponse.status, 202, 'a live tick must be accepted');
-  await page.waitForFunction(before => [...document.querySelectorAll('.foot-cell.foot-forming')]
-    .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0) > before, beforeTick, { timeout: 5000 });
+  try {
+    await page.waitForFunction(before => [...document.querySelectorAll('.foot-cell.foot-forming')]
+      .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0) > before, beforeTick, { timeout: 5000 });
+  } catch (error) {
+    throw new Error('a streamed tick never reached the forming bar: ' + error.message + ' · page errors: ' + (pageErrors.join(' | ') || 'none'));
+  }
   assert.ok(await formingVolume() >= beforeTick + 9, 'the forming bar must absorb the tick volume immediately');
   assert.ok(await page.locator('.foot-cell.foot-forming').count() > 0, 'the forming column survives the tick');
 
