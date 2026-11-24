@@ -119,7 +119,8 @@ export const DEFAULT_ZONE_OPTIONS = Object.freeze({
   useSessions: true,    // include Asia / London / New York session extremes
   useWeek: true,        // include the weekly open and the previous week's extremes
   useHigherTf: true,    // include H1/H4 swings aggregated from the same candles
-  useVolume: true       // include the volume profile (POC, value-area edges)
+  useVolume: true,      // include the volume profile (POC, value-area edges)
+  strongOnly: false     // true: lock levels to closed bars & keep only strong structural zones (no intra-bar jitter)
 });
 
 export function validateZoneOptions(input = {}) {
@@ -132,7 +133,7 @@ export function validateZoneOptions(input = {}) {
   const num = (k, lo, hi) => { if (!finite(o[k]) || o[k] < lo || o[k] > hi) throw new TypeError(`${k} must be between ${lo} and ${hi}`); };
   int('minZones', 1, 20); int('maxZones', 1, 20); int('pivotWidth', 1, 6); int('atrPeriod', 2, 200); int('reactionBars', 1, 50);
   num('clusterAtr', 0.05, 3); num('zoneWidthAtr', 0.02, 2); num('maxDistanceAtr', 1, 100);
-  for (const flag of ['usePriorDay', 'useSessions', 'useWeek', 'useHigherTf', 'useVolume']) {
+  for (const flag of ['usePriorDay', 'useSessions', 'useWeek', 'useHigherTf', 'useVolume', 'strongOnly']) {
     if (typeof o[flag] !== 'boolean') throw new TypeError(`${flag} must be a boolean`);
   }
   if (o.minZones > o.maxZones) o.minZones = o.maxZones;
@@ -168,10 +169,13 @@ export function detectLiquidityZones(bars, priceStep = 0.1, options = {}) {
   if (bars.length < 6) return [];
   // The newest bar may still be forming: swings are confirmed only by closed bars.
   const closed = bars.slice(0, -1);
-  const last = bars.at(-1).c;
+  const liveLast = bars.at(-1).c;
+  // In strongOnly mode anchor every distance/score calculation to the last closed bar so zones
+  // never re-rank or flicker on intra-bar ticks; they only reconsider when a full candle closes.
+  const last = o.strongOnly ? closed.at(-1).c : liveLast;
   const atr = averageTrueRange(closed, o.atrPeriod);
   if (!(atr > 0) || !finite(last)) return [];
-  const w = o.pivotWidth;
+  const w = o.strongOnly ? Math.max(o.pivotWidth, 3) : o.pivotWidth;
   const vol = b => finite(b.volume) && b.volume > 0 ? b.volume : finite(b.tickCount) && b.tickCount > 0 ? b.tickCount : 0;
   const medVol = median(closed.map(vol));
 
@@ -262,16 +266,27 @@ export function detectLiquidityZones(bars, priceStep = 0.1, options = {}) {
   }
 
   // Keep the strongest of levels that sit on top of each other; a crowded chart hides the useful ones.
-  const minGap = Math.max(2 * tolerance, 0.5 * atr) + 2 * pad;
+  const minGap = Math.max(2 * tolerance, (o.strongOnly ? 0.85 : 0.5) * atr) + 2 * pad;
   candidates.sort((a, b) => b.score - a.score || a.distanceAtr - b.distanceAtr);
   for (let i = candidates.length - 1; i >= 0; i--) {
     const z = candidates[i];
     if (candidates.slice(0, i).some(k => Math.abs(k.mid - z.mid) < minGap)) candidates.splice(i, 1);
   }
 
+  // Strong-only filter: drop weak single-touch swings and never pad the chart with synthetic
+  // 10-bar/round-number fillers. Only multi-touch swings, confluences, or major structural levels survive.
+  if (o.strongOnly) {
+    const MAJOR_SOURCES = new Set(['priorDay', 'week', 'higherTf', 'volume', 'sessions']);
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const z = candidates[i];
+      const structural = z.reference ? MAJOR_SOURCES.has(z.source) : (z.touches >= 2 || (z.sources && z.sources.length >= 1) || z.score >= 0.52);
+      if (!structural || z.score < 0.42) candidates.splice(i, 1);
+    }
+  }
+
   // Too few swing levels (trend or short history): fill with weaker, well-known reference levels.
   const sideEmpty = above => !candidates.some(z => (z.mid > last) === above);
-  if (candidates.length < o.minZones || sideEmpty(true) || sideEmpty(false)) {
+  if (!o.strongOnly && (candidates.length < o.minZones || sideEmpty(true) || sideEmpty(false))) {
     const covered = price => candidates.some(z => price >= z.low - tolerance && price <= z.high + tolerance);
     const extra = [];
     for (const span of [10, 50, closed.length]) {

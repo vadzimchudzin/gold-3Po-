@@ -5,12 +5,14 @@ export function runBacktest(bars, options = {}) {
     initialEquity = 10000, riskPct = 0.5, maxRiskPct = 1,
     atrPeriod = 14, stopAtr = 1.5, targetR = 2,
     maxBars = 20, pointValue = 1, feePerUnit = 0, slippage = 0,
+    breakevenR = 0, trailingAtr = 0,
     minScore = 0.55, maxTrades = 5000, strategyConditions = null
   } = options;
-  const numeric = [initialEquity, riskPct, maxRiskPct, stopAtr, targetR, pointValue, feePerUnit, slippage];
+  const numeric = [initialEquity, riskPct, maxRiskPct, stopAtr, targetR, pointValue, feePerUnit, slippage, breakevenR, trailingAtr];
   if (!Array.isArray(bars) || numeric.some(value => !Number.isFinite(value)) ||
       initialEquity <= 0 || riskPct <= 0 || maxRiskPct <= 0 || riskPct > maxRiskPct ||
       stopAtr <= 0 || targetR <= 0 || pointValue <= 0 || feePerUnit < 0 || slippage < 0 ||
+      breakevenR < 0 || trailingAtr < 0 ||
       !Number.isInteger(maxBars) || maxBars < 1 || !Number.isInteger(maxTrades) || maxTrades < 1) {
     throw new TypeError('Invalid backtest configuration');
   }
@@ -31,10 +33,11 @@ export function runBacktest(bars, options = {}) {
     const direction = signal.side === 'long' ? 1 : -1;
     const rawEntry = bars[entryIndex].o;
     const entry = rawEntry + direction * slippage;
-    const stop = entry - direction * stopDistance;
+    let stop = entry - direction * stopDistance;
     const target = entry + direction * stopDistance * targetR;
     const lastIndex = Math.min(bars.length - 1, entryIndex + maxBars - 1);
     let exitIndex = lastIndex, exit = bars[lastIndex].c, exitReason = 'time';
+    let bestPrice = entry;
     for (let i = entryIndex; i <= lastIndex; i++) {
       const bar = bars[i];
       const stopHit = direction === 1 ? bar.l <= stop : bar.h >= stop;
@@ -46,6 +49,15 @@ export function runBacktest(bars, options = {}) {
         break;
       }
       if (targetHit) { exitIndex = i; exit = target; exitReason = 'target'; break; }
+      // Update breakeven / trailing stop at bar close so intra-bar stop evaluation stays conservative.
+      bestPrice = direction === 1 ? Math.max(bestPrice, bar.h) : Math.min(bestPrice, bar.l);
+      if (breakevenR > 0 && (bestPrice - entry) * direction >= stopDistance * breakevenR) {
+        stop = direction === 1 ? Math.max(stop, entry) : Math.min(stop, entry);
+      }
+      if (trailingAtr > 0 && (bestPrice - entry) * direction > 0) {
+        const trailed = bestPrice - direction * atr * trailingAtr;
+        stop = direction === 1 ? Math.max(stop, trailed) : Math.min(stop, trailed);
+      }
     }
     exit -= direction * slippage;
     const grossPnl = (exit - entry) * direction * quantity * pointValue;

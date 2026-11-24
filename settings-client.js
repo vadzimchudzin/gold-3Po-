@@ -1,7 +1,7 @@
 // Settings sheet (Vespera style): zone finder, MT5 drawing style and theme.
 // Every change is saved to /v1/settings right away; the MT5 indicator picks it up on its next refresh.
 const $ = id => document.getElementById(id);
-const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true },
+const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true, strongOnly: false },
   footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1 },
   mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark' } };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
@@ -64,7 +64,11 @@ function render() {
   $('lineWidthNote') && ($('lineWidthNote').hidden = m.lineStyle === 'solid');
   document.querySelectorAll('.swatches').forEach(box => box.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.color === m[box.dataset.for === 'setBuyColor' ? 'buyColor' : 'sellColor'])));
   setToggle('setFill', m.fill); setToggle('setLabels', m.showLabels); setToggle('setStrength', m.showStrength); setToggle('setZonesVisible', m.zonesVisible !== false);
-  setToggle('setSrcDay', z.usePriorDay); setToggle('setSrcSessions', z.useSessions); setToggle('setSrcWeek', z.useWeek); setToggle('setSrcTf', z.useHigherTf); setToggle('setSrcVolume', z.useVolume);
+  setToggle('setSrcDay', z.usePriorDay); setToggle('setSrcSessions', z.useSessions); setToggle('setSrcWeek', z.useWeek); setToggle('setSrcTf', z.useHigherTf); setToggle('setSrcVolume', z.useVolume); setToggle('setStrongOnly', z.strongOnly);
+  const strongBtn = $('strongZonesToggle');
+  if (strongBtn) { strongBtn.setAttribute('aria-pressed', String(!!z.strongOnly)); strongBtn.classList.toggle('is-active', !!z.strongOnly); }
+  const stepSel = $('footClusterStep');
+  if (stepSel) stepSel.value = String(f.ticksPerRow ?? 1);
   setSeg('setTheme', settings.ui.theme);
   document.querySelectorAll('.timeframe-label').forEach(el => { el.textContent = `${TF_LABEL[z.timeframeMinutes] || z.timeframeMinutes + 'm'} · BROKER TICKS`; });
   preview();
@@ -140,8 +144,10 @@ function bind() {
     // Hiding or restoring the zones in the terminal must not wait for the next zone poll.
     if (key === 'zonesVisible') void window.goldMt5?.setZonesVisible?.(next);
   });
-  const zoneToggles = { setSrcDay: 'usePriorDay', setSrcSessions: 'useSessions', setSrcWeek: 'useWeek', setSrcTf: 'useHigherTf', setSrcVolume: 'useVolume' };
+  const zoneToggles = { setSrcDay: 'usePriorDay', setSrcSessions: 'useSessions', setSrcWeek: 'useWeek', setSrcTf: 'useHigherTf', setSrcVolume: 'useVolume', setStrongOnly: 'strongOnly' };
   for (const [id, key] of Object.entries(zoneToggles)) $(id)?.addEventListener('click', () => change('zones', key, !settings.zones[key]));
+  $('strongZonesToggle')?.addEventListener('click', () => change('zones', 'strongOnly', !settings.zones.strongOnly));
+  $('footClusterStep')?.addEventListener('change', e => change('footprint', 'ticksPerRow', Number(e.target.value)));
   $('settingsTabs')?.addEventListener('click', e => {
     const b = e.target.closest('button[data-tab]'); if (!b) return;
     $('settingsTabs').querySelectorAll('button').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-selected', String(x === b)); });

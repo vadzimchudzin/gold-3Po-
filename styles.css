@@ -506,3 +506,26 @@ input,select{transition:border-color var(--dur) var(--ease),background-color var
 .update-badge:disabled{opacity:.6;cursor:progress}
 
 #referencePrice[data-archive="1"]{color:var(--gold);opacity:.9}
+
+/* ATAS-style scalable footprint clusters: crisp left candle body bar, floating cluster boxes,
+   and clean compression down to micro-cluster overview across 100+ bars. */
+.foot-cell.candle-body.candle-up{border-left:3px solid #22c55e!important}
+.foot-cell.candle-body.candle-down{border-left:3px solid #ef4444!important}
+.foot-cell.candle-out{background:transparent!important;border-color:transparent!important}
+.foot-cell.foot-poc{outline:1.5px solid #ffc799;outline-offset:-1.5px;font-weight:700;z-index:2}
+.footprint-table.is-compact .foot-cell{font-size:7px;padding:0}
+.footprint-table.is-compact .foot-cell.bidask .foot-side{padding:0 1px}
+.footprint-table.is-compact .poc-mark{display:none}
+.footprint-table.is-micro .foot-cell{padding:0;font-size:0!important;line-height:0}
+.footprint-table.is-micro .foot-cell.bidask{gap:0;padding:0}
+.footprint-table.is-micro .foot-cell.bidask .foot-side{padding:0;color:transparent!important}
+.footprint-table.is-micro .poc-mark,.footprint-table.is-micro .foot-unknown{display:none}
+.footprint-table.is-micro .foot-head,.footprint-table.is-micro .foot-deltas,.footprint-table.is-micro .foot-times{min-height:18px;height:18px}
+.footprint-table.is-micro .bar-head,.footprint-table.is-micro .bar-time,.footprint-table.is-micro .foot-delta{min-height:18px;font-size:8px}
+.footprint-table.is-micro .price-level{font-size:8px;line-height:1}
+.foot-step-select{height:28px;border-radius:7px;border:1px solid var(--line);background:var(--surface-1);color:var(--gold);font:9px var(--mono);padding:0 6px;cursor:pointer}
+.square-button.strong-zones-btn.is-active{color:var(--gold);border-color:rgba(255,199,153,.55);background:rgba(255,199,153,.14)}
+.setup-presets{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px}
+.setup-presets button{border:1px solid var(--line);background:var(--surface-1);color:var(--muted);border-radius:6px;padding:5px 9px;font:10px var(--mono);cursor:pointer}
+.setup-presets button:hover{color:var(--gold);border-color:rgba(255,199,153,.45);background:rgba(255,199,153,.08)}
+.setup-subsection{font:9px var(--mono);letter-spacing:.1em;color:var(--gold);text-transform:uppercase;margin:12px 0 6px}

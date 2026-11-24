@@ -25,10 +25,14 @@ MAX_SECOND_OFFSET = 8_192
 TICK_STALL_SECONDS = 60
 SYMBOL_CHART_MODE_BID = 0
 SYMBOL_CHART_MODE_LAST = 1
-HISTORY_LIMIT = 25_000
+TICK_FLAG_BID = 2
+TICK_FLAG_LAST = 8
+TICK_FLAG_BUY = 32
+TICK_FLAG_SELL = 64
+HISTORY_LIMIT = 100_000
 HISTORY_LOOKBACK = 8 * 60 * 60
 HISTORY_WINDOW = 30 * 60
-HISTORY_MAX_READS = 24
+HISTORY_MAX_READS = 48
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -191,7 +195,13 @@ def encode_tick(row, stamp, chart_mode=None):
     if (stamp <= 0 or not all(map(math.isfinite, (bid, ask, real_volume)))
             or bid <= 0 or ask < bid or volume < 0 or real_volume < 0):
         return None  # e.g. broker sent an empty quote; the ingest API rejects it.
+    flags = int(row["flags"])
     if chart_mode == SYMBOL_CHART_MODE_BID:
+        # In Bid-chart mode MT5 builds OHLC strictly from Bid updates. An Ask-only tick
+        # (flags == TICK_FLAG_ASK) carries the previous bar's Bid and would stamp the wrong
+        # Open/High/Low at bar boundaries.
+        if flags > 0 and (flags & (TICK_FLAG_BID | TICK_FLAG_LAST | TICK_FLAG_BUY | TICK_FLAG_SELL)) == 0:
+            return None
         # Most OTC/Forex MT5 charts are built from Bid. Do not plot the Bid/Ask
         # midpoint as candle price: that shifts every bar by half the spread.
         last = bid
@@ -206,7 +216,7 @@ def encode_tick(row, stamp, chart_mode=None):
         "last": last,
         "tickVolume": volume,
         "realVolume": real_volume,
-        "flags": int(row["flags"]),
+        "flags": flags,
     }
 
 
@@ -464,7 +474,10 @@ class Worker:
 
     def history(self):
         _, _, symbol, boundary = self.require_session()
-        start = max(0, boundary - HISTORY_LOOKBACK)
+        raw_start = max(0, boundary - HISTORY_LOOKBACK)
+        # Align the lookback start to a whole hour boundary so the oldest M5/M15/M30/H1 candle is
+        # never chopped in half and matches MT5's own bar Open/High/Low.
+        start = (raw_start // 3600) * 3600
         end = boundary
         windows = []
         while end > start:

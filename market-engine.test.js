@@ -294,3 +294,19 @@ test('a limited build ignores ticks that could only feed bars the limit drops', 
   assert.deepEqual(trimmed.bars, full.bars);
   assert.deepEqual(trimmed.zones, full.zones);
 });
+
+test('strongOnly locks zones to closed bars so intra-bar ticks never reshuffle levels', () => {
+  const bars = [];
+  const base = Date.parse('2026-11-20T00:00:00Z');
+  for (let i = 0; i < 60; i++) {
+    const wave = Math.sin(i / 4) * 6;
+    const o = 3600 + wave, c = o + (i % 2 ? 1.2 : -1.1);
+    bars.push({ time: new Date(base + i * 900_000).toISOString(), timeMs: base + i * 900_000, o, h: Math.max(o, c) + 2.5, l: Math.min(o, c) - 2.5, c, volume: 40 + (i % 5) * 10 });
+  }
+  const atOpen = detectLiquidityZones(bars, 0.1, { strongOnly: true });
+  // Move the forming bar's live close sharply without closing the candle: strongOnly must keep the exact same zones.
+  const moved = bars.map((b, idx) => idx === bars.length - 1 ? { ...b, c: b.c + 12, h: b.h + 12 } : b);
+  const afterTick = detectLiquidityZones(moved, 0.1, { strongOnly: true });
+  assert.deepEqual(afterTick.map(z => z.id), atOpen.map(z => z.id));
+  assert.ok(afterTick.every(z => z.strength >= 0.42), 'every kept zone must meet the strong floor');
+});

@@ -37,3 +37,19 @@ test('the report carries the costs, averages and period the specification asks f
 test('backtest rejects risk settings above configured cap',()=>{
  assert.throws(()=>runBacktest(fixture(),{riskPct:2,maxRiskPct:1}),/Invalid backtest configuration/);
 });
+
+test('breakevenR moves the stop to entry once price reaches the configured R multiple', () => {
+  const bars = [
+    { time: '2026-11-20T08:00:00Z', o: 100, h: 102, l: 98, c: 101, bid: 10, ask: 30, unknown: 0, delta: 20, sweeps: [{ side: 'sell-side', level: 98 }] },
+    // Entry at 101, atr = 4, stopAtr = 1 -> stopDistance = 4 -> initial stop = 97, target (3R) = 113.
+    // Bar 1 rallies to 106 (+1.25R >= breakevenR=1) -> stop moves to entry (101) at bar close.
+    { time: '2026-11-20T08:15:00Z', o: 101, h: 106, l: 100, c: 105 },
+    // Bar 2 drops to 99: hits the breakeven stop at 101 instead of losing -1R at 97.
+    { time: '2026-11-20T08:30:00Z', o: 105, h: 105, l: 99, c: 100 }
+  ];
+  const res = runBacktest(bars, { atrPeriod: 1, stopAtr: 1, targetR: 3, breakevenR: 1, minScore: 0.5 });
+  assert.equal(res.trades.length, 1);
+  assert.equal(res.trades[0].exitReason, 'stop');
+  assert.equal(res.trades[0].exit, 101);
+  assert.equal(res.trades[0].netR, 0);
+});

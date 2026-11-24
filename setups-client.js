@@ -6,21 +6,45 @@ function say(message) { if (statusNode) statusNode.textContent = message; }
 
 function fillFields(definition) {
   const s = definition.strategy, b = definition.backtest;
-  if ($('condMinScore')) $('condMinScore').value = String(s.minScore);
-  if ($('condAtrPeriod')) $('condAtrPeriod').value = String(s.atrPeriod);
-  if ($('condRejection')) $('condRejection').checked = Boolean(s.requireRejection);
-  if ($('condCloseEdge')) $('condCloseEdge').checked = Boolean(s.requireCloseEdge);
-  if ($('condStacked')) $('condStacked').checked = Boolean(s.requireStacked);
-  if ($('condDelta')) $('condDelta').checked = Boolean(s.requireDeltaAgree);
-  if ($('condSides')) $('condSides').value = s.allowedSides.length === 2 ? 'both' : s.allowedSides[0];
-  if ($('condSessionFrom')) $('condSessionFrom').value = s.sessionHoursUTC ? String(s.sessionHoursUTC[0]) : '';
-  if ($('condSessionTo')) $('condSessionTo').value = s.sessionHoursUTC ? String(s.sessionHoursUTC[1]) : '';
-  if ($('condMinAtr')) $('condMinAtr').value = String(s.minAtr);
-  if ($('condStopAtr')) $('condStopAtr').value = String(b.stopAtr);
-  if ($('condTargetR')) $('condTargetR').value = String(b.targetR);
-  if ($('condMaxBars')) $('condMaxBars').value = String(b.maxBars);
-  if ($('condRiskPct')) $('condRiskPct').value = String(b.riskPct);
-  if ($('condPointValue')) $('condPointValue').value = String(b.pointValue);
+  const setVal = (id, val) => { if ($(id)) $(id).value = val === null || val === undefined ? '' : String(val); };
+  const setChk = (id, val) => { if ($(id)) $(id).checked = Boolean(val); };
+  setVal('condMinScore', s.minScore);
+  setVal('condAtrPeriod', s.atrPeriod);
+  setVal('condEntryMode', s.entryMode ?? 'sweep');
+  setVal('condTrendFilter', s.trendFilter ?? 'none');
+  setVal('condTrendPeriod', s.trendPeriod ?? 20);
+  setVal('condCloseEdgeThreshold', s.closeEdgeThreshold ?? 0.65);
+  setVal('condMinBodyRatio', s.minBodyRatio ?? 0);
+  setVal('condMaxBodyRatio', s.maxBodyRatio ?? 1);
+  setVal('condMinWickRatio', s.minWickRatio ?? 0);
+  setVal('condMinVolume', s.minVolume ?? 0);
+  setVal('condMinDeltaRatio', s.minDeltaRatio ?? 0);
+  setVal('condMinAtr', s.minAtr ?? 0);
+  setVal('condMaxAtr', s.maxAtr ?? 0);
+  setVal('condCooldownBars', s.cooldownBars ?? 0);
+  setVal('condWeightRejection', s.weightRejection ?? 0.15);
+  setVal('condWeightCloseEdge', s.weightCloseEdge ?? 0.10);
+  setVal('condWeightStacked', s.weightStacked ?? 0.15);
+  setVal('condWeightDelta', s.weightDelta ?? 0.10);
+  setChk('condRejection', s.requireRejection);
+  setChk('condCloseEdge', s.requireCloseEdge);
+  setChk('condStacked', s.requireStacked);
+  setChk('condDelta', s.requireDeltaAgree);
+  setChk('condAbsorption', s.requireAbsorption);
+  setChk('condExhaustion', s.requireExhaustion);
+  setChk('condUnfinished', s.requireUnfinished);
+  setVal('condSides', s.allowedSides.length === 2 ? 'both' : s.allowedSides[0]);
+  setVal('condSessionFrom', s.sessionHoursUTC ? s.sessionHoursUTC[0] : '');
+  setVal('condSessionTo', s.sessionHoursUTC ? s.sessionHoursUTC[1] : '');
+  setVal('condStopAtr', b.stopAtr);
+  setVal('condTargetR', b.targetR);
+  setVal('condMaxBars', b.maxBars);
+  setVal('condRiskPct', b.riskPct);
+  setVal('condPointValue', b.pointValue);
+  setVal('condBreakevenR', b.breakevenR ?? 0);
+  setVal('condTrailingAtr', b.trailingAtr ?? 0);
+  setVal('condFeePerUnit', b.feePerUnit ?? 0);
+  setVal('condSlippage', b.slippage ?? 0);
 }
 
 function collectDefinition() {
@@ -32,20 +56,42 @@ function collectDefinition() {
     strategy: {
       minScore: num('condMinScore', 0.55),
       atrPeriod: Math.round(num('condAtrPeriod', 14)),
+      entryMode: $('condEntryMode')?.value || 'sweep',
+      trendFilter: $('condTrendFilter')?.value || 'none',
+      trendPeriod: Math.round(num('condTrendPeriod', 20)),
+      closeEdgeThreshold: num('condCloseEdgeThreshold', 0.65),
+      minBodyRatio: num('condMinBodyRatio', 0),
+      maxBodyRatio: num('condMaxBodyRatio', 1),
+      minWickRatio: num('condMinWickRatio', 0),
+      minVolume: num('condMinVolume', 0),
+      minDeltaRatio: num('condMinDeltaRatio', 0),
+      minAtr: num('condMinAtr', 0),
+      maxAtr: num('condMaxAtr', 0),
+      cooldownBars: Math.round(num('condCooldownBars', 0)),
+      weightRejection: num('condWeightRejection', 0.15),
+      weightCloseEdge: num('condWeightCloseEdge', 0.10),
+      weightStacked: num('condWeightStacked', 0.15),
+      weightDelta: num('condWeightDelta', 0.10),
       requireRejection: Boolean($('condRejection')?.checked),
       requireCloseEdge: Boolean($('condCloseEdge')?.checked),
       requireStacked: Boolean($('condStacked')?.checked),
       requireDeltaAgree: Boolean($('condDelta')?.checked),
+      requireAbsorption: Boolean($('condAbsorption')?.checked),
+      requireExhaustion: Boolean($('condExhaustion')?.checked),
+      requireUnfinished: Boolean($('condUnfinished')?.checked),
       allowedSides: sides === 'both' ? ['long', 'short'] : [sides],
-      sessionHoursUTC: session,
-      minAtr: num('condMinAtr', 0)
+      sessionHoursUTC: session
     },
     backtest: {
       stopAtr: num('condStopAtr', 1.5),
       targetR: num('condTargetR', 2),
       maxBars: Math.round(num('condMaxBars', 20)),
       riskPct: num('condRiskPct', 0.5),
-      pointValue: num('condPointValue', 1)
+      pointValue: num('condPointValue', 1),
+      breakevenR: num('condBreakevenR', 0),
+      trailingAtr: num('condTrailingAtr', 0),
+      feePerUnit: num('condFeePerUnit', 0),
+      slippage: num('condSlippage', 0)
     }
   };
 }
@@ -149,6 +195,39 @@ $('importSetupFile')?.addEventListener('change', async event => {
     announceChange();
   } catch (error) { say('Импорт отклонён: ' + error.message); }
   event.target.value = '';
+});
+
+const PRESETS = {
+  base: {
+    name: 'Снятие ликвидности (базовая)',
+    strategy: { minScore: 0.55, atrPeriod: 14, entryMode: 'sweep', trendFilter: 'none', trendPeriod: 20, closeEdgeThreshold: 0.65, minBodyRatio: 0, maxBodyRatio: 1, minWickRatio: 0, minVolume: 0, minDeltaRatio: 0, minAtr: 0, maxAtr: 0, cooldownBars: 0, weightRejection: 0.15, weightCloseEdge: 0.10, weightStacked: 0.15, weightDelta: 0.10, requireRejection: false, requireCloseEdge: false, requireStacked: false, requireDeltaAgree: false, requireAbsorption: false, requireExhaustion: false, requireUnfinished: false, allowedSides: ['long', 'short'], sessionHoursUTC: null },
+    backtest: { stopAtr: 1.5, targetR: 2, maxBars: 20, riskPct: 0.5, pointValue: 1, breakevenR: 0, trailingAtr: 0, feePerUnit: 0, slippage: 0 }
+  },
+  pinbar: {
+    name: 'Пин-бар + дельта (разворот)',
+    strategy: { minScore: 0.6, atrPeriod: 14, entryMode: 'sweep', trendFilter: 'none', trendPeriod: 20, closeEdgeThreshold: 0.7, minBodyRatio: 0, maxBodyRatio: 0.45, minWickRatio: 0.45, minVolume: 0, minDeltaRatio: 0.15, minAtr: 0, maxAtr: 0, cooldownBars: 2, weightRejection: 0.20, weightCloseEdge: 0.15, weightStacked: 0.10, weightDelta: 0.15, requireRejection: true, requireCloseEdge: true, requireStacked: false, requireDeltaAgree: true, requireAbsorption: false, requireExhaustion: false, requireUnfinished: false, allowedSides: ['long', 'short'], sessionHoursUTC: [7, 20] },
+    backtest: { stopAtr: 1.2, targetR: 2.5, maxBars: 24, riskPct: 0.5, pointValue: 1, breakevenR: 1, trailingAtr: 0, feePerUnit: 0, slippage: 0 }
+  },
+  imbalance: {
+    name: 'Стек имбалансов по тренду',
+    strategy: { minScore: 0.55, atrPeriod: 14, entryMode: 'imbalance', trendFilter: 'with', trendPeriod: 20, closeEdgeThreshold: 0.65, minBodyRatio: 0.35, maxBodyRatio: 1, minWickRatio: 0, minVolume: 0, minDeltaRatio: 0.25, minAtr: 0, maxAtr: 0, cooldownBars: 3, weightRejection: 0.10, weightCloseEdge: 0.10, weightStacked: 0.25, weightDelta: 0.15, requireRejection: true, requireCloseEdge: false, requireStacked: true, requireDeltaAgree: true, requireAbsorption: false, requireExhaustion: false, requireUnfinished: false, allowedSides: ['long', 'short'], sessionHoursUTC: null },
+    backtest: { stopAtr: 1.5, targetR: 3, maxBars: 30, riskPct: 0.5, pointValue: 1, breakevenR: 1, trailingAtr: 1.2, feePerUnit: 0, slippage: 0 }
+  },
+  absorption: {
+    name: 'Поглощение против толпы',
+    strategy: { minScore: 0.55, atrPeriod: 14, entryMode: 'absorption', trendFilter: 'counter', trendPeriod: 20, closeEdgeThreshold: 0.6, minBodyRatio: 0, maxBodyRatio: 1, minWickRatio: 0.25, minVolume: 0, minDeltaRatio: 0, minAtr: 0, maxAtr: 0, cooldownBars: 2, weightRejection: 0.15, weightCloseEdge: 0.10, weightStacked: 0.15, weightDelta: 0.10, requireRejection: false, requireCloseEdge: false, requireStacked: false, requireDeltaAgree: false, requireAbsorption: true, requireExhaustion: false, requireUnfinished: false, allowedSides: ['long', 'short'], sessionHoursUTC: null },
+    backtest: { stopAtr: 1.4, targetR: 2.5, maxBars: 25, riskPct: 0.5, pointValue: 1, breakevenR: 1.2, trailingAtr: 0, feePerUnit: 0, slippage: 0 }
+  }
+};
+
+$('setupPresets')?.addEventListener('click', event => {
+  const button = event.target.closest('button[data-preset]');
+  if (!button) return;
+  const preset = PRESETS[button.dataset.preset];
+  if (!preset) return;
+  fillFields(preset);
+  if ($('setupName') && !$('setupName').value.trim()) $('setupName').value = preset.name;
+  say('Подставлен шаблон «' + preset.name + '». Подкрутите любые параметры и нажмите «Сохранить версию».');
 });
 
 loadLibrary();

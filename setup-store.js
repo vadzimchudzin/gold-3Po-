@@ -15,7 +15,9 @@ export const DEFAULT_BACKTEST_CONDITIONS = {
   maxRiskPct: 1,
   pointValue: 1,
   feePerUnit: 0,
-  slippage: 0
+  slippage: 0,
+  breakevenR: 0,
+  trailingAtr: 0
 };
 
 export const DEFAULT_RISK_CONDITIONS = {
@@ -46,6 +48,8 @@ export function validateDefinition(input) {
   if (!finite(backtest.pointValue) || backtest.pointValue <= 0) throw new TypeError('pointValue must be positive');
   if (!finite(backtest.feePerUnit) || backtest.feePerUnit < 0) throw new TypeError('feePerUnit must be non-negative');
   if (!finite(backtest.slippage) || backtest.slippage < 0) throw new TypeError('slippage must be non-negative');
+  if (!finite(backtest.breakevenR) || backtest.breakevenR < 0 || backtest.breakevenR > 10) throw new TypeError('breakevenR must be between 0 and 10');
+  if (!finite(backtest.trailingAtr) || backtest.trailingAtr < 0 || backtest.trailingAtr > 20) throw new TypeError('trailingAtr must be between 0 and 20');
   const risk = { ...DEFAULT_RISK_CONDITIONS, ...(input.risk || {}) };
   for (const key of Object.keys(input.risk || {})) if (!(key in DEFAULT_RISK_CONDITIONS)) throw new TypeError(`Unknown risk condition: ${key}`);
   if (!finite(risk.maxRiskPct) || risk.maxRiskPct <= 0 || risk.maxRiskPct > 1) throw new TypeError('risk.maxRiskPct must be in (0, 1]');

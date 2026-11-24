@@ -245,6 +245,13 @@ class ConnectorTests(unittest.TestCase):
         self.api.symbol_info = lambda symbol: None
         self.assertEqual(self.connect()["specUnavailable"], "symbol_info_empty")
 
+    def test_ask_only_tick_is_ignored_in_bid_chart_mode(self):
+        ask_only = tick(SECOND, 10, bid=2650.0, ask=2650.4, last=0.0, flags=4)
+        bid_tick = tick(SECOND, 20, bid=2650.1, ask=2650.4, last=0.0, flags=2)
+        self.assertIsNone(connector.encode_tick(ask_only, SECOND * 1000 + 10, connector.SYMBOL_CHART_MODE_BID))
+        encoded = connector.encode_tick(bid_tick, SECOND * 1000 + 20, connector.SYMBOL_CHART_MODE_BID)
+        self.assertEqual(encoded["last"], 2650.1)
+
     def test_unexpected_library_exception_does_not_disclose_its_text(self):
         self.connect()
         with patch.object(self.api, "copy_ticks_from", side_effect=RuntimeError(SECRET)):

@@ -474,7 +474,7 @@ try {
   assert.ok(sheet.overflow <= 0, 'the settings sheet must not overflow a phone width');
   assert.ok(sheet.right > 0 && sheet.right <= 390, 'every source row must fit inside the phone viewport');
   assert.equal(sheet.visible, sheet.rows, 'the zone pane is the one on screen');
-  assert.equal(sheet.toggles, 5, 'all five level sources are switchable');
+  assert.equal(sheet.toggles, 6, 'all five level sources plus strong-only mode are switchable');
   assert.ok(sheet.sliders >= 7, 'every numeric zone option has a slider');
   await page.screenshot({ path:'artifacts/settings-mobile.png' });
   await page.locator('#settingsTabs button[data-tab="mt5"]').click();
