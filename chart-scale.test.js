@@ -77,3 +77,71 @@ test('invalid input is rejected', () => {
   assert.throws(() => chartScale({ panelWidth: 1200, bars: -1 }), /bars/);
   assert.throws(() => minBarWidth(-10), /paneWidth/);
 });
+
+// --- TradingView-style navigation -------------------------------------------
+
+import { wheelIntent, zoomScrollAnchor, priceRange, CHART_WHEEL_STEP } from './chart-scale.js';
+
+test('a plain wheel zooms time and Shift+wheel zooms price', () => {
+  assert.deepEqual(wheelIntent({ deltaY: -100 }), { axis: 'time', factor: CHART_WHEEL_STEP });
+  assert.deepEqual(wheelIntent({ deltaY: 100 }), { axis: 'time', factor: 1 / CHART_WHEEL_STEP });
+  assert.equal(wheelIntent({ deltaY: -100, shiftKey: true }).axis, 'price');
+  assert.equal(wheelIntent({ deltaY: 0 }), null);
+  assert.equal(wheelIntent({ deltaY: Number.NaN }), null);
+});
+
+test('zoom keeps the content under the cursor in place', () => {
+  // Pointer at 400px inside a 800px viewport, content doubled: the same content stays at 400px.
+  const next = zoomScrollAnchor({ scrollLeft: 200, viewportWidth: 800, widthBefore: 1000, widthAfter: 2000, anchorX: 400 });
+  assert.equal(next, (200 + 400) * 2 - 400);
+});
+
+test('zoom scroll never leaves the content', () => {
+  assert.equal(zoomScrollAnchor({ scrollLeft: 0, viewportWidth: 800, widthBefore: 1000, widthAfter: 900, anchorX: 0 }), 0);
+  assert.equal(zoomScrollAnchor({ scrollLeft: 0, viewportWidth: 800, widthBefore: 1000, widthAfter: 400, anchorX: 0 }), 0, 'content narrower than the viewport cannot scroll');
+  assert.equal(zoomScrollAnchor({ scrollLeft: 5000, viewportWidth: 800, widthBefore: 1000, widthAfter: 1200, anchorX: 700 }), 400);
+  assert.throws(() => zoomScrollAnchor({ viewportWidth: 800, widthBefore: 0, widthAfter: 10, anchorX: 0 }), /widths/);
+});
+
+test('the price band is computed once with symmetric padding', () => {
+  const range = priceRange({ prices: [100, 110] });
+  assert.equal(range.fresh, true);
+  assert.ok(range.min < 100 && range.max > 110);
+  const mid = (range.min + range.max) / 2;
+  assert.ok(Math.abs(mid - 105) < 1e-9, 'the band is centred on the data');
+});
+
+test('a tick inside the band does not move the price scale', () => {
+  const first = priceRange({ prices: [100, 110] });
+  const next = priceRange({ prices: [100, 110.4], previous: first });
+  assert.equal(next.fresh, false);
+  assert.equal(next.min, first.min);
+  assert.equal(next.max, first.max);
+});
+
+test('a new extreme grows the band without moving the other edge', () => {
+  const first = priceRange({ prices: [100, 110] });
+  const next = priceRange({ prices: [100, 112], previous: first });
+  assert.equal(next.fresh, false);
+  assert.equal(next.min, first.min);
+  assert.ok(next.max > 112, 'the new high is inside the band');
+});
+
+test('changing the vertical zoom recomputes the band', () => {
+  const first = priceRange({ prices: [100, 110] });
+  const zoomed = priceRange({ prices: [100, 110], previous: first, zoom: 2 });
+  assert.equal(zoomed.fresh, true);
+  assert.ok(Math.abs((zoomed.max - zoomed.min) * 2 - (first.max - first.min)) < 1e-9, 'zoom 2 halves the visible band');
+});
+
+test('a different instrument recomputes instead of stretching one band', () => {
+  const first = priceRange({ prices: [2600, 2650] });
+  const other = priceRange({ prices: [100, 110], previous: first });
+  assert.equal(other.fresh, true);
+});
+
+test('price range validation mirrors the chart contract', () => {
+  assert.throws(() => priceRange({ prices: [] }), /prices/);
+  assert.throws(() => priceRange({ prices: [Number.NaN] }), /prices/);
+  assert.throws(() => priceRange({ prices: [1, 2], zoom: 12 }), /zoom/);
+});

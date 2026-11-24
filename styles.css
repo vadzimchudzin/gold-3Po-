@@ -308,6 +308,7 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .price-chart-wrap.chart-panning{user-select:none;-webkit-user-select:none}
 .price-chart-wrap.is-dragging{cursor:grabbing}
 .price-chart-wrap.is-dragging .candle{pointer-events:none}
+.price-chart-wrap.chart-price-panning{cursor:ns-resize;user-select:none;-webkit-user-select:none}
 @media(max-width:850px){.chart-zoom-controls button{min-width:20px;padding:4px 4px}.chart-zoom-controls #chartZoomReset{min-width:33px}}
 
 /* ATAS-style cluster ladder: keep bid/ask values distinct inside each candle body. */
