@@ -94,7 +94,7 @@ string TickStamp(const long timeMsc)
 double TickChartPrice(const MqlTick &tick)
 {
    long chartMode = SymbolInfoInteger(_Symbol, SYMBOL_CHART_MODE);
-   if(chartMode == SYMBOL_CHART_MODE_BID)
+   if(chartMode != SYMBOL_CHART_MODE_LAST)
       return tick.bid;
    return tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
 }
