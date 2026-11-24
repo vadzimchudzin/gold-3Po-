@@ -104,3 +104,31 @@ test('live quote strip displays BID, ASK and spread only for the active MT5 acco
  assert.ok(quote.includes('spread: ask - bid'),'The spread must be the ask minus the bid');
  assert.match(quote,/stamp < lastTime/,'A late tick must be rejected');
 });
+
+test('the MT5 zone switch is in the sheet and reaches the terminal instantly', async () => {
+  const read = path => readFile(new URL(path, import.meta.url), 'utf8');
+  const [html, client, preload, main] = await Promise.all([
+    read('./index.html'), read('./settings-client.js'), read('./electron/preload.cjs'), read('./electron/main.js')
+  ]);
+  assert.ok(html.includes('id="setZonesVisible"'), 'the sheet has the switch');
+  assert.ok(client.includes("setZonesVisible: 'zonesVisible'"), 'the switch is wired to the setting');
+  assert.ok(client.includes('goldMt5?.setZonesVisible?.(next)'), 'flipping it calls the terminal, not only the service');
+  assert.ok(preload.includes("invoke('mt5:zones-visible'"), 'the renderer exposes it');
+  assert.ok(main.includes("handle('zones-visible'"), 'the main process handles it');
+});
+
+test('an update offer appears in the bar and only installs on a click', async () => {
+  const read = path => readFile(new URL(path, import.meta.url), 'utf8');
+  const [html, client, preload, main, server] = await Promise.all([
+    read('./index.html'), read('./updates-client.js'), read('./electron/preload.cjs'),
+    read('./electron/main.js'), read('./server.js')
+  ]);
+  assert.ok(html.includes('id="updateBadge"') && html.includes('hidden'), 'the badge starts hidden, so a current install never shows it');
+  assert.ok(html.includes('updates-client.js'), 'the renderer loads the update client');
+  assert.ok(server.includes("'/updates-client.js'"), 'the local server serves it');
+  assert.ok(client.includes('setTimeout(check'), 'the check runs once per launch, off the first paint');
+  assert.ok(!client.includes('apply();\n') || client.includes("addEventListener('click'"), 'installing is click-driven');
+  assert.ok(preload.includes("invoke('updates:check'") && preload.includes("invoke('updates:apply'"), 'both actions are bridged');
+  assert.ok(main.includes("handleUpdate('check'") && main.includes("handleUpdate('apply'"), 'the main process answers them');
+  assert.ok(main.includes("spawn(file, ['/S']"), 'the installer runs silently');
+});

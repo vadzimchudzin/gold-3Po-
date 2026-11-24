@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { createMt5Session } from './mt5-session.js';
+import { createUpdater } from './updater.js';
 import { workerPath } from './mt5-runtime.js';
 import { installMt5Integration } from './mt5-integration.js';
 import { randomBytes } from 'node:crypto';
@@ -44,6 +45,25 @@ function registerMt5Ipc() {
     apiOrigin: localOrigin,
     token: marketIngestToken
   });
+  // Updates come from the published releases, so a fresh build reaches every workstation without a
+  // manual reinstall. Nothing is downloaded until the operator asks for it.
+  const updater = createUpdater({
+    repo: 'vadzimchudzin/gold-3Po-',
+    currentVersion: app.getVersion(),
+    download: async target => {
+      const response = await fetch(target.url, { redirect: 'follow' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const file = path.join(app.getPath('temp'), target.name.replace(/[^\w.\- ]/g, '_'));
+      await writeFile(file, Buffer.from(await response.arrayBuffer()));
+      return file;
+    },
+    install: async file => {
+      const { spawn } = await import('node:child_process');
+      spawn(file, ['/S'], { detached: true, stdio: 'ignore' }).unref();
+      isQuitting = true;
+      setTimeout(() => app.quit(), 600);
+    }
+  });
   const handle = (name, callback) => ipcMain.handle(`mt5:${name}`, (event, value) => {
     const frame = event.senderFrame;
     if (isQuitting || event.sender !== mainWindow?.webContents || !frame || frame.parent || new URL(frame.url).origin !== localOrigin) {
@@ -55,6 +75,16 @@ function registerMt5Ipc() {
   handle('connect', () => connectAndRepairMt5());
   handle('disconnect', () => mt5.disconnect());
   handle('install-integration', () => repairMt5Integration());
+  handle('zones-visible', visible => mt5.setZonesVisible(visible === true));
+  const handleUpdate = (name, callback) => ipcMain.handle(`updates:${name}`, (event, value) => {
+    const frame = event.senderFrame;
+    if (isQuitting || event.sender !== mainWindow?.webContents || !frame || frame.parent || new URL(frame.url).origin !== localOrigin) {
+      throw new Error('Запрос обновления отклонён.');
+    }
+    return callback(value);
+  });
+  handleUpdate('check', () => updater.check());
+  handleUpdate('apply', () => updater.apply());
 }
 
 async function repairMt5Integration() {

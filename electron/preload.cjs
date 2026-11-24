@@ -3,5 +3,11 @@ contextBridge.exposeInMainWorld('goldMt5', Object.freeze({
   state: () => ipcRenderer.invoke('mt5:state'),
   connect: () => ipcRenderer.invoke('mt5:connect'),
   disconnect: () => ipcRenderer.invoke('mt5:disconnect'),
-  installIntegration: () => ipcRenderer.invoke('mt5:install-integration')
+  installIntegration: () => ipcRenderer.invoke('mt5:install-integration'),
+  setZonesVisible: visible => ipcRenderer.invoke('mt5:zones-visible', visible === true)
+}));
+
+contextBridge.exposeInMainWorld('goldUpdates', Object.freeze({
+  check: () => ipcRenderer.invoke('updates:check'),
+  apply: () => ipcRenderer.invoke('updates:apply')
 }));

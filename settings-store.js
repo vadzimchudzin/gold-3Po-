@@ -19,7 +19,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     lineWidth: 2,
     fill: false,           // shade the zone body as a rectangle behind the candles
     showLabels: true,
-    showStrength: true
+    showStrength: true,
+    zonesVisible: true    // false publishes an empty snapshot, which clears every zone in MT5 at once
   },
   ui: { theme: 'glass-dark' }
 });
@@ -58,7 +59,7 @@ export function validateSettings(input = {}, base = DEFAULT_SETTINGS) {
   if (!Number.isInteger(mt5.lineWidth) || mt5.lineWidth < 1 || mt5.lineWidth > 5) throw new TypeError('lineWidth must be an integer 1..5');
   // MT5 renders dashed and dotted lines only at width 1, so a non-solid style always stores width 1.
   if (mt5.lineStyle !== 'solid') mt5.lineWidth = 1;
-  for (const key of ['fill', 'showLabels', 'showStrength']) if (typeof m[key] !== 'boolean') throw new TypeError(`${key} must be true or false`);
+  for (const key of ['fill', 'showLabels', 'showStrength', 'zonesVisible']) if (typeof m[key] !== 'boolean') throw new TypeError(`${key} must be true or false`);
 
   const u = section('ui', input.ui, base.ui);
   if (!['glass-dark', 'glass-light'].includes(u.theme)) throw new TypeError('theme must be glass-dark or glass-light');

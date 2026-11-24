@@ -122,6 +122,8 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const body = await response.json();
       owner.cachedZones = body.zones;
       owner.cachedStyle = body.style;
+      // A hidden fleet of zones is published as an empty snapshot, which clears the chart immediately.
+      owner.zonesVisible = body.zonesVisible !== false;
     } else if (!changed) {
       const response = await fetchApi('/v1/license/status');
       // An answered "not valid" ends the session at once; only an unreachable service is retried.
@@ -135,11 +137,12 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       return;
     }
     if (session !== owner) return;
-    owner.levelWrite = publish(owner.commonDataPath, owner.symbol, owner.cachedZones, owner.cachedStyle);
+    const drawn = owner.zonesVisible === false ? [] : owner.cachedZones;
+    owner.levelWrite = publish(owner.commonDataPath, owner.symbol, drawn, owner.cachedStyle);
     await owner.levelWrite;
     owner.levelAt = Date.now();
     owner.dirty = false;
-    set(owner, { zoneCount: owner.cachedZones.length });
+    set(owner, { zoneCount: drawn.length });
   }
 
   // A failed poll (terminal briefly gone, the local service restarting, HTTP 5xx) is retried with a
@@ -184,6 +187,21 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       if (history.truncated) owner.historyNote = 'История MT5 неполная: терминал отдал не весь поток тиков за 8 часов.';
     } catch (error) { set(owner, { message: `История MT5 недоступна: ${error.message}` }); }
     if (session === owner) void poll(owner);
+  }
+
+  // Turning zones off must be visible in the terminal right away, not on the next four-second poll:
+  // write the snapshot now. Turning them back on republishes the zones already in hand.
+  async function setZonesVisible(visible) {
+    const owner = session;
+    if (!owner) return { ok: false, zonesVisible: visible !== false };
+    owner.zonesVisible = visible !== false;
+    if (owner.commonDataPath) {
+      const drawn = owner.zonesVisible ? (owner.cachedZones || []) : [];
+      owner.levelWrite = publish(owner.commonDataPath, owner.symbol, drawn, owner.cachedStyle).catch(() => {});
+      await owner.levelWrite;
+      set(owner, { zoneCount: drawn.length });
+    }
+    return { ok: true, zonesVisible: owner.zonesVisible, zoneCount: owner.zonesVisible ? (owner.cachedZones?.length || 0) : 0 };
   }
 
   async function disconnect(message = 'MT5 отключён.') {
@@ -247,7 +265,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
   }
 
   return {
-    connect, disconnect, state, setIntegrationMessage,
+    connect, disconnect, state, setIntegrationMessage, setZonesVisible,
     terminalPath: () => session?.terminalPath,
     terminalDataPath: () => session?.dataPath,
     commonDataPath: () => session?.commonDataPath

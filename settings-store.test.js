@@ -70,6 +70,7 @@ test('invalid settings are rejected', () => {
   assert.throws(() => validateSettings({ mt5: { lineWidth: 9 } }), /lineWidth/);
   assert.throws(() => validateSettings({ mt5: { lineStyle: 'wavy' } }), /lineStyle/);
   assert.throws(() => validateSettings({ mt5: { fill: 'yes' } }), /fill/);
+  assert.throws(() => validateSettings({ mt5: { zonesVisible: 'нет' } }), /zonesVisible/);
   assert.throws(() => validateSettings({ ui: { theme: 'neon' } }), /theme/);
   assert.throws(() => validateSettings({ zones: { clusterAtr: 0 } }), /clusterAtr/);
   assert.throws(() => validateSettings({ zones: { atrPeriod: 1 } }), /atrPeriod/);
@@ -77,4 +78,16 @@ test('invalid settings are rejected', () => {
   assert.throws(() => validateSettings({ zones: { useVolume: 'да' } }), /useVolume/);
   assert.throws(() => validateSettings({ footprint: { imbalanceRatio: 1 } }), /imbalanceRatio/);
   assert.throws(() => validateSettings({ footprint: { valueAreaShare: 1.2 } }), /valueAreaShare/);
+});
+
+test('zones are drawn in MT5 until the switch is turned off, and the choice survives a restart', async () => {
+  assert.equal(validateSettings({}).mt5.zonesVisible, true, 'zones are visible by default');
+  const dir = await mkdtemp(join(tmpdir(), 'g3p-settings-zones-'));
+  const file = join(dir, 'settings.json');
+  try {
+    await createSettingsStore({ file }).update({ mt5: { zonesVisible: false } });
+    assert.equal((await createSettingsStore({ file }).get()).mt5.zonesVisible, false, 'hidden zones stay hidden after a restart');
+    await createSettingsStore({ file }).update({ mt5: { zonesVisible: true } });
+    assert.equal((await createSettingsStore({ file }).get()).mt5.zonesVisible, true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

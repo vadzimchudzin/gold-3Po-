@@ -78,14 +78,14 @@ function fakeWorker(responses) {
   });
 }
 
-function fakeApi({ zones = [zone], licenseValid = () => true, failFirstLive = false } = {}) {
+function fakeApi({ zones = [zone], licenseValid = () => true, failFirstLive = false, zonesVisible = true } = {}) {
   const calls = [];
   let liveFailures = failFirstLive ? 1 : 0;
   const request = async (url, init = {}) => {
     const path = new URL(url).pathname;
     calls.push({ path, url: String(url), body: init.body ? JSON.parse(init.body) : null });
     if (path === '/v1/license/status') return { ok: licenseValid(), status: licenseValid() ? 200 : 402, json: async () => ({ valid: licenseValid() }) };
-    if (path === '/v1/chart/zones') return { ok: true, status: 200, json: async () => ({ zones, style: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 3, fill: false, showLabels: true, showStrength: true } }) };
+    if (path === '/v1/chart/zones') return { ok: true, status: 200, json: async () => ({ zones, zonesVisible, style: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 3, fill: false, showLabels: true, showStrength: true } }) };
     if (path.startsWith('/v1/ingest/mt5/')) {
       if (path.endsWith('live-batch') && liveFailures > 0) {
         liveFailures--;
@@ -547,5 +547,54 @@ test('a 409 whose resend also fails keeps the batch for the next poll', async ()
   await session.connect();
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.deepEqual(received, [new Date(Date.UTC(2026, 0, 5, 10, 0, 1)).toISOString()], 'the tick from the failed 409 round is sent on the next poll');
+  await session.disconnect();
+});
+
+test('hiding zones clears MT5 immediately and restoring them republishes the same zones', async () => {
+  const published = [];
+  const api = fakeApi();
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSDm', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [tick] },
+      poll: { ok: true, ticks: [tick] }
+    }),
+    request: api.request,
+    publish: async (common, symbol, zones) => { published.push(zones.length); }
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 2600));
+  assert.ok(published.includes(1), 'the zone is drawn while it is switched on');
+
+  const hidden = await session.setZonesVisible(false);
+  assert.equal(hidden.ok, true);
+  assert.equal(published.at(-1), 0, 'switching off writes an empty snapshot at once, without waiting for a poll');
+  assert.equal(hidden.zoneCount, 0);
+
+  const shown = await session.setZonesVisible(true);
+  assert.equal(shown.ok, true);
+  assert.equal(published.at(-1), 1, 'switching back on republishes the zones already in hand');
+  assert.equal(shown.zoneCount, 1);
+  await session.disconnect();
+});
+
+test('a hidden fleet stays empty on the next refresh instead of reappearing', async () => {
+  const published = [];
+  const api = fakeApi({ zonesVisible: false });
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSDm', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+      history: { ok: true, ticks: [tick] },
+      poll: { ok: true, ticks: [tick] }
+    }),
+    request: api.request,
+    publish: async (common, symbol, zones) => { published.push(zones.length); }
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 2600));
+  assert.ok(published.length > 0, 'the snapshot is still written on every refresh');
+  assert.ok(published.every(count => count === 0), 'a zone must never be drawn while the switch is off: ' + published.join(','));
   await session.disconnect();
 });

@@ -651,3 +651,18 @@ test('an unqualified analysis follows the live feed instead of a stale legacy bu
   assert.equal(legacy.feedId,null,'an explicit legacy request still reads the unattached bucket');
   assert.equal(legacy.bars.at(-1).c,4100,'and that data is kept, it is just not shown by default');
 });
+
+test('the zone payload tells the desktop service whether zones may be drawn', async () => {
+  await fetch(base + '/v1/ingest/mt5/history', { method: 'POST', headers: auth, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', ticks: Array.from({ length: 40 }, (_, i) => ({ timestamp: new Date(Date.now() - (40 - i) * 600000).toISOString(), sequence: i + 1, bid: 2650 + i * 0.4 - 0.1, ask: 2650 + i * 0.4 + 0.1, last: 2650 + i * 0.4, tickVolume: 5, realVolume: 0, flags: 0 })) }) });
+  const on = await (await fetch(base + '/v1/chart/zones?symbol=XAUUSD')).json();
+  assert.equal(on.zonesVisible, true, 'zones are drawn by default');
+
+  await fetch(base + '/v1/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mt5: { zonesVisible: false } }) });
+  const off = await (await fetch(base + '/v1/chart/zones?symbol=XAUUSD')).json();
+  assert.equal(off.zonesVisible, false, 'the service is told at once that MT5 must show no zones');
+  assert.ok(Array.isArray(off.zones), 'the zones are still calculated, so switching back on is instant');
+
+  await fetch(base + '/v1/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mt5: { zonesVisible: true } }) });
+  const back = await (await fetch(base + '/v1/chart/zones?symbol=XAUUSD')).json();
+  assert.equal(back.zonesVisible, true);
+});

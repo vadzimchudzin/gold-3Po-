@@ -463,3 +463,44 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .delta-value{font:600 9px var(--mono)}
 .delta-value.up{fill:var(--cyan)}
 .delta-value.down{fill:var(--red)}
+
+/* ---- polish layer: daily-use ergonomics -----------------------------------
+   One motion vocabulary (160ms, one easing), no layout shift while numbers tick,
+   quiet scrollbars, and a visible focus ring for keyboard work. Nothing here
+   changes the palette; it only makes the same surfaces feel responsive. */
+:root{--ease:cubic-bezier(.22,.61,.36,1);--dur:160ms}
+button,.toggle,.segmented button,.rail-button,.square-button,.ghost-button,.primary-button,.research-button,.icon-button{
+  transition:background-color var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),transform 90ms var(--ease)
+}
+button:active:not(:disabled){transform:translateY(1px) scale(.99)}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none}
+:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:6px}
+input,select{transition:border-color var(--dur) var(--ease),background-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+/* Prices tick every few milliseconds: fixed-width digits keep the row from twitching. */
+.quote-value,.price-axis text,.delta-value,.foot-cell,.summary-value,.mono,.instrument-sub,.connection{
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1
+}
+.quote-value{min-width:88px}
+/* Scrollbars stay out of the way until a pane is actually scrolled. */
+*{scrollbar-width:thin;scrollbar-color:transparent transparent}
+*:hover{scrollbar-color:rgba(165,180,210,.22) transparent}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:transparent;border-radius:8px}
+:hover::-webkit-scrollbar-thumb{background:rgba(165,180,210,.2)}
+/* Even rhythm in the settings sheet and every key/value row. */
+.row{padding:9px 0}
+.panel{transition:border-color var(--dur) var(--ease)}
+.panel:hover{border-color:rgba(165,180,210,.18)}
+.instrument-strip{transition:border-color var(--dur) var(--ease)}
+.segmented button:hover:not(.selected){color:var(--text);background:rgba(165,180,210,.08)}
+.rail-button:hover,.icon-button:hover,.square-button:hover{color:var(--text)}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition-duration:1ms!important;animation-duration:1ms!important;scroll-behavior:auto!important}
+}
+
+/* Update offer: present, never loud. One line, the accent gold, and a hint in the tooltip. */
+.update-badge{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 11px;border-radius:999px;border:1px solid rgba(255,199,153,.45);background:rgba(255,199,153,.10);color:var(--gold);font:9px var(--mono);letter-spacing:.09em;cursor:pointer}
+.update-badge b{font:600 10px var(--mono);letter-spacing:.04em}
+.update-badge:hover{background:rgba(255,199,153,.18);border-color:rgba(255,199,153,.7)}
+.update-badge:disabled{opacity:.6;cursor:progress}
