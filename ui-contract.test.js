@@ -130,5 +130,6 @@ test('an update offer appears in the bar and only installs on a click', async ()
   assert.ok(!client.includes('apply();\n') || client.includes("addEventListener('click'"), 'installing is click-driven');
   assert.ok(preload.includes("invoke('updates:check'") && preload.includes("invoke('updates:apply'"), 'both actions are bridged');
   assert.ok(main.includes("handleUpdate('check'") && main.includes("handleUpdate('apply'"), 'the main process answers them');
-  assert.ok(main.includes("spawn(file, ['/S']"), 'the installer runs silently');
+  assert.ok(main.includes("spawn(file, ['/S', `/D=${installDir}`]"), 'the installer runs silently, into the folder this copy runs from');
+  assert.ok(main.includes('currentVersion: BUILD.tag || app.getVersion()'), 'the update is compared against the build tag, not the three-part package version');
 });

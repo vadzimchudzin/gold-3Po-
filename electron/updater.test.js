@@ -114,3 +114,15 @@ test('drafts are ignored so an unpublished build is never offered', async () => 
 function releases() {
   return [{ name: 'GOLD-3Po-Setup-0.9.7-x64.exe', browser_download_url: 'https://example.test/setup.exe', size: 1 }];
 }
+
+test('a build stamped with its own release tag never offers that same release', async () => {
+  // package.json keeps a three-part 0.9.7 while releases are tagged v0.9.7.<run>, so comparing
+  // against the package version made every build see the newest release as newer than itself and
+  // reinstall that installer over the running copy. The build tag is what must be compared.
+  const same = createUpdater({ repo: 'owner/repo', currentVersion: 'v0.9.7.42', fetchImpl: listing(release('v0.9.7.42')) });
+  assert.equal((await same.check()).state, 'current');
+  assert.equal(same.pending(), null);
+
+  const next = createUpdater({ repo: 'owner/repo', currentVersion: 'v0.9.7.42', fetchImpl: listing(release('v0.9.7.43')) });
+  assert.equal((await next.check()).state, 'available');
+});

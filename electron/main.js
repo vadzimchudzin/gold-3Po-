@@ -2,10 +2,11 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } f
 import { fileURLToPath } from 'node:url';
 import { createMt5Session } from './mt5-session.js';
 import { createUpdater } from './updater.js';
+import { BUILD } from './build-info.js';
 import { workerPath } from './mt5-runtime.js';
 import { installMt5Integration } from './mt5-integration.js';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, appendFileSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createMarketServer } from '../server.js';
@@ -27,6 +28,18 @@ function bridgeLog(scope, message) {
     mkdirSync(logDir, { recursive: true });
     appendFileSync(path.join(logDir, `app-${new Date().toISOString().slice(0, 10)}.log`), `${new Date().toISOString()} [${scope}] ${message}\n`);
   } catch { /* logging must never break the app */ }
+}
+
+const RELEASES_URL = 'https://github.com/vadzimchudzin/gold-3Po-/releases';
+
+// A silent installer replaces whatever is registered under the app id, so an in-app update has to
+// land on the folder this process runs from. An unpacked copy has no uninstaller next to the exe,
+// and updating from it would install a second copy elsewhere while the old folder stays behind —
+// which is exactly what "the update deleted the app" looks like from the outside.
+function isInstalledCopy(dir) {
+  try {
+    return readdirSync(dir).some(name => /^Uninstall .*\.exe$/i.test(name));
+  } catch { return false; }
 }
 
 const isSmokeTest = process.argv.includes('--smoke-test');
@@ -59,7 +72,11 @@ function registerMt5Ipc() {
   // manual reinstall. Nothing is downloaded until the operator asks for it.
   const updater = createUpdater({
     repo: 'vadzimchudzin/gold-3Po-',
-    currentVersion: app.getVersion(),
+    // The tag this build was packaged from, not package.json: a three-part version cannot tell
+    // 0.9.7.42 from 0.9.7.43, so every build would offer to reinstall the newest release over
+    // itself and the silent installer would uninstall the copy the operator is running.
+    currentVersion: BUILD.tag || app.getVersion(),
+    log: message => bridgeLog('update', message),
     download: async target => {
       const response = await fetch(target.url, { redirect: 'follow' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -69,7 +86,16 @@ function registerMt5Ipc() {
     },
     install: async file => {
       const { spawn } = await import('node:child_process');
-      spawn(file, ['/S'], { detached: true, stdio: 'ignore' }).unref();
+      const installDir = path.dirname(process.execPath);
+      if (app.isPackaged && !isInstalledCopy(installDir)) {
+        await shell.openExternal(RELEASES_URL);
+        throw new Error('Эта копия запущена не из установленной программы: обновление поставило бы вторую копию в другую папку. Открыл страницу загрузки — поставьте установщик вручную.');
+      }
+      // /D must be the last argument and unquoted: NSIS takes the rest of the line as the target
+      // folder. Without it the silent install lands in the default per-user directory, leaving the
+      // running copy behind with its old files.
+      bridgeLog('update', `installing ${file} into ${installDir}`);
+      spawn(file, ['/S', `/D=${installDir}`], { detached: true, stdio: 'ignore' }).unref();
       isQuitting = true;
       setTimeout(() => app.quit(), 600);
     }
