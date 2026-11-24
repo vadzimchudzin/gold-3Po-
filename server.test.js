@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -150,6 +150,42 @@ test('MT5 account feeds stay isolated and analysis returns the latest broker quo
   assert.equal(b.lastQuote.last,4360);
   const active=await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json();
   assert.equal(active.feedId,feedB,'the most recently ingested account feed is the unqualified default');
+});
+
+test('MT5 bridge account metadata resolves to the same feed as the desktop connector; unidentified batches stay legacy', async () => {
+  const accountLogin = '68533333';
+  const accountServer = 'RoboForex-ECN';
+  const expectedFeedId = createHash('sha256')
+    .update([accountServer.toLowerCase(), accountLogin, 'XAUUSD'].join('|'))
+    .digest('hex').slice(0, 32);
+  const timestamp = new Date(Date.now() - 60000).toISOString();
+  const identified = await fetch(base + '/v1/ingest/mt5/history', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({
+      source: 'mt5', symbol: 'XAUUSD', accountLogin, accountServer,
+      ticks: [{ timestamp, sequence: 1, bid: 4360, ask: 4360.2, last: 4360, tickVolume: 1, realVolume: 0, flags: 0 }]
+    })
+  });
+  assert.equal(identified.status, 202);
+  const selected = async () => (await (await fetch(base + '/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json());
+  const first = await selected();
+  assert.equal(first.feedId, expectedFeedId, 'the bridge and Python connector use the same identity formula');
+  assert.equal(first.lastQuote.last, 4360);
+
+  // A stale bridge without account metadata must not be silently attached to the currently active account.
+  const unidentified = await fetch(base + '/v1/ingest/mt5/live-batch', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({
+      source: 'mt5', symbol: 'XAUUSD',
+      ticks: [{ timestamp, sequence: 1, bid: 4100, ask: 4100.2, last: 4100, tickVolume: 1, realVolume: 0, flags: 0 }]
+    })
+  });
+  assert.equal(unidentified.status, 202);
+  const after = await selected();
+  assert.equal(after.feedId, expectedFeedId);
+  assert.equal(after.lastQuote.last, 4360, 'unidentified legacy data cannot contaminate the selected broker account');
+  const legacy = await (await fetch(base + '/v1/market/analysis?symbol=XAUUSD&feedId=legacy&intervalMs=900000')).json();
+  assert.equal(legacy.bars.at(-1).c, 4100, 'unidentified ticks remain available only in the legacy stream');
 });
 
 test('COMEX events can be analysed as actual exchange trades, not broker quotes',async()=>{
