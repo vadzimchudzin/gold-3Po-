@@ -20,6 +20,9 @@ MAX_LINE = 16 * 1024
 MT5_TIMEOUT_MS = 15_000
 POLL_LIMIT = 1_000
 MAX_SECOND_OFFSET = 8_192
+# A live cursor that stays empty while the terminal shows a newer quote is a broken stream, not a
+# quiet market: report it after this many seconds instead of polling nothing forever.
+TICK_STALL_SECONDS = 60
 SYMBOL_CHART_MODE_BID = 0
 SYMBOL_CHART_MODE_LAST = 1
 HISTORY_LIMIT = 25_000
@@ -384,7 +387,11 @@ class Worker:
             result = {
                 "symbol": symbol, "commonDataPath": terminal.commondata_path,
                 "dataPath": terminal.data_path, "terminalPath": terminal_path,
-                "accountLogin": str(login), "server": server
+                "accountLogin": str(login), "server": server,
+                # Everything downstream (history window, live cursor) is anchored to the terminal's last
+                # tick, so the caller must be able to say how old that anchor is.
+                "lastTickAt": (EPOCH + timedelta(milliseconds=latest_ms)).isoformat(timespec="seconds").replace("+00:00", "Z") if latest_ms else None,
+                "tickAgeMs": max(0, int(datetime.now(timezone.utc).timestamp() * 1000) - latest_ms) if latest_ms else None
             }
             spec, missing = symbol_spec(self.api, symbol, symbol_info)
             if spec:
@@ -439,6 +446,16 @@ class Worker:
             if len(ticks) == POLL_LIMIT:
                 break
         self.require_session()
+        if not ticks:
+            # An empty read is not "a quiet market" when the terminal itself carries a newer quote: the
+            # cursor and the terminal disagree, and every later poll would keep returning nothing while
+            # the window shows an archive as if it were live. Say it instead of staying silent.
+            latest = self.api.symbol_info_tick(symbol)
+            latest_ms = (latest.time_msc or latest.time * 1000) if latest is not None else 0
+            if latest_ms // 1000 > start + TICK_STALL_SECONDS:
+                stamp = (EPOCH + timedelta(milliseconds=latest_ms)).isoformat(timespec="seconds").replace("+00:00", "Z")
+                raise WorkerError("tick_stream_missing",
+                    f"Терминал отдаёт котировки (последний тик {stamp}), но чтение тиков от курсора возвращает пусто. Переподключите MT5 в приложении.")
         # MT5 starts inclusively at whole seconds; count rows in the boundary
         # second, including duplicates and unusable quotes, to avoid replay/gaps.
         if second > start or seen > offset:

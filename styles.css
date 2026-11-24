@@ -504,3 +504,5 @@ input,select{transition:border-color var(--dur) var(--ease),background-color var
 .update-badge b{font:600 10px var(--mono);letter-spacing:.04em}
 .update-badge:hover{background:rgba(255,199,153,.18);border-color:rgba(255,199,153,.7)}
 .update-badge:disabled{opacity:.6;cursor:progress}
+
+#referencePrice[data-archive="1"]{color:var(--gold);opacity:.9}

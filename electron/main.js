@@ -5,7 +5,7 @@ import { createUpdater } from './updater.js';
 import { workerPath } from './mt5-runtime.js';
 import { installMt5Integration } from './mt5-integration.js';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, appendFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createMarketServer } from '../server.js';
@@ -18,6 +18,16 @@ app.setName('GOLD-3Po Market Lab');
 if (process.platform === 'win32') app.setAppUserModelId('by.gold3po.marketlab');
 const userDataPath = path.join(app.getPath('appData'), app.getName());
 app.setPath('userData', userDataPath);
+
+// A packaged window has no console, so every bridge failure used to disappear with it. Keep a
+// per-day log next to the archive: an install can then be diagnosed from a file, not a screenshot.
+const logDir = path.join(userDataPath, 'logs');
+function bridgeLog(scope, message) {
+  try {
+    mkdirSync(logDir, { recursive: true });
+    appendFileSync(path.join(logDir, `app-${new Date().toISOString().slice(0, 10)}.log`), `${new Date().toISOString()} [${scope}] ${message}\n`);
+  } catch { /* logging must never break the app */ }
+}
 
 const isSmokeTest = process.argv.includes('--smoke-test');
 const appIconPath = app.isPackaged
@@ -71,7 +81,7 @@ function registerMt5Ipc() {
     }
     return callback(value);
   });
-  handle('state', () => mt5.state());
+  handle('state', () => { const current = mt5.state(); logStatus(current); return current; });
   handle('connect', () => connectAndRepairMt5());
   handle('disconnect', () => mt5.disconnect());
   handle('install-integration', () => repairMt5Integration());
@@ -111,6 +121,7 @@ async function connectAndRepairMt5() {
       return mt5.state();
     }
     const connected = await mt5.connect();
+    logStatus(connected);
     if (connected.state !== 'online') return connected;
     try {
       await repairMt5Integration();
@@ -126,6 +137,17 @@ async function connectAndRepairMt5() {
 function logError(error) {
   const message = error instanceof Error ? error.stack || error.message : String(error);
   process.stderr.write(message + '\n');
+  bridgeLog('error', message);
+}
+
+// The renderer asks for the bridge state every few seconds; logging only changes keeps the file
+// readable while still capturing every transition (online → stale → reconnecting → offline).
+let lastLoggedStatus = '';
+function logStatus(status) {
+  const line = [status.state, status.feed, status.accountLabel, status.terminalTickAt ? 'tick ' + status.terminalTickAt : '', status.message].filter(Boolean).join(' | ');
+  if (line === lastLoggedStatus) return;
+  lastLoggedStatus = line;
+  bridgeLog('mt5', line);
 }
 
 async function readOrCreateSettings(userDataPath) {

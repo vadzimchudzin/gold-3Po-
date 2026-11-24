@@ -68,7 +68,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     for (const tick of ticks) {
       const { timestamp, bid, ask, last, tickVolume, realVolume, flags } = tick;
       if (Date.parse(timestamp) > Date.now() + 60_000) continue;
-      const identity = createHash('sha256').update(JSON.stringify([owner.server, owner.symbol, timestamp, bid, ask, last, tickVolume, realVolume, flags])).digest('hex');
+      const identity = createHash('sha256').update(JSON.stringify([owner.accountLogin, owner.server, owner.symbol, timestamp, bid, ask, last, tickVolume, realVolume, flags])).digest('hex');
       if (unique.has(identity)) continue;
       unique.add(identity);
       records.push({ feedId: owner.feedId, timestamp, bid, ask, last, tickVolume, realVolume, flags, eventId: `MT5-${identity}`, sequence: ++owner.sequence });
@@ -245,10 +245,17 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const tickSize = Number(result.spec?.tickSize);
       if (Number.isFinite(tickSize) && tickSize > 0 && tickSize <= 100) owner.spec = { tickSize };
       const specNote = owner.spec ? {} : { tickSize: null, tickSizeIssue: typeof result.specUnavailable === 'string' ? result.specUnavailable.slice(0, 40) : 'not_reported' };
+      // The whole session (history window and live cursor) is anchored to the terminal's last tick, so a
+      // terminal that has not streamed for a while is said out loud instead of looking like a live feed.
+      const tickAgeMs = Number(result.tickAgeMs);
+      const staleTick = Number.isFinite(tickAgeMs) && result.lastTickAt && tickAgeMs > 5 * 60_000
+        ? ` Внимание: последняя котировка в терминале — ${new Date(result.lastTickAt).toLocaleString()} (${Math.round(tickAgeMs / 60000)} мин назад), живого потока нет.`
+        : '';
       status = {
         state: 'online', symbol: owner.symbol, feedId: owner.feedId,
         accountLabel: (owner.accountLogin ? 'Счёт ···' + String(owner.accountLogin).slice(-4) : 'Счёт MT5') + (owner.server ? ' · ' + owner.server : ''),
-        message: 'Подключено к уже авторизованному MT5. Загружаются котировки…',
+        message: 'Подключено к уже авторизованному MT5. Загружаются котировки…' + staleTick,
+        terminalTickAt: result.lastTickAt ?? null, terminalTickAgeMs: Number.isFinite(tickAgeMs) ? tickAgeMs : null,
         zoneCount: 0, ...(owner.spec ? { tickSize: owner.spec.tickSize } : specNote)
       };
       void seed(owner);

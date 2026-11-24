@@ -9,7 +9,7 @@ input string IngestToken = "";          // Optional override; normally read from
 input bool AppConnectionFeedsLive = true; // The desktop connector owns recent/live ticks when connected
 input int MinIntervalMs = 100;
 input int RequestTimeoutMs = 5000;
-input int HistoryDays = 30;
+input int HistoryDays = 3;               // Broker history to upload; the desktop connector owns the live window
 input int HistoryBatchSize = 1000;
 input int HistoryRetryMinutes = 15;
 input bool DrawZones = true;
@@ -732,6 +732,9 @@ int OnInit()
    sequenceNumber = (ulong)storedSequence;
    if(!SymbolSelect(_Symbol, true))
    {
+      // The one silent failure left in OnInit: without this line the journal only said «code 1».
+      Print("GOLD-3Po: SymbolSelect failed for ", _Symbol, " error=", GetLastError(),
+            " market-watch symbols=", SymbolsTotal(true), ". Add the symbol in Market Watch (Ctrl+M) and reattach.");
       ReleaseBridgeLock();
       return INIT_FAILED;
    }

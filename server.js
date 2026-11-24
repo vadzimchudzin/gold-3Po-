@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, appendFile, mkdir, open } from 'node:fs/promises';
+import { readFile, appendFile, mkdir, open, writeFile, rename } from 'node:fs/promises';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { runBacktest } from './backtest-engine.js';
 import { generateSignals, attachWalkForwardCalibration } from './strategy-engine.js';
@@ -14,6 +14,9 @@ import { createPatternStore } from './pattern-store.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_EVENTS = 1000000;
+// Only the newest MAX_EVENTS lines are ever read back, so the archive is trimmed on startup once it
+// grows past this size: an append-only file that history backfills had pushed to 4.9 GB.
+const MAX_STORAGE_BYTES = 256 * 1024 * 1024;
 const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/zone-labels.js': ['zone-labels.js', 'text/javascript; charset=utf-8'], '/chart-scale.js': ['chart-scale.js', 'text/javascript; charset=utf-8'], '/quote-display.js': ['quote-display.js', 'text/javascript; charset=utf-8'], '/footprint-engine.js': ['footprint-engine.js', 'text/javascript; charset=utf-8'], '/market-data.js': ['market-data.js', 'text/javascript; charset=utf-8'], '/market-client.js': ['market-client.js', 'text/javascript; charset=utf-8'], '/research-client.js': ['research-client.js', 'text/javascript; charset=utf-8'], '/market-engine.js': ['market-engine.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/c3po.png': ['c3po.png', 'image/png'], '/license-client.js': ['license-client.js', 'text/javascript; charset=utf-8'], '/setups-client.js': ['setups-client.js', 'text/javascript; charset=utf-8'], '/settings-client.js': ['settings-client.js', 'text/javascript; charset=utf-8'], '/assets/atmosphere.jpg': ['assets/atmosphere.jpg', 'image/jpeg'], '/mt5-client.js': ['mt5-client.js', 'text/javascript; charset=utf-8'], '/mt5-status.js': ['mt5-status.js', 'text/javascript; charset=utf-8'], '/footprint-candle.js': ['footprint-candle.js', 'text/javascript; charset=utf-8'], '/delta-pane.js': ['delta-pane.js', 'text/javascript; charset=utf-8'], '/updates-client.js': ['updates-client.js', 'text/javascript; charset=utf-8'] };
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
 const positive = n => Number.isFinite(n) && n > 0;
@@ -46,6 +49,25 @@ async function readRecentLines(file, maxLines, chunkSize = 1024 * 1024) {
   } finally {
     await handle.close();
   }
+}
+// The archive keeps every event ever ingested, but startup only ever reads the newest MAX_EVENTS
+// lines. Rewrite it down to that window (atomically, via a temp file) so a long-lived install does
+// not carry gigabytes of unreachable history.
+async function trimStorage(file, maxLines, maxBytes = MAX_STORAGE_BYTES) {
+  let size = 0;
+  try {
+    const handle = await open(file, 'r');
+    try { size = (await handle.stat()).size; } finally { await handle.close(); }
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (size <= maxBytes) return false;
+  const recent = await readRecentLines(file, maxLines);
+  const tmp = `${file}.tmp`;
+  await writeFile(tmp, recent.map(line => line.toString('utf8').replace(/\r?\n$/, '')).join('\n') + '\n');
+  await rename(tmp, file);
+  return true;
 }
 // GOLD-3Po is a gold-only workspace: broker XAUUSD (incl. suffix variants like XAUUSD./XAUUSD-ECN)
 // and COMEX GC futures (GC, GCZ6, …). Everything else is rejected at the ingest boundary.
@@ -88,7 +110,7 @@ function normalizeComex(input) {
   return { type: 'trade', source: 'comex', venue: 'comex_futures', symbol: input.symbol.trim().toUpperCase(), timestamp: new Date(input.timestamp).toISOString(), sequence: input.sequence, eventId: 'COMEX-' + input.tradeId.trim(), tradeId: input.tradeId.trim(), price: input.price, size: input.size, aggressorSide: input.aggressorSide, volumeKind: 'exchange_trade_size' };
 }
 
-export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, now = () => Date.now(), staleAfterMs = 15000, storageFile = process.env.MARKET_DATA_FILE || './data/market-events.jsonl', license = null, setupStore = null, settingsStore = null, patternStore = null, maxEvents = MAX_EVENTS } = {}) {
+export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, now = () => Date.now(), staleAfterMs = 15000, storageFile = process.env.MARKET_DATA_FILE || './data/market-events.jsonl', license = null, setupStore = null, settingsStore = null, patternStore = null, maxEvents = MAX_EVENTS, maxStorageBytes = MAX_STORAGE_BYTES } = {}) {
   const events = []; const lastSequence = new Map(); const feeds = new Map(); const activeFeeds = new Map(); const clients = new Set(); const seenEventIds = new Set();
   const feedScopeKey = (source, symbol) => source + ':' + symbol;
   const feedSequenceKey = (source, symbol, feedId) => source + ':' + symbol + ':' + (feedId || 'legacy');
@@ -144,6 +166,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   const dedupeKey = (event, id) => `${event.source}:${event.symbol}:${event.feedId || 'legacy'}:${id}`;
   const storageReady = dataFile ? (async () => {
     try {
+      await trimStorage(dataFile, eventBufferCap, maxStorageBytes);
       const recentLines = await readRecentLines(dataFile, eventBufferCap);
       for (const rawLine of recentLines) {
         const line = rawLine.toString('utf8');
@@ -365,6 +388,9 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, zoneOptions: current.zones, footprintOptions: current.footprint }),
         lastQuote: lastQuote && source === 'mt5' ? { bid: lastQuote.bid, ask: lastQuote.ask, last: lastQuote.last, timestamp: lastQuote.timestamp, receivedAt: lastQuote.receivedAt } : null,
         feed,
+        // No live feed for this account: the chart is drawn from stored ticks. Say when they end, so
+        // the client can label the strip as an archive instead of presenting an old price as live.
+        archive: feed ? null : (lastQuote ? { lastTickAt: lastQuote.timestamp, count: selected.length } : null),
         // The feed the terminal is streaming right now, whatever this request asked for, so a client
         // pinned to a silent account can follow the live one instead of showing a stale level.
         liveFeedId: source === 'mt5' ? newestFeed(source, symbol) ?? null : null,

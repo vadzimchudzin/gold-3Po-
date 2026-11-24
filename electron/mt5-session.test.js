@@ -598,3 +598,28 @@ test('a hidden fleet stays empty on the next refresh instead of reappearing', as
   assert.ok(published.every(count => count === 0), 'a zone must never be drawn while the switch is off: ' + published.join(','));
   await session.disconnect();
 });
+
+test('the same tick from two accounts on one server never collapses into one event', async () => {
+  const eventIds = [];
+  for (const accountLogin of ['68353333', '68533333']) {
+    const api = fakeApi();
+    const session = createMt5Session({
+      workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
+      makeWorker: fakeWorker({
+        connect: { ok: true, symbol: 'XAUUSD', accountLogin, server: 'RoboForex-Pro', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
+        history: { ok: true, ticks: [] },
+        poll: { ok: true, ticks: [tick] }
+      }),
+      request: api.request,
+      publish: async () => {}
+    });
+    await session.connect();
+    await new Promise(resolve => setTimeout(resolve, 2600));
+    const batch = api.calls.find(call => call.path === '/v1/ingest/mt5/live-batch');
+    eventIds.push(batch?.body.ticks[0]?.eventId);
+    await session.disconnect();
+  }
+  assert.equal(eventIds.length, 2);
+  assert.ok(eventIds[0] && eventIds[1], 'both accounts must produce a live batch');
+  assert.notEqual(eventIds[0], eventIds[1], 'two demo accounts ending in 3333 must not dedupe into a single event');
+});

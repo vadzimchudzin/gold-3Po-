@@ -14,6 +14,9 @@ let displayedFeedId=null;
 // Set when the account the bridge names went quiet and another feed is streaming: the chart then
 // follows the live feed instead of a remembered one. Cleared when the bridge switches account.
 let feedOverride=null;
+// Consecutive answers that name a different feed than the one asked for: a switched MT5 account,
+// not a glitch. Two in a row and the page follows the server instead of freezing on the old feed.
+let feedMismatch=0;
 let quoteDigits=2;
 const feedStates={online:'ОНЛАЙН',stale:'УСТАРЕЛ',offline:'ОФФЛАЙН',waiting:'ОЖИДАНИЕ'};
 const feedText=status=>feedStates[String(status||'').toLowerCase()]||String(status||'ОЖИДАНИЕ').toUpperCase();
@@ -59,12 +62,20 @@ function clearFeedDisplay(){
  quotes.reset();
  displayedFeedId=null;
  feedOverride=null;
- const price=document.querySelector('#referencePrice');if(price){price.textContent='—';price.removeAttribute('title');}
+ const price=document.querySelector('#referencePrice');if(price){price.textContent='—';price.removeAttribute('title');delete price.dataset.archive;}
  const range=document.querySelector('#sessionRange');if(range)range.textContent='Ожидание истории';
  const mode=document.querySelector('#dataMode');if(mode)mode.textContent='ОЖИДАНИЕ ROBOFOREX MT5';
  const count=document.querySelector('#barCount');if(count)count.textContent='ОЖИДАНИЕ ИСТОРИИ';
  const status=document.querySelector('#chartStatus');if(status){status.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';status.className='warning';}
  window.dispatchEvent(new CustomEvent('market-feed-clear'));
+}
+// An archive is not a price. When the account has no live feed the strip says where the numbers end
+// instead of presenting the last stored tick as the current quote.
+function archiveStamp(iso){const d=new Date(iso);return Number.isNaN(d.getTime())?'':d.toLocaleString([],{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function markArchive(at){
+ const price=document.querySelector('#referencePrice');if(!price)return;
+ if(at){price.dataset.archive='1';price.title='АРХИВ · последняя сохранённая котировка '+new Date(at).toLocaleString()+' — живых данных от MT5 нет';}
+ else delete price.dataset.archive;
 }
 async function refreshAnalysis(){
  const feedId=marketFeedId();
@@ -79,7 +90,13 @@ async function refreshAnalysis(){
   const response=await fetch('/v1/market/analysis?'+params,{cache:'no-store'});
   if(!response.ok)throw new Error('HTTP '+response.status);
   const data=await response.json();
-  if(requestedFeedId&&(data.feedId||null)!==requestedFeedId)return;
+  if(requestedFeedId&&(data.feedId||null)!==requestedFeedId){
+   // The account was switched in MT5 and the server now resolves a different feed. Discarding these
+   // answers forever left the chart frozen on an untradeable price; after two, follow the server.
+   feedMismatch+=1;
+   if(feedMismatch<2)return;
+   feedMismatch=0;feedOverride=data.feedId||null;lastAnalysisAt=0;scheduleAnalysis(0);return;
+  } else feedMismatch=0;
   // A pinned account that stopped streaming while another feed is live is the "app says 4100, the
   // terminal says 3600" case: follow the live feed and re-ask straight away.
   if(requestedFeedId&&data.liveFeedId&&(data.liveFeedId||null)!==(requestedFeedId||null)){
@@ -95,10 +112,14 @@ async function refreshAnalysis(){
    window.dispatchEvent(new CustomEvent('market-analysis',{detail:data}));
    // The broker's tick size decides the decimals every quote on the page prints with.
    quoteDigits=priceDigits(data.footprintStep);
-   const mode=document.querySelector('#dataMode');if(mode)mode.textContent=(data.feed?.status==='online'?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ')+(data.feedId?' · '+String(data.feedId).slice(0,6):'');
+   const online=data.feed?.status==='online';
+   const archiveAt=online?null:(data.archive?.lastTickAt||null);
+   const mode=document.querySelector('#dataMode');if(mode)mode.textContent=(online?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · АРХИВ'+(archiveAt?' до '+archiveStamp(archiveAt):''))+(data.feedId?' · '+String(data.feedId).slice(0,6):'');
    renderFeedConflict(data.priceConflict,data.feedId);
    if(data.lastQuote)updateReferencePrice(data.lastQuote.last,data.lastQuote.timestamp);
    else updateReferencePrice(data.bars.at(-1).c,data.bars.at(-1).time);
+   // Same number, honest label: without a live feed the value is an archive close, not a quote.
+   markArchive(archiveAt);
    const range=document.querySelector('#sessionRange');if(range){const lo=Math.min(...data.bars.map(b=>b.l)),hi=Math.max(...data.bars.map(b=>b.h));range.textContent=priceText(lo,quoteDigits)+' — '+priceText(hi,quoteDigits);}
    const count=document.querySelector('#barCount');if(count)count.textContent=data.bars.length+' СВЕЧЕЙ';
   }

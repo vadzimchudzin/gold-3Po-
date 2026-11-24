@@ -666,3 +666,41 @@ test('the zone payload tells the desktop service whether zones may be drawn', as
   const back = await (await fetch(base + '/v1/chart/zones?symbol=XAUUSD')).json();
   assert.equal(back.zonesVisible, true);
 });
+
+test('an account with history but no live feed is reported as an archive, not a quote', async () => {
+  const feedId = 'a'.repeat(32);
+  const ticks = [1, 2].map(sequence => ({ timestamp: '2026-11-05T17:0' + sequence + ':00.000Z', sequence, bid: 2648, ask: 2648.2, last: 2648.1, tickVolume: 10, realVolume: 0, flags: 0 }));
+  const ingest = await fetch(base + '/v1/ingest/mt5/history', { method: 'POST', headers: auth, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId, ticks }) });
+  assert.equal(ingest.status, 202);
+  const response = await fetch(base + '/v1/market/analysis?symbol=XAUUSD&feedId=' + feedId);
+  const data = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(data.feed, null, 'history alone never registers a live feed');
+  assert.equal(data.archive?.lastTickAt, '2026-11-05T17:02:00.000Z', 'the strip can say where the stored data ends');
+  assert.ok(data.archive.count >= 2);
+});
+
+test('a startup archive past the size limit is trimmed down to the retained window', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gold3po-market-trim-'));
+  const storageFile = join(directory, 'market-events.jsonl');
+  const records = Array.from({ length: 20 }, (_, index) => ({ ...mt5(index + 1), eventId: 'trim-' + (index + 1), receivedAt: '2026-11-17T15:00:01.000Z' }));
+  await writeFile(storageFile, records.map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8');
+  const app = createMarketServer({
+    token: 'test-secret', storageFile, maxEvents: 5, maxStorageBytes: 10,
+    license: testLicense(), setupStore: createSetupStore({ file: null }),
+    settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: null })
+  });
+  const trimServer = app.server;
+  await new Promise(resolve => trimServer.listen(0, '127.0.0.1', resolve));
+  const url = 'http://127.0.0.1:' + trimServer.address().port;
+  try {
+    const health = await (await fetch(url + '/health')).json();
+    assert.equal(health.eventCount, 5, 'only the rolling window is restored');
+    const lines = (await readFile(storageFile, 'utf8')).trim().split('\n');
+    assert.equal(lines.length, 5, 'the file itself is rewritten, not just the in-memory buffer');
+    assert.equal(JSON.parse(lines.at(-1)).sequence, 20, 'the newest records survive');
+  } finally {
+    await new Promise((resolve, reject) => trimServer.close(error => error ? reject(error) : resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
