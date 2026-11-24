@@ -103,9 +103,13 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   function selectFeedEvents(source, symbol, url) {
     const requested = url.searchParams.get('feedId');
     if (requested !== null && requested !== 'legacy' && !/^[a-f0-9]{32}$/i.test(requested)) return null;
+    const accountFeedId = source === 'mt5' ? feedIdFromAccount({
+      accountLogin: url.searchParams.get('accountLogin'),
+      accountServer: url.searchParams.get('accountServer')
+    }, symbol) : null;
     const feedId = requested === 'legacy' ? null
       : requested !== null ? requested
-      : activeFeeds.get(feedScopeKey(source, symbol))?.feedId ?? null;
+      : accountFeedId ?? activeFeeds.get(feedScopeKey(source, symbol))?.feedId ?? null;
     if (feedId) activeFeeds.set(feedScopeKey(source, symbol), { feedId, receivedAt: now() });
     return { feedId, events: events.filter(event =>
       event.source === source && event.symbol === symbol && (event.feedId || null) === feedId
