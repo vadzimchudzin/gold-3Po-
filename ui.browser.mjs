@@ -4,6 +4,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { chromium } from 'playwright';
 
 const token = 'browser-test-token-which-is-long-enough';
+const browserFeedId = 'a'.repeat(32);
 const isolatedDataFile = '/tmp/gold-3po-browser-' + process.pid + '.jsonl';
 const isolatedSetupsFile = '/tmp/gold-3po-browser-setups-' + process.pid + '.json';
 const isolatedSettingsFile = '/tmp/gold-3po-browser-settings-' + process.pid + '.json';
@@ -26,12 +27,33 @@ try {
   }
   assert.ok(ready, 'market server did not start');
   browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}) });
+  // First verify a normal browser without the Electron preload: no demo prices and no credential form.
+  const offlinePage = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 });
+  await offlinePage.goto(base, { waitUntil: 'domcontentloaded' });
+  await offlinePage.waitForSelector('#chartEmpty:not([hidden])', { timeout: 5000 });
+  assert.equal(await offlinePage.locator('.candle').count(), 0, 'browser without MT5 must not show demo candles');
+  await offlinePage.locator('#mt5Open').click();
+  await offlinePage.waitForSelector('#mt5Dialog[open]');
+  assert.ok(await offlinePage.locator('#mt5Connect').isDisabled(), 'connect must be disabled without the desktop bridge');
+  assert.match(await offlinePage.locator('#mt5Detail').innerText(), /настольной версии/, 'browser mode explains that MT5 discovery runs in the desktop app');
+  assert.equal(await offlinePage.locator('#mt5Terminal, #mt5Password, #mt5Form').count(), 0, 'no credentials or manual terminal path may be requested');
+  await offlinePage.close();
+
+  // Main browser scenario: emulate the Electron preload state so the real account feed can be exercised.
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 });
+  await page.addInitScript(feedId => {
+    window.goldMt5 = {
+      state: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId, message: 'Тестовое подключение MT5.' }),
+      connect: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId }),
+      disconnect: async () => ({ state: 'offline', symbol: 'XAUUSD', message: 'Тестовое отключение.' }),
+      installIntegration: async () => ({ message: 'Тестовая интеграция.' })
+    };
+  }, browserFeedId);
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.goto(base, { waitUntil: 'domcontentloaded' });
 
-  // Без фида брокера рабочая область показывает пустое состояние, а не демонстрационные свечи.
+  // Data is empty until the selected account's broker ticks are ingested.
   await page.waitForSelector('#chartEmpty:not([hidden])', { timeout: 5000 });
   assert.equal(await page.locator('.candle').count(), 0, 'никаких демо-свечей до прихода данных брокера');
   assert.equal(await page.locator('.zone-row').count(), 0, 'никаких демо-зон до прихода данных брокера');
@@ -44,12 +66,12 @@ try {
   assert.equal(reset.height, workspace.height, 'top action buttons must have equal height');
 
   const historyTicks = Array.from({length:30},(_,i)=>{const at=new Date(Date.now()-(30-i)*86400000);at.setUTCHours(10,0,0,0);return {timestamp:at.toISOString(),sequence:i+1,bid:2640+i*.1,ask:2640.2+i*.1,last:2640.1+i*.1,tickVolume:1,realVolume:0,flags:0};});
-  const historyResponse=await fetch(base+'/v1/ingest/mt5/history',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({source:'mt5',symbol:'XAUUSD',ticks:historyTicks})});
+  const historyResponse=await fetch(base+'/v1/ingest/mt5/history',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({source:'mt5',symbol:'XAUUSD',feedId:browserFeedId,ticks:historyTicks})});
   assert.equal(historyResponse.status,202,'30-day broker history fixture should be accepted');
   const now = new Date().toISOString();
   const mt5 = { source:'mt5', symbol:'XAUUSD', timestamp:now, sequence:Date.now(), bid:2648.2, ask:2648.4, last:2648.3, tickVolume:1, realVolume:0 };
   const comex = { source:'comex', symbol:'GCZ6', timestamp:now, sequence:Date.now(), tradeId:'browser-check-'+Date.now(), price:2650.1, size:2, aggressorSide:'buy' };
-  for (const [path, event] of [['/v1/ingest/mt5/tick',mt5],['/v1/ingest/comex/trade',comex]]) {
+  for (const [path, event] of [['/v1/ingest/mt5/tick',{...mt5,feedId:browserFeedId}],['/v1/ingest/comex/trade',comex]]) {
     const response = await fetch(base + path, { method:'POST', headers:{ authorization:'Bearer '+token, 'content-type':'application/json' }, body:JSON.stringify(event) });
     assert.equal(response.status,202, 'feed event should be accepted');
   }
@@ -153,7 +175,7 @@ try {
   const beforeTick = await formingVolume();
   // Same 15m bucket as the last streamed tick above, so no new candle is created.
   const liveTick = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2649.1, ask: 2649.3, last: 2649.2, tickVolume: 9, realVolume: 0, flags: 32 };
-  const liveResponse = await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(liveTick) });
+  const liveResponse = await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({...liveTick,feedId:browserFeedId}) });
   assert.equal(liveResponse.status, 202, 'a live tick must be accepted');
   await page.waitForFunction(before => [...document.querySelectorAll('.foot-cell.foot-forming')]
     .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0) > before, beforeTick, { timeout: 5000 });
@@ -329,14 +351,13 @@ try {
   assert.equal(setupsState.activeDefinition.strategy.requireStacked, true, 'applied conditions must persist server-side');
   assert.match(await page.locator('#licenseStatus').innerText(), /НЕ ТРЕБУЕТСЯ/, 'licence row must reflect the CI dev mode');
 
-  // MT5 auto-connect dialog contains no credential form and degrades safely outside Electron.
+  // The emulated Electron bridge is connected: the dialog must expose status and automatic repair, never credentials.
   await page.locator('#mt5Open').click();
   await page.waitForSelector('#mt5Dialog[open]');
-  assert.equal(await page.locator('#mt5Connect').innerText(), 'Найти и подключить MT5');
+  assert.equal(await page.locator('#mt5Open').getAttribute('data-state'), 'online');
   assert.ok(await page.locator('#mt5InstallIntegration').count() === 1, 'the auto-repair action must exist');
   assert.equal(await page.locator('#mt5Terminal, #mt5Password, #mt5Form').count(), 0, 'no account credentials or manual terminal path may be requested');
-  assert.ok(await page.locator('#mt5Connect').isDisabled(), 'connect must be disabled without the desktop bridge');
-  assert.match(await page.locator('#mt5Detail').innerText(), /настольной версии/, 'browser mode must explain that MT5 discovery runs in the desktop app');
+  assert.ok(await page.locator('#mt5Connect').isDisabled(), 'connect is disabled for an already connected account');
   await page.locator('#mt5Close').click();
 
   // Settings sheet: zone finder + MT5 drawing style are saved server-side and reach the zones endpoint.
@@ -437,7 +458,7 @@ try {
   // History ingestion is intentionally capped at 1,000 ticks per request; send the 1,200-tick
   // fixture as bounded batches so the browser test exercises the real ingestion contract.
   for (let offset = 0; offset < denseTicks.length; offset += 1000) {
-    const denseResponse = await fetch(base + '/v1/ingest/mt5/history', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', ticks: denseTicks.slice(offset, offset + 1000) }) });
+    const denseResponse = await fetch(base + '/v1/ingest/mt5/history', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId: browserFeedId, ticks: denseTicks.slice(offset, offset + 1000) }) });
     assert.equal(denseResponse.status, 202, 'dense history fixture batch should be accepted');
   }
   await page.setViewportSize({ width: 3840, height: 2160 });
@@ -461,7 +482,7 @@ try {
   // once MT5 reports 0.01, a streamed tick at 2700.43 keeps its own row instead of rounding to 2700.40.
   await page.setViewportSize({ width: 1440, height: 1100 });
   const specTick = { timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2700.42, ask: 2700.44, last: 2700.41, tickVolume: 1, realVolume: 0, flags: 0 };
-  const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', spec: { tickSize: 0.01 }, ticks: [specTick] }) });
+  const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId: browserFeedId, spec: { tickSize: 0.01 }, ticks: [specTick] }) });
   assert.equal(specResponse.status, 202, 'a live batch with the broker tick size is accepted');
   await page.waitForFunction(() => document.querySelectorAll('#footprintGrid .price-level').length && [...document.querySelectorAll('#footprintGrid .price-level')].some(node => /2[\s\u00a0]?700,41/.test(node.textContent)), null, { timeout: 8000 });
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2700.43, aggressorSide: 'buy', tickVolume: 2, realVolume: 0 } })));

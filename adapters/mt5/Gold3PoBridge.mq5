@@ -7,7 +7,6 @@ input string HistoryUrl = "http://127.0.0.1:8787/v1/ingest/mt5/history";
 input string LiveBatchUrl = "http://127.0.0.1:8787/v1/ingest/mt5/live-batch";
 input string IngestToken = "";          // Optional override; normally read from the app's Common Files token
 input bool AppConnectionFeedsLive = true; // The desktop connector owns recent/live ticks when connected
-input bool AppConnectionFeedsLive = true; // The desktop connector owns the recent/live feed when enabled.
 input int MinIntervalMs = 100;
 input int RequestTimeoutMs = 5000;
 input int HistoryDays = 30;
@@ -92,6 +91,38 @@ string TickStamp(const long timeMsc)
    return stamp + StringFormat(".%03dZ", (int)(timeMsc % 1000));
 }
 
+double TickChartPrice(const MqlTick &tick)
+{
+   long chartMode = SymbolInfoInteger(_Symbol, SYMBOL_CHART_MODE);
+   if(chartMode != SYMBOL_CHART_MODE_LAST)
+      return tick.bid;
+   return tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
+}
+
+string JsonEscape(const string value)
+{
+   string escaped = "";
+   for(int i=0; i<StringLen(value); i++)
+   {
+      ushort ch = StringGetCharacter(value, i);
+      if(ch == '"') escaped += "\\\"";
+      else if(ch == '\\') escaped += "\\\\";
+      else if(ch == '\r') escaped += "\\r";
+      else if(ch == '\n') escaped += "\\n";
+      else escaped += StringSubstr(value, i, 1);
+   }
+   return escaped;
+}
+
+string AccountIdentityJson()
+{
+   string accountServer = AccountInfoString(ACCOUNT_SERVER);
+   StringTrimLeft(accountServer);
+   StringTrimRight(accountServer);
+   return StringFormat("\"accountLogin\":\"%I64d\",\"accountServer\":\"%s\"",
+                       AccountInfoInteger(ACCOUNT_LOGIN), JsonEscape(accountServer));
+}
+
 int PostJson(const string url, const string body, string &response)
 {
    response = "";
@@ -127,12 +158,12 @@ long JsonLong(const string json, const string key)
 
 bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong &sequenceCursor, string &response)
 {
-   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\",\"ticks\":[";
+   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\"," + AccountIdentityJson() + ",\"ticks\":[";
    for(int i=0; i<count; i++)
    {
       MqlTick tick = ticks[first+i];
       sequenceCursor++;
-      double lastPrice = tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
+      double lastPrice = TickChartPrice(tick);
       string eventId = StringFormat("%s-%I64d-%.10f-%.10f-%.10f-%I64u-%.4f-%u", _Symbol, tick.time_msc, tick.bid, tick.ask, lastPrice, tick.volume, tick.volume_real, tick.flags);
       if(i > 0) body += ",";
       body += StringFormat(
@@ -148,8 +179,8 @@ bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong 
 void StartHistorySync()
 {
    int days = MathMax(1, MathMin(HistoryDays, 90));
-   historyEnd = TimeGMT() - (AppConnectionFeedsLive ? 8 * 60 * 60 : 0);
-   // Avoid duplicating the recent window already supplied by the desktop connector.
+   historyEnd = TimeGMT();
+   // The desktop connector owns the latest 8 hours. Start EA history exactly before that window.
    if(AppConnectionFeedsLive) historyEnd -= 8 * 60 * 60;
    historyCursor = historyEnd - days * 86400;
    historySequence = 0;
@@ -246,11 +277,11 @@ bool FlushLiveBatch()
    int available = ArraySize(pendingTicks);
    if(available <= 0) return true;
    int count = MathMin(1000, available);
-   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\",\"ticks\":[";
+   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\"," + AccountIdentityJson() + ",\"ticks\":[";
    for(int i=0; i<count; i++)
    {
       MqlTick tick = pendingTicks[i];
-      double lastPrice = tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
+      double lastPrice = TickChartPrice(tick);
       string eventId = StringFormat("LIVE-%I64u", pendingSequences[i]);
       if(i > 0) body += ",";
       body += StringFormat(
@@ -440,10 +471,32 @@ void SetZonesStatus(const string text)
    ObjectSetString(0, name, OBJPROP_TEXT, text);
 }
 
+string UrlEncodeUtf8(const string value)
+{
+   uchar bytes[];
+   int count = StringToCharArray(value, bytes, 0, WHOLE_ARRAY, CP_UTF8);
+   if(count <= 1) return "";
+   string encoded = "";
+   for(int i=0; i<count-1; i++)
+   {
+      uchar ch = bytes[i];
+      bool safe = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~';
+      if(safe) encoded += CharToString(ch);
+      else encoded += StringFormat("%%%02X", (int)ch);
+   }
+   return encoded;
+}
+
 void RefreshZones()
 {
    string response;
-   string url = ZonesUrl + "?symbol=" + _Symbol + "&source=mt5";
+   string accountServer = AccountInfoString(ACCOUNT_SERVER);
+   StringTrimLeft(accountServer);
+   StringTrimRight(accountServer);
+   string accountLogin = StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
+   string url = ZonesUrl + "?symbol=" + _Symbol + "&source=mt5&accountLogin=" + accountLogin +
+                "&accountServer=" + UrlEncodeUtf8(accountServer);
    if(!GetJson(url, response))
    {
       DeleteZoneObjects();

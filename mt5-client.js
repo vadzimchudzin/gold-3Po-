@@ -2,7 +2,10 @@ import { tickSizeNote } from './mt5-status.js';
 const $ = id => document.getElementById(id);
 const bridge = window.goldMt5;
 let symbol = 'XAUUSD';
+let feedId = null;
 export const marketSymbol = () => symbol;
+export const marketFeedId = () => feedId;
+export const hasMt5Bridge = () => Boolean(bridge);
 
 const dialog = $('mt5Dialog');
 const detail = $('mt5Detail');
@@ -10,6 +13,11 @@ let busy = false;
 
 function render(status) {
   const connected = status.state === 'online';
+  const nextFeedId = typeof status.feedId === 'string' ? status.feedId : null;
+  if (nextFeedId !== feedId) {
+    feedId = nextFeedId;
+    window.dispatchEvent(new CustomEvent('mt5-feed-change', { detail: feedId }));
+  }
   if (connected && status.symbol && status.symbol !== symbol) {
     symbol = status.symbol;
     if ($('marketSymbol')) $('marketSymbol').textContent = symbol;

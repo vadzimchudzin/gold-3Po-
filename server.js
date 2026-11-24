@@ -70,13 +70,17 @@ function tokenMatches(header, token) {
 function eventFingerprint(event) {
   const fields = event.source === 'comex'
     ? [event.source,event.symbol,event.tradeId]
-    : [event.source,event.symbol,event.timestamp,event.bid,event.ask,event.last,event.tickVolume,event.realVolume,event.flags,event.sequence];
+    : [event.source,event.symbol,event.feedId || 'legacy',event.timestamp,event.bid,event.ask,event.last,event.tickVolume,event.realVolume,event.flags,event.sequence];
   return createHash('sha256').update(fields.map(value => String(value ?? '')).join('|')).digest('hex');
 }
 function normalizeMt5(input) {
+  const feedId = input?.feedId ?? null;
+  if (feedId !== null && (typeof feedId !== 'string' || !/^[a-f0-9]{32}$/i.test(feedId))) {
+    throw Object.assign(new Error('Invalid MT5 feed identity.'), { status: 422 });
+  }
   if (input?.source !== 'mt5' || typeof input.symbol !== 'string' || !input.symbol.trim() || !validTimestamp(input.timestamp) || !Number.isSafeInteger(input.sequence) || input.sequence < 1 || !positive(input.bid) || !positive(input.ask) || input.ask < input.bid || !positive(input.last) || !Number.isFinite(input.tickVolume) || input.tickVolume < 0 || !Number.isFinite(input.realVolume) || input.realVolume < 0) throw Object.assign(new Error('Invalid MT5 tick. Required: source, symbol, ISO timestamp, positive sequence, bid, ask, last, tickVolume and realVolume.'), { status: 422 });
   goldOnly('mt5', input.symbol.trim().toUpperCase());
-  return { type: 'quote', source: 'mt5', venue: 'broker_otc', symbol: input.symbol.trim().toUpperCase(), timestamp: new Date(input.timestamp).toISOString(), sequence: input.sequence, eventId: typeof input.eventId === 'string' && input.eventId.length <= 160 ? input.eventId : '', bid: input.bid, ask: input.ask, last: input.last, tickVolume: input.tickVolume, realVolume: input.realVolume, aggressorSide: ['buy','sell'].includes(input.aggressorSide) ? input.aggressorSide : (Number.isInteger(input.flags) && (input.flags & 32) ? 'buy' : Number.isInteger(input.flags) && (input.flags & 64) ? 'sell' : 'unknown'), flags: Number.isInteger(input.flags) ? input.flags : 0, volumeKind: 'broker_tick_or_reported_volume' };
+  return { type: 'quote', source: 'mt5', venue: 'broker_otc', symbol: input.symbol.trim().toUpperCase(), feedId, timestamp: new Date(input.timestamp).toISOString(), sequence: input.sequence, eventId: typeof input.eventId === 'string' && input.eventId.length <= 160 ? input.eventId : '', bid: input.bid, ask: input.ask, last: input.last, tickVolume: input.tickVolume, realVolume: input.realVolume, aggressorSide: ['buy','sell'].includes(input.aggressorSide) ? input.aggressorSide : (Number.isInteger(input.flags) && (input.flags & 32) ? 'buy' : Number.isInteger(input.flags) && (input.flags & 64) ? 'sell' : 'unknown'), flags: Number.isInteger(input.flags) ? input.flags : 0, volumeKind: 'broker_tick_or_reported_volume' };
 }
 function normalizeComex(input) {
   if (input?.source !== 'comex' || typeof input.symbol !== 'string' || !input.symbol.trim() || !validTimestamp(input.timestamp) || !Number.isSafeInteger(input.sequence) || input.sequence < 1 || typeof input.tradeId !== 'string' || !input.tradeId.trim() || !positive(input.price) || !positive(input.size) || !['buy','sell','unknown'].includes(input.aggressorSide)) throw Object.assign(new Error('Invalid COMEX trade. Required: source, symbol, ISO timestamp, positive sequence, tradeId, price, size and aggressorSide.'), { status: 422 });
@@ -85,7 +89,32 @@ function normalizeComex(input) {
 }
 
 export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, now = () => Date.now(), staleAfterMs = 15000, storageFile = process.env.MARKET_DATA_FILE || './data/market-events.jsonl', license = null, setupStore = null, settingsStore = null, patternStore = null, maxEvents = MAX_EVENTS } = {}) {
-  const events = []; const lastSequence = new Map(); const feeds = new Map(); const clients = new Set(); const seenEventIds = new Set();
+  const events = []; const lastSequence = new Map(); const feeds = new Map(); const activeFeeds = new Map(); const clients = new Set(); const seenEventIds = new Set();
+  const feedScopeKey = (source, symbol) => source + ':' + symbol;
+  const feedSequenceKey = (source, symbol, feedId) => source + ':' + symbol + ':' + (feedId || 'legacy');
+  // Keep MT5 bridge batches on the same account-scoped feed as the desktop Python connector.
+  // Never infer an unidentified bridge's account from whichever terminal connected most recently.
+  function feedIdFromAccount(body, symbol) {
+    const login = String(body?.accountLogin ?? '').trim();
+    const server = typeof body?.accountServer === 'string' ? body.accountServer.trim().toLowerCase() : '';
+    if (!/^[0-9]{1,20}$/.test(login) || !server || server.length > 128) return null;
+    return createHash('sha256').update([server, login, symbol.trim().toUpperCase()].join('|')).digest('hex').slice(0, 32);
+  }
+  function selectFeedEvents(source, symbol, url) {
+    const requested = url.searchParams.get('feedId');
+    if (requested !== null && requested !== 'legacy' && !/^[a-f0-9]{32}$/i.test(requested)) return null;
+    const accountFeedId = source === 'mt5' ? feedIdFromAccount({
+      accountLogin: url.searchParams.get('accountLogin'),
+      accountServer: url.searchParams.get('accountServer')
+    }, symbol) : null;
+    const feedId = requested === 'legacy' ? null
+      : requested !== null ? requested
+      : accountFeedId ?? activeFeeds.get(feedScopeKey(source, symbol))?.feedId ?? null;
+    if (feedId) activeFeeds.set(feedScopeKey(source, symbol), { feedId, receivedAt: now() });
+    return { feedId, events: events.filter(event =>
+      event.source === source && event.symbol === symbol && (event.feedId || null) === feedId
+    ) };
+  }
   const eventBufferCap = Number.isInteger(maxEvents) && maxEvents > 0 ? maxEvents : MAX_EVENTS;
   const licenseManager = license || createLicenseManager({ now, required: process.env.LICENSE_REQUIRED !== '0' });
   const setups = setupStore || createSetupStore({ file: process.env.SETUPS_FILE || './data/setups.json', now });
@@ -96,7 +125,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   const feedNowMs = () => events.length ? (Date.parse(events.at(-1).timestamp) || 0) : 0;
   const dataFile = storageFile;
   // Dedup identities are scoped per feed: brokers reuse sequence numbers across symbols.
-  const dedupeKey = (event, id) => `${event.source}:${event.symbol}:${id}`;
+  const dedupeKey = (event, id) => `${event.source}:${event.symbol}:${event.feedId || 'legacy'}:${id}`;
   const storageReady = dataFile ? (async () => {
     try {
       const recentLines = await readRecentLines(dataFile, eventBufferCap);
@@ -109,12 +138,17 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
           const eventId = event.eventId || eventFingerprint(event);
           seenEventIds.add(dedupeKey(event, eventId));
           seenEventIds.add(dedupeKey(event, eventFingerprint(event)));
-          const key = event.source + ':' + event.symbol;
+          const scope = feedScopeKey(event.source, event.symbol);
+          const scopedKey = feedSequenceKey(event.source, event.symbol, event.feedId);
+          const receivedAt = Date.parse(event.receivedAt) || Date.now();
+          if (event.source === 'mt5' && event.feedId) {
+            const active = activeFeeds.get(scope);
+            if (!active || receivedAt >= active.receivedAt) activeFeeds.set(scope, { feedId: event.feedId, receivedAt });
+          }
           if (!event.historical) {
-            lastSequence.set(key, Math.max(lastSequence.get(key) || 0, event.sequence || 0));
-            const receivedAt = Date.parse(event.receivedAt) || Date.now();
-            const existing = feeds.get(key);
-            feeds.set(key, { source:event.source, symbol:event.symbol, lastSequence:event.sequence, receivedAt, accepted:(existing?.accepted || 0)+1 });
+            lastSequence.set(scopedKey, Math.max(lastSequence.get(scopedKey) || 0, event.sequence || 0));
+            const existing = feeds.get(scopedKey);
+            feeds.set(scopedKey, { source:event.source, symbol:event.symbol, feedId:event.feedId || null, lastSequence:event.sequence, receivedAt, accepted:(existing?.accepted || 0)+1 });
           }
         } catch {}
       }
@@ -142,11 +176,11 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   // not report a tick size rows fall back to the default instead of keeping the previous broker's grid.
   const symbolSpecs = new Map();
   const SYMBOL_SPECS_MAX = 16;
-  function rememberSpec(source, symbol, spec) {
+  function rememberSpec(source, symbol, feedId, spec) {
     if (typeof symbol !== 'string') return;
     const name = symbol.trim().toUpperCase();
     if (!isGoldSymbol(source, name)) return;
-    const key = source + ':' + name;
+    const key = feedSequenceKey(source, name, feedId);
     const tickSize = Number(spec?.tickSize);
     // Only an explicit null clears: the MT5 session sends it when the broker gave no tick size. A batch
     // without the field (an older connector) leaves a size another batch reported alone.
@@ -158,8 +192,8 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   }
   // The footprint's source precision: the broker's tick size when MT5 reported it, otherwise the
   // analysis step. The user's row grouping is applied on top of this, never instead.
-  function footprintStepFor(source, symbol, analysisStep) {
-    return symbolSpecs.get(source + ':' + symbol)?.tickSize ?? analysisStep;
+  function footprintStepFor(source, symbol, feedId, analysisStep) {
+    return symbolSpecs.get(feedSequenceKey(source, symbol, feedId))?.tickSize ?? analysisStep;
   }
   // The analysis grid for zones and bar heuristics: the caller's priceStep, otherwise 0.1.
   function analysisStep(requested) {
@@ -204,13 +238,15 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const rawInterval = url.searchParams.get('intervalMs');
       const intervalMs = rawInterval === null ? current.zones.timeframeMinutes * 60000 : Number(rawInterval);
       if (!Number.isInteger(intervalMs) || intervalMs < 60000 || intervalMs > 86400000) return json(res,400,{error:'invalid_interval',message:'intervalMs must be an integer between 60000 and 86400000.'});
-      const selected = events.filter(e => e.symbol === symbol && e.source === source);
-      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, 0.1), limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint });
+      const selection = selectFeedEvents(source, symbol, url);
+      if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
+      const { feedId, events: selected } = selection;
+      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, feedId, 0.1), limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint });
       const zones = analysis.zones.map(zone => ({
         id: zone.id, side: zone.side, low: zone.low, high: zone.high,
         strength: zone.strength, label: zone.label, distance: zone.distance, state: zone.state
       }));
-      return json(res, 200, { symbol, source, intervalMs, lastPrice: analysis.bars.length ? analysis.bars.at(-1).c : null, zones, style: current.mt5, generatedAt: new Date(now()).toISOString() });
+      return json(res, 200, { symbol, source, feedId, intervalMs, lastPrice: analysis.bars.length ? analysis.bars.at(-1).c : null, zones, style: current.mt5, generatedAt: new Date(now()).toISOString() });
     }
     if (url.pathname === '/v1/settings' || url.pathname === '/v1/settings/reset') {
       try {
@@ -259,12 +295,22 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
-      const selected = events.filter(e => e.symbol === symbol && e.source === source);
+      const selection = selectFeedEvents(source, symbol, url);
+      if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
+      const { feedId, events: selected } = selection;
       const priceStep = analysisStep(url.searchParams.get('priceStep'));
-      const footprintStep = footprintStepFor(source, symbol, priceStep);
+      const footprintStep = footprintStepFor(source, symbol, feedId, priceStep);
       const current = await settings.get();
       const intervalMs = Math.min(86400000, Math.max(60000, Number(current.zones.timeframeMinutes || 15) * 60000));
-      return json(res, 200, { symbol, source, intervalMs, timeframeMinutes: intervalMs / 60000, ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, zoneOptions: current.zones, footprintOptions: current.footprint }), feed: health().feeds.find(f => f.source === source && f.symbol === symbol) || null });
+      const lastQuote = selected.reduce((latest, event) =>
+        !latest || Date.parse(event.timestamp) > Date.parse(latest.timestamp) ? event : latest, null);
+      const feed = health().feeds.find(f => f.source === source && f.symbol === symbol && (f.feedId || null) === feedId) || null;
+      return json(res, 200, {
+        symbol, source, feedId, intervalMs, timeframeMinutes: intervalMs / 60000,
+        ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, zoneOptions: current.zones, footprintOptions: current.footprint }),
+        lastQuote: lastQuote && source === 'mt5' ? { bid: lastQuote.bid, ask: lastQuote.ask, last: lastQuote.last, timestamp: lastQuote.timestamp, receivedAt: lastQuote.receivedAt } : null,
+        feed
+      });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/replay') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
@@ -275,11 +321,14 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
-      const selected = events.filter(e => e.source === source && e.symbol === symbol && Date.parse(e.timestamp) >= fromMs && Date.parse(e.timestamp) <= toMs).sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp));
+      const selection = selectFeedEvents(source, symbol, url);
+      if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
+      const { feedId, events: feedEvents } = selection;
+      const selected = feedEvents.filter(e => Date.parse(e.timestamp) >= fromMs && Date.parse(e.timestamp) <= toMs).sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp));
       const priceStep = analysisStep(url.searchParams.get('priceStep'));
-      const footprintStep = footprintStepFor(source, symbol, priceStep);
+      const footprintStep = footprintStepFor(source, symbol, feedId, priceStep);
       const replaySettings = await settings.get();
-      return json(res, 200, { symbol, source, from: from || null, to: to || null, eventCount: selected.length, replayLimit: 20000, ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, limit: 20000, zoneOptions: replaySettings.zones, footprintOptions: replaySettings.footprint }) });
+      return json(res, 200, { symbol, source, feedId, from: from || null, to: to || null, eventCount: selected.length, replayLimit: 20000, ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, limit: 20000, zoneOptions: replaySettings.zones, footprintOptions: replaySettings.footprint }) });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/backtest') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
@@ -287,10 +336,12 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
-      const selected = events.filter(e => e.source === source && e.symbol === symbol);
+      const selection = selectFeedEvents(source, symbol, url);
+      if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
+      const { feedId, events: selected } = selection;
       const active = await setups.activeDefinition();
       const priceStep = analysisStep(url.searchParams.get('priceStep'));
-      const footprintStep = footprintStepFor(source, symbol, priceStep);
+      const footprintStep = footprintStepFor(source, symbol, feedId, priceStep);
       const backtestSettings = await settings.get();
       const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, limit: 20000, zoneOptions: backtestSettings.zones, footprintOptions: backtestSettings.footprint });
       const options = {
@@ -316,10 +367,12 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const source = (url.searchParams.get('source') || 'mt5').toLowerCase();
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
-      const selected = events.filter(e => e.source === source && e.symbol === symbol);
+      const selection = selectFeedEvents(source, symbol, url);
+      if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
+      const { feedId, events: selected } = selection;
       const active = await setups.activeDefinition();
       const signalSettings = await settings.get();
-      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, 0.1), limit: 20000, zoneOptions: signalSettings.zones, footprintOptions: signalSettings.footprint });
+      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, feedId, 0.1), limit: 20000, zoneOptions: signalSettings.zones, footprintOptions: signalSettings.footprint });
       const signals = generateSignals(analysis.bars, active.strategy);
       const simulation = runBacktest(analysis.bars, { ...active.backtest, minScore: active.strategy.minScore, atrPeriod: active.strategy.atrPeriod, strategyConditions: active.strategy });
       const calibrated = attachWalkForwardCalibration(signals, simulation.trades);
@@ -343,7 +396,9 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       if (!['mt5','comex'].includes(source)) return json(res,400,{error:'unsupported_market_source'});
       if (!isGoldSymbol(source, symbol)) return json(res,400,{error:'symbol_not_gold',message:'GOLD-3Po is gold-only: XAUUSD (MT5) or GC futures (COMEX).'});
       if (!Number.isFinite(threshold) || threshold < 0.5 || threshold > 1) return json(res,422,{error:'invalid_threshold',message:'threshold must be between 0.5 and 1.'});
-      const selected = events.filter(e => e.source === source && e.symbol === symbol);
+      const selection = selectFeedEvents(source, symbol, url);
+      if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
+      const { feedId, events: selected } = selection;
       const active = await setups.activeDefinition();
       const analogueSettings = await settings.get();
       // The reference pipeline (analysis + signals) is cached per symbol/source/interval plus the
@@ -351,10 +406,10 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       // only the threshold changes between polls, so the heavy work must not re-run each time.
       // New events (watermark) or a settings/setup change rebuild the cache; the watermark is
       // monotonic, so it moves even when the rolling event buffer is full and the count is constant.
-      const cacheKey = source + ':' + symbol + ':' + intervalMs + ':' + settingsRevision;
+      const cacheKey = source + ':' + symbol + ':' + (feedId || 'legacy') + ':' + intervalMs + ':' + settingsRevision;
       let cached = analogueCache.get(cacheKey);
       if (!cached || cached.watermark !== ingestWatermark) {
-        const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, 0.1), limit: 20000, zoneOptions: analogueSettings.zones, footprintOptions: analogueSettings.footprint });
+        const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, feedId, 0.1), limit: 20000, zoneOptions: analogueSettings.zones, footprintOptions: analogueSettings.footprint });
         const signals = generateSignals(analysis.bars, active.strategy);
         cached = { watermark: ingestWatermark, reference: signals.at(-1) || null, bars: analysis.bars };
         cachePut(cacheKey, cached);
@@ -382,13 +437,18 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       try {
         const body = await readJson(req);
         if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000 || typeof body.symbol !== 'string') return json(res, 422, { error:'invalid_live_batch', message:'Expected 1..1000 MT5 ticks and a symbol.' });
-        const key = 'mt5:' + body.symbol.trim().toUpperCase();
-        rememberSpec('mt5', body.symbol, body.spec);
+        const symbol = body.symbol.trim().toUpperCase();
+        const scope = feedScopeKey('mt5', symbol);
+        const feedId = body.feedId ?? feedIdFromAccount(body, symbol);
+        if (feedId !== null && (typeof feedId !== 'string' || !/^[a-f0-9]{32}$/i.test(feedId))) return json(res, 422, { error: 'invalid_feed_id' });
+        const key = feedSequenceKey('mt5', symbol, feedId);
+        if (feedId) activeFeeds.set(scope, { feedId, receivedAt: now() });
+        rememberSpec('mt5', symbol, feedId, body.spec);
         let sequenceCursor = lastSequence.get(key) || 0;
         let duplicates = 0;
         const additions = [];
         for (const raw of body.ticks) {
-          const event = normalizeMt5({ ...raw, source:'mt5', symbol:body.symbol });
+          const event = normalizeMt5({ ...raw, source:'mt5', symbol, feedId });
           const eventId = event.eventId || eventFingerprint(event);
           const legacyId = eventFingerprint(event);
           if (seenEventIds.has(dedupeKey(event, eventId)) || seenEventIds.has(dedupeKey(event, legacyId))) { duplicates++; continue; }
@@ -404,7 +464,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
           if (events.length > eventBufferCap) events.shift();
           ingestWatermark += 1;
           const existing = feeds.get(key);
-          feeds.set(key,{source:'mt5',symbol:stored.symbol,lastSequence:stored.sequence,receivedAt:Date.parse(stored.receivedAt),accepted:(existing?.accepted||0)+1});
+          feeds.set(key,{source:'mt5',symbol:stored.symbol,feedId:stored.feedId,lastSequence:stored.sequence,receivedAt:Date.parse(stored.receivedAt),accepted:(existing?.accepted||0)+1});
           const packet = `event: market\ndata: ${JSON.stringify(stored)}\n\n`;
           for (const client of clients) client.write(packet);
         }
@@ -420,8 +480,10 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         if (body?.source !== 'mt5' || typeof body.symbol !== 'string' || !isGoldSymbol('mt5', body.symbol.trim().toUpperCase())) {
           return json(res, 422, { error: 'invalid_symbol', message: 'Expected a supported gold symbol.' });
         }
-        symbolSpecs.delete('mt5:' + body.symbol.trim().toUpperCase());
-        return json(res, 200, { reset: true, symbol: body.symbol.trim().toUpperCase() });
+        const feedId = body.feedId ?? null;
+        if (feedId !== null && (typeof feedId !== 'string' || !/^[a-f0-9]{32}$/i.test(feedId))) return json(res, 422, { error: 'invalid_feed_id' });
+        symbolSpecs.delete(feedSequenceKey('mt5', body.symbol.trim().toUpperCase(), feedId));
+        return json(res, 200, { reset: true, symbol: body.symbol.trim().toUpperCase(), feedId });
       } catch (error) { return json(res, 400, { error: 'invalid_request', message: error.message }); }
     }
     if (req.method === 'POST' && url.pathname === '/v1/ingest/mt5/history') {
@@ -429,13 +491,18 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       if (!tokenMatches(req.headers.authorization, token)) return json(res, 401, { error: 'unauthorized' });
       try {
         const body = await readJson(req);
-        if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000) return json(res, 422, { error: 'invalid_history_batch', message: 'Expected 1..1000 MT5 ticks.' });
-        if (typeof body.symbol === 'string') rememberSpec('mt5', body.symbol, body.spec);
+        if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000 || typeof body.symbol !== 'string') return json(res, 422, { error: 'invalid_history_batch', message: 'Expected 1..1000 MT5 ticks and a symbol.' });
+        const symbol = body.symbol.trim().toUpperCase();
+        const scope = feedScopeKey('mt5', symbol);
+        const feedId = body.feedId ?? feedIdFromAccount(body, symbol);
+        if (feedId !== null && (typeof feedId !== 'string' || !/^[a-f0-9]{32}$/i.test(feedId))) return json(res, 422, { error: 'invalid_feed_id' });
+        if (feedId) activeFeeds.set(scope, { feedId, receivedAt: now() });
+        rememberSpec('mt5', symbol, feedId, body.spec);
         let accepted = 0; let duplicates = 0; let rejected = 0;
         const additions = [];
         for (const raw of body.ticks) {
           try {
-            const event = normalizeMt5({ ...raw, source:'mt5', symbol:body.symbol || raw.symbol });
+            const event = normalizeMt5({ ...raw, source:'mt5', symbol, feedId });
             const eventId = event.eventId || eventFingerprint(event);
             const legacyId = eventFingerprint(event);
             if (seenEventIds.has(dedupeKey(event, eventId)) || seenEventIds.has(dedupeKey(event, legacyId))) { duplicates++; continue; }
@@ -464,12 +531,15 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     if (!tokenMatches(req.headers.authorization, token)) return json(res, 401, { error: 'unauthorized' });
     try {
       const body = await readJson(req);
+      if (url.pathname === '/v1/ingest/mt5/tick' && body.feedId === undefined) {
+        body.feedId = feedIdFromAccount(body, String(body.symbol || '').trim().toUpperCase());
+      }
       const event = normalize(body);
-      if (event.source === 'mt5') rememberSpec('mt5', event.symbol, body.spec);
+      if (event.source === 'mt5') rememberSpec('mt5', event.symbol, event.feedId, body.spec);
       const eventId = event.eventId || eventFingerprint(event);
       const legacyId = eventFingerprint(event);
       if (seenEventIds.has(dedupeKey(event, eventId)) || seenEventIds.has(dedupeKey(event, legacyId))) return json(res, 409, { error: 'duplicate_event', eventId });
-      const key = event.source + ':' + event.symbol;
+      const key = feedSequenceKey(event.source, event.symbol, event.feedId);
       const previous = lastSequence.get(key) || 0;
       if (event.sequence <= previous) return json(res, 409, { error: 'sequence_not_increasing', lastAcceptedSequence: previous });
       const receivedAt = now();
@@ -482,7 +552,8 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       if (events.length > eventBufferCap) events.shift();
       ingestWatermark += 1;
       const existing = feeds.get(key);
-      feeds.set(key, { source:event.source, symbol:event.symbol, lastSequence:event.sequence, receivedAt, accepted:(existing?.accepted||0)+1 });
+      feeds.set(key, { source:event.source, symbol:event.symbol, feedId:event.feedId || null, lastSequence:event.sequence, receivedAt, accepted:(existing?.accepted||0)+1 });
+      if (event.source === 'mt5' && event.feedId) activeFeeds.set(feedScopeKey(event.source, event.symbol), { feedId:event.feedId, receivedAt });
       const packet = 'event: market\ndata: ' + JSON.stringify(stored) + '\n\n';
       for (const client of clients) client.write(packet);
       return json(res, 202, { accepted: true, event: stored });

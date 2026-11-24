@@ -256,14 +256,16 @@ def choose_gold_symbol(api, requested=None):
         match = next((name for name, _ in candidates if name.casefold() == requested.casefold()), None)
         if match:
             return match
-    candidates.sort(key=lambda item: (
-        0 if item[1] else 1,
-        0 if item[0].upper() == "XAUUSD" else 1,
-        0 if item[0].upper().startswith("XAUUSD") else 1,
-        len(item[0]),
-        item[0].casefold()
-    ))
-    if candidates:
+    # The active chart symbol is not exposed by the terminal discovery flow.
+    # Choose only when Market Watch has exactly one visible gold instrument;
+    # an exact-name preference can still silently select a different chart symbol.
+    visible = [name for name, is_visible in candidates if is_visible]
+    if len(visible) == 1:
+        return visible[0]
+    if len(visible) > 1 or len(candidates) > 1:
+        raise WorkerError("ambiguous_gold_symbol",
+                          "В MT5 найдено несколько инструментов золота. Оставьте видимым только нужный символ в «Обзоре рынка» и повторите подключение.")
+    if len(candidates) == 1:
         return candidates[0][0]
     # Some older terminals only expose a symbol through symbol_info before it is in symbols_get().
     fallbacks = [requested] if requested else []
@@ -365,7 +367,8 @@ class Worker:
             except Exception:
                 symbol_info = _SYMBOL_INFO_FAILED
             chart_mode = getattr(symbol_info, "chart_mode", None) if symbol_info not in (None, _SYMBOL_INFO_FAILED) else None
-            self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else None
+            # RoboForex spot gold is OTC; MT5's standard chart is Bid. Midpoint fallback shifts all OHLC values.
+            self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else SYMBOL_CHART_MODE_BID
             for path in (terminal.commondata_path, terminal.data_path):
                 if not isinstance(path, str) or not path or len(path) > 4096:
                     raise WorkerError("terminal_paths_unavailable", "MT5 did not provide its terminal data directories.")

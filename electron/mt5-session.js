@@ -71,7 +71,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const identity = createHash('sha256').update(JSON.stringify([owner.server, owner.symbol, timestamp, bid, ask, last, tickVolume, realVolume, flags])).digest('hex');
       if (unique.has(identity)) continue;
       unique.add(identity);
-      records.push({ timestamp, bid, ask, last, tickVolume, realVolume, flags, eventId: `MT5-${identity}`, sequence: ++owner.sequence });
+      records.push({ feedId: owner.feedId, timestamp, bid, ask, last, tickVolume, realVolume, flags, eventId: `MT5-${identity}`, sequence: ++owner.sequence });
     }
     // Live ticks the local service did not accept are kept and sent first next time: the connector has
     // already moved past them, so dropping them would leave a hole. The service skips duplicates by
@@ -89,7 +89,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       const route = historical ? 'history' : 'live-batch';
       const send = () => fetchApi(`/v1/ingest/mt5/${route}`, {
         method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ source: 'mt5', symbol: owner.symbol, spec: owner.spec ?? null, ticks: records.slice(i, i + 1000) })
+        body: JSON.stringify({ source: 'mt5', symbol: owner.symbol, feedId: owner.feedId, spec: owner.spec ?? null, ticks: records.slice(i, i + 1000) })
       });
       // Any failure from here on (network, a 409 that cannot be resequenced, a rejected resend, an
       // unreadable answer) keeps this batch and the rest for the next poll instead of losing them.
@@ -116,7 +116,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     if (session !== owner) return;
     // Refetch every ~4.5 s even without new ticks, so changed settings reach MT5 on a quiet market too.
     if (!owner.cachedZones || Date.now() - owner.levelAt >= 4500) {
-      const response = await fetchApi('/v1/chart/zones?' + new URLSearchParams({ symbol: owner.symbol }));
+      const response = await fetchApi('/v1/chart/zones?' + new URLSearchParams({ symbol: owner.symbol, feedId: owner.feedId }));
       if (response.status === 402) { await disconnect('Лицензия GOLD-3Po недействительна.'); return; }
       if (!response.ok) throw new Error(`Не удалось рассчитать уровни (HTTP ${response.status}).`);
       const body = await response.json();
@@ -194,7 +194,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       owner.worker.stop();
       await owner.levelWrite?.catch(() => {});
       if (owner.commonDataPath) await publish(owner.commonDataPath, owner.symbol, [], owner.cachedStyle).catch(() => {});
-      await fetchApi('/v1/ingest/mt5/spec/reset', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: owner.symbol }) }).catch(() => {});
+      await fetchApi('/v1/ingest/mt5/spec/reset', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: owner.symbol, feedId: owner.feedId }) }).catch(() => {});
     }
     if (!session) status = { state: 'offline', symbol: owner?.symbol, message };
     return state();
@@ -216,6 +216,9 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       owner.symbol = result.symbol.toUpperCase();
       owner.server = result.server;
       owner.accountLogin = result.accountLogin;
+      owner.feedId = createHash('sha256')
+        .update([String(owner.server || '').trim().toLowerCase(), String(owner.accountLogin || '').trim(), owner.symbol].join('|'))
+        .digest('hex').slice(0, 32);
       owner.terminalPath = result.terminalPath;
       owner.commonDataPath = result.commonDataPath;
       owner.dataPath = result.dataPath;
@@ -225,7 +228,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       if (Number.isFinite(tickSize) && tickSize > 0 && tickSize <= 100) owner.spec = { tickSize };
       const specNote = owner.spec ? {} : { tickSize: null, tickSizeIssue: typeof result.specUnavailable === 'string' ? result.specUnavailable.slice(0, 40) : 'not_reported' };
       status = {
-        state: 'online', symbol: owner.symbol,
+        state: 'online', symbol: owner.symbol, feedId: owner.feedId,
         accountLabel: (owner.accountLogin ? 'Счёт ···' + String(owner.accountLogin).slice(-4) : 'Счёт MT5') + (owner.server ? ' · ' + owner.server : ''),
         message: 'Подключено к уже авторизованному MT5. Загружаются котировки…',
         zoneCount: 0, ...(owner.spec ? { tickSize: owner.spec.tickSize } : specNote)
