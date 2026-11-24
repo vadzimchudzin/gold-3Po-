@@ -132,15 +132,18 @@ test('live MT5 batch preserves sequence order and safely retries an already inge
 });
 test('MT5 account feeds stay isolated and analysis returns the latest broker quote',async()=>{
   const feedA='a'.repeat(32),feedB='b'.repeat(32);
+  const timestamp=new Date(Date.now()-60000).toISOString();
   const send=async(feedId,last,sequence)=>fetch(base+'/v1/ingest/mt5/history',{
     method:'POST',headers:auth,body:JSON.stringify({source:'mt5',symbol:'XAUUSD',feedId,ticks:[{
-      timestamp:'2026-11-24T10:00:00.000Z',sequence,bid:last-0.1,ask:last+0.1,last,tickVolume:1,realVolume:0,flags:0
+      timestamp,sequence,bid:last-0.1,ask:last+0.1,last,tickVolume:1,realVolume:0,flags:0
     }]})
   });
   assert.equal((await send(feedA,4100,1)).status,202);
   assert.equal((await send(feedB,4360,1)).status,202);
   const read=async(feedId)=>(await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&feedId='+feedId+'&intervalMs=900000')).json());
   const a=await read(feedA),b=await read(feedB);
+  assert.ok(Array.isArray(a.bars)&&a.bars.length, 'feed A analysis must be available: '+JSON.stringify(a));
+  assert.ok(Array.isArray(b.bars)&&b.bars.length, 'feed B analysis must be available: '+JSON.stringify(b));
   assert.equal(a.bars.at(-1).c,4100,'feed A must see only its own bars');
   assert.equal(a.lastQuote.last,4100,'the exact latest quote is returned separately from the candle');
   assert.equal(b.bars.at(-1).c,4360,'feed B must not inherit feed A history');
