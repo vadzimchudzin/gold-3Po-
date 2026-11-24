@@ -99,6 +99,30 @@ double TickChartPrice(const MqlTick &tick)
    return tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
 }
 
+string JsonEscape(const string value)
+{
+   string escaped = "";
+   for(int i=0; i<StringLen(value); i++)
+   {
+      ushort ch = StringGetCharacter(value, i);
+      if(ch == '"') escaped += "\\\"";
+      else if(ch == '\\') escaped += "\\\\";
+      else if(ch == '\r') escaped += "\\r";
+      else if(ch == '\n') escaped += "\\n";
+      else escaped += StringSubstr(value, i, 1);
+   }
+   return escaped;
+}
+
+string AccountIdentityJson()
+{
+   string accountServer = AccountInfoString(ACCOUNT_SERVER);
+   StringTrimLeft(accountServer);
+   StringTrimRight(accountServer);
+   return StringFormat("\"accountLogin\":\"%I64d\",\"accountServer\":\"%s\"",
+                       AccountInfoInteger(ACCOUNT_LOGIN), JsonEscape(accountServer));
+}
+
 int PostJson(const string url, const string body, string &response)
 {
    response = "";
@@ -134,7 +158,7 @@ long JsonLong(const string json, const string key)
 
 bool SendHistoryBatch(MqlTick &ticks[], const int first, const int count, ulong &sequenceCursor, string &response)
 {
-   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\",\"ticks\":[";
+   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\"," + AccountIdentityJson() + ",\"ticks\":[";
    for(int i=0; i<count; i++)
    {
       MqlTick tick = ticks[first+i];
@@ -253,11 +277,11 @@ bool FlushLiveBatch()
    int available = ArraySize(pendingTicks);
    if(available <= 0) return true;
    int count = MathMin(1000, available);
-   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\",\"ticks\":[";
+   string body = "{\"source\":\"mt5\",\"symbol\":\"" + _Symbol + "\"," + AccountIdentityJson() + ",\"ticks\":[";
    for(int i=0; i<count; i++)
    {
       MqlTick tick = pendingTicks[i];
-      double lastPrice = tick.last > 0 ? tick.last : (tick.bid + tick.ask) / 2.0;
+      double lastPrice = TickChartPrice(tick);
       string eventId = StringFormat("LIVE-%I64u", pendingSequences[i]);
       if(i > 0) body += ",";
       body += StringFormat(
