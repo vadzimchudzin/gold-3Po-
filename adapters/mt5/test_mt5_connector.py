@@ -95,11 +95,17 @@ class ConnectorTests(unittest.TestCase):
         return self.command("connect", **fields)
 
     def test_connect_uses_the_already_authorized_account_without_credentials(self):
-        self.assertEqual(self.connect(), {"id": "request-1", "ok": True, "symbol": "XAUUSDm",
-                                         "commonDataPath": "common data", "dataPath": "terminal data",
-                                         "terminalPath": self.terminal_path,
-                                         "accountLogin": "1234", "server": "Broker-Demo",
-                                         "specUnavailable": "tick_size_unusable"})
+        result = self.connect()
+        self.assertEqual({key: value for key, value in result.items() if key not in ("lastTickAt", "tickAgeMs")},
+                         {"id": "request-1", "ok": True, "symbol": "XAUUSDm",
+                          "commonDataPath": "common data", "dataPath": "terminal data",
+                          "terminalPath": self.terminal_path,
+                          "accountLogin": "1234", "server": "Broker-Demo",
+                          "specUnavailable": "tick_size_unusable"})
+        # The whole session (history window and live cursor) is anchored to this tick, so connect
+        # reports when it happened and how old it already was.
+        self.assertEqual(result["lastTickAt"], "2023-11-14T22:13:20Z")
+        self.assertGreater(result["tickAgeMs"], 0)
         self.assertEqual(self.api.calls, [
             ("initialize", (self.terminal_path,), connector.MT5_TIMEOUT_MS),
             ("symbol_select", "XAUUSDm", True),
