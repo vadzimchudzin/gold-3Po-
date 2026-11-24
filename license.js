@@ -17,6 +17,12 @@ export const MAX_DAYS = 9999;
 const DAY_MS = 86400000;
 const DEFAULT_CLOCK_TOLERANCE_MS = 5 * 60000;
 
+// Short fingerprint of the embedded public key. Keys are signed by a private half that must match
+// it, so this is what tells "the app is older than the key" apart from "the key was mangled".
+export function publicKeyId(publicKeyPem = LICENSE_PUBLIC_KEY_PEM) {
+  return createHash('sha256').update(publicKeyPem).digest('hex').slice(0, 8).toUpperCase();
+}
+
 export function issueLicenseKey({ privateKeyPem, machineId, days, edition = 'pro', nowMs = Date.now(), keyId }) {
   if (!Number.isInteger(days) || days < MIN_DAYS || days > MAX_DAYS) throw new TypeError(`days must be an integer between ${MIN_DAYS} and ${MAX_DAYS}`);
   const machine = normalizeMachineId(machineId);
@@ -104,7 +110,7 @@ export function createLicenseManager({
   async function status(externalNowMs = 0) {
     await load();
     const nowMs = now();
-    const base = { required, machineId, keyId: null, edition: null, issuedAt: null, expiresAt: null, daysTotal: null, daysLeft: 0 };
+    const base = { required, machineId, publicKeyId: publicKeyId(publicKeyPem), keyId: null, edition: null, issuedAt: null, expiresAt: null, daysTotal: null, daysLeft: 0 };
     if (!required) return { ...base, valid: true, reason: 'disabled' };
     const result = verifyLicenseKey(key, { publicKeyPem, machineId, nowMs, clockToleranceMs });
     // Clock-rollback watermark: compare against both the persisted high-water mark

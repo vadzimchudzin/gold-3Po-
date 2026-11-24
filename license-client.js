@@ -1,8 +1,9 @@
 const gate=document.querySelector('#licenseGate'),keyInput=document.querySelector('#licenseKeyInput'),message=document.querySelector('#licenseMessage'),meta=document.querySelector('#licenseMeta'),machineNode=document.querySelector('#licenseMachineId'),statusNode=document.querySelector('#licenseStatus');
+let pastedLength=0;
 const reasonText={
  missing_license:'Вставьте лицензионный ключ, полученный от продавца.',
  malformed_key:'Это не похоже на ключ GOLD-3Po. Вставьте строку целиком, она начинается с GOLD1.',
- bad_signature:'Подпись ключа неверна. Используйте ключ, выданный именно для этого компьютера.',
+ bad_signature:'Подпись ключа неверна: либо строка скопирована не полностью, либо приложение старше ключа. Обновите программу и вставьте ключ целиком (одна строка, 304 символа).',
  wrong_machine:'Ключ выдан для другого компьютера. Отправьте продавцу ID компьютера, указанный ниже.',
  wrong_product:'Ключ относится к другому продукту.',
  invalid_days:'В ключе неверный срок действия. Свяжитесь с продавцом.',
@@ -34,6 +35,9 @@ function render(s){
   const parts=[];
   if(s.expiresAt)parts.push('Действует до '+new Date(s.expiresAt).toISOString().slice(0,10));
   if(s.keyId)parts.push('ID ключа: '+s.keyId);
+  // Diagnostics for the one confusing failure: a correct key on an older build. The fingerprint of
+  // the embedded public key identifies the build, and the pasted length exposes a truncated copy.
+  if(!s.valid){if(s.publicKeyId)parts.push('ключ приложения: '+s.publicKeyId);if(pastedLength)parts.push('вставлено символов: '+pastedLength);}
   meta.textContent=parts.join(' · ');
  }
 }
@@ -43,6 +47,7 @@ async function refresh(){
 }
 document.querySelector('#activateLicense')?.addEventListener('click',async()=>{
  const key=(keyInput?.value||'').trim();
+ pastedLength=key.length;
  if(!key){if(message)message.textContent=reasonText.missing_license;return;}
  if(message)message.textContent='Проверяем ключ…';
  try{

@@ -704,3 +704,19 @@ test('a startup archive past the size limit is trimmed down to the retained wind
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('licence status names the public key of this build, so an old build is identifiable', async () => {
+  const response = await fetch(base + '/v1/license/status');
+  const data = await response.json();
+  assert.equal(response.status, 200);
+  assert.match(data.publicKeyId, /^[0-9A-F]{8}$/);
+  // A rejected activation carries the same fingerprint, which is where it is actually needed: it
+  // tells a correct key on an older build apart from a mangled key on a current one.
+  const payload = Buffer.from(JSON.stringify({ v: 1, product: 'gold-3po', edition: 'pro', machine: 'AAAABBBBCCCCDDDD', keyId: 'abc', issuedAt: 1, days: 1, expiresAt: 1 + 86400000 }), 'utf8').toString('base64url');
+  const forged = `GOLD1.${payload}.${Buffer.alloc(64).toString('base64url')}`;
+  const rejected = await fetch(base + '/v1/license/activate', { method: 'POST', headers: auth, body: JSON.stringify({ key: forged }) });
+  assert.equal(rejected.status, 422);
+  const body = await rejected.json();
+  assert.equal(body.reason, 'bad_signature');
+  assert.equal(body.publicKeyId, data.publicKeyId);
+});
