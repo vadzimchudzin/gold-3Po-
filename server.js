@@ -92,6 +92,14 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   const events = []; const lastSequence = new Map(); const feeds = new Map(); const activeFeeds = new Map(); const clients = new Set(); const seenEventIds = new Set();
   const feedScopeKey = (source, symbol) => source + ':' + symbol;
   const feedSequenceKey = (source, symbol, feedId) => source + ':' + symbol + ':' + (feedId || 'legacy');
+  // Keep MT5 bridge batches on the same account-scoped feed as the desktop Python connector.
+  // Never infer an unidentified bridge's account from whichever terminal connected most recently.
+  function feedIdFromAccount(body, symbol) {
+    const login = String(body?.accountLogin ?? '').trim();
+    const server = typeof body?.accountServer === 'string' ? body.accountServer.trim().toLowerCase() : '';
+    if (!/^[0-9]{1,20}$/.test(login) || !server || server.length > 128) return null;
+    return createHash('sha256').update([server, login, symbol.trim().toUpperCase()].join('|')).digest('hex').slice(0, 32);
+  }
   function selectFeedEvents(source, symbol, url) {
     const requested = url.searchParams.get('feedId');
     if (requested !== null && requested !== 'legacy' && !/^[a-f0-9]{32}$/i.test(requested)) return null;
@@ -427,7 +435,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000 || typeof body.symbol !== 'string') return json(res, 422, { error:'invalid_live_batch', message:'Expected 1..1000 MT5 ticks and a symbol.' });
         const symbol = body.symbol.trim().toUpperCase();
         const scope = feedScopeKey('mt5', symbol);
-        const feedId = body.feedId ?? activeFeeds.get(scope)?.feedId ?? null;
+        const feedId = body.feedId ?? feedIdFromAccount(body, symbol);
         if (feedId !== null && (typeof feedId !== 'string' || !/^[a-f0-9]{32}$/i.test(feedId))) return json(res, 422, { error: 'invalid_feed_id' });
         const key = feedSequenceKey('mt5', symbol, feedId);
         if (feedId) activeFeeds.set(scope, { feedId, receivedAt: now() });
@@ -482,7 +490,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         if (body?.source !== 'mt5' || !Array.isArray(body.ticks) || body.ticks.length < 1 || body.ticks.length > 1000 || typeof body.symbol !== 'string') return json(res, 422, { error: 'invalid_history_batch', message: 'Expected 1..1000 MT5 ticks and a symbol.' });
         const symbol = body.symbol.trim().toUpperCase();
         const scope = feedScopeKey('mt5', symbol);
-        const feedId = body.feedId ?? activeFeeds.get(scope)?.feedId ?? null;
+        const feedId = body.feedId ?? feedIdFromAccount(body, symbol);
         if (feedId !== null && (typeof feedId !== 'string' || !/^[a-f0-9]{32}$/i.test(feedId))) return json(res, 422, { error: 'invalid_feed_id' });
         if (feedId) activeFeeds.set(scope, { feedId, receivedAt: now() });
         rememberSpec('mt5', symbol, feedId, body.spec);
@@ -520,7 +528,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     try {
       const body = await readJson(req);
       if (url.pathname === '/v1/ingest/mt5/tick' && body.feedId === undefined) {
-        body.feedId = activeFeeds.get(feedScopeKey('mt5', String(body.symbol || '').trim().toUpperCase()))?.feedId ?? null;
+        body.feedId = feedIdFromAccount(body, String(body.symbol || '').trim().toUpperCase());
       }
       const event = normalize(body);
       if (event.source === 'mt5') rememberSpec('mt5', event.symbol, event.feedId, body.spec);
