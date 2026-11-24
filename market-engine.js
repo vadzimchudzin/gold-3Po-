@@ -10,13 +10,19 @@ export function normalizeTick(input) {
   const time = Date.parse(input.timestamp);
   if (!Number.isFinite(time)) throw new TypeError('Invalid tick timestamp');
   const source = input.source || 'mt5';
-  const direction = ['buy','sell','unknown'].includes(input.aggressorSide) ? input.aggressorSide : 'unknown';
   if (input.type === 'trade' || source === 'comex') {
+    const direction = ['buy','sell','unknown'].includes(input.aggressorSide) ? input.aggressorSide : 'unknown';
     if (!finite(input.price) || input.price <= 0 || !finite(input.size) || input.size <= 0) throw new TypeError('Invalid exchange trade price or size');
     return { timestamp:new Date(time).toISOString(), time, bid:null, ask:null, last:input.price, volume:input.size, direction, source, symbol:String(input.symbol||'GC').toUpperCase(), type:'trade' };
   }
   if (!finite(input.bid) || !finite(input.ask) || input.bid <= 0 || input.ask < input.bid) throw new TypeError('Invalid tick quote');
   const last = finite(input.last) && input.last > 0 ? input.last : (input.bid + input.ask) / 2;
+  // Brokers routinely ship FX/metals ticks with no aggressor flag. Counting those as "no side" throws
+  // away half the footprint, so classify the print against the quote it hit — the standard tick rule.
+  const direction = ['buy','sell'].includes(input.aggressorSide) ? input.aggressorSide
+    : input.ask > input.bid && last >= input.ask ? 'buy'
+    : input.ask > input.bid && last <= input.bid ? 'sell'
+    : 'unknown';
   return { timestamp:new Date(time).toISOString(), time, bid:input.bid, ask:input.ask, last, volume:tickVolume({ ...input, direction }), direction, source, symbol:String(input.symbol||'XAUUSD').toUpperCase(), type:'quote' };
 }
 
@@ -59,7 +65,7 @@ export function buildMarketAnalysis(events, { intervalMs = 15 * 60_000, priceSte
       sweeps,absorption,exhaustion};
   });
   const zones = detectLiquidityZones(result, priceStep, { ...zoneOptions, ...(maxZones === undefined ? {} : { maxZones }) });
-  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, profile:sessionProfile(result, { priceStep: footprintStep, options: footprintOptions }), divergence:cumulativeDivergence(result), tickCount:ticks.length, volumeKind:ticks.some(t=>t.source==='comex')?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:ticks.length&&ticks.every(t=>t.source==='comex')?'licensed_vendor_aggressor_side; unknown_when_unavailable':'only_explicit_mt5_tick_flags; otherwise_unknown', generatedAt:new Date().toISOString() };
+  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, profile:sessionProfile(result, { priceStep: footprintStep, options: footprintOptions }), divergence:cumulativeDivergence(result), tickCount:ticks.length, volumeKind:ticks.some(t=>t.source==='comex')?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:ticks.length&&ticks.every(t=>t.source==='comex')?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
 }
 
 export const DEFAULT_ZONE_OPTIONS = Object.freeze({

@@ -3,6 +3,7 @@ import { footprintOf, footprintCell, sessionProfile, applyTickToBar, emptyBar, t
 import { zoneLabelRu, zoneStateRu } from './zone-labels.js';
 import { candlePart } from './footprint-candle.js';
 import { chartScale, priceRange, wheelIntent, zoomScrollAnchor, CHART_AXIS, CHART_ZOOM } from './chart-scale.js';
+import { deltaPaneMarkup } from './delta-pane.js';
 const $ = s => document.querySelector(s);
 const chart=$('#priceChart'), grid=$('#footprintGrid'), zoneList=$('#zoneList'), toast=$('#toast'), chartEmpty=$('#chartEmpty');
 let bars=[], zones=[], selected=-1, selectedZone=null, showZones=true, showNumbers=true, mode='bidask', live=false, replayMode=false, toastTimer;
@@ -12,6 +13,9 @@ let horizontalZoom=1, verticalZoom=1, footprintZoomX=1, footprintZoomY=1, chartD
 // does not move the series; only a new extreme, a zoom change or another instrument rebuilds it.
 let chartRange=null;
 const chartViewport=chart.parentElement;
+// Keep the delta pane under the candles when the chart is scrolled sideways, in either direction.
+chartViewport.addEventListener('scroll',()=>{const wrap=$('#deltaPaneWrap');if(wrap&&wrap.scrollLeft!==chartViewport.scrollLeft)wrap.scrollLeft=chartViewport.scrollLeft;});
+$('#deltaPaneWrap')?.addEventListener('scroll',event=>{const wrap=event.currentTarget;if(wrap.scrollLeft!==chartViewport.scrollLeft)chartViewport.scrollLeft=wrap.scrollLeft;});
 // The user's footprint options (published by settings-client at module init and on every save).
 // The live path recomputes the forming bar with them, so a changed setting shows at once.
 const footprintOptions=()=>window.gold3poSettings?.footprint&&Object.keys(window.gold3poSettings.footprint).length?window.gold3poSettings.footprint:DEFAULT_FOOTPRINT_OPTIONS;
@@ -130,8 +134,19 @@ $('#chartPriceZoomOut')?.addEventListener('click',()=>changeVerticalZoom(vertica
 $('#chartPriceZoomIn')?.addEventListener('click',()=>changeVerticalZoom(verticalZoom*1.2));
 $('#chartPriceZoomReset')?.addEventListener('click',()=>changeVerticalZoom(1));
 window.addEventListener('resize',()=>{renderChart();renderFootprint();});
+function clearDeltaPane(){const svg=$('#deltaPane');if(svg)svg.innerHTML='';}
+// The pane shares the chart's scale, so a cluster and its cumulative delta always line up.
+function renderDeltaPane(scale){
+ const svg=$('#deltaPane'),wrap=$('#deltaPaneWrap');
+ if(!svg||!wrap)return;
+ const pane=deltaPaneMarkup(bars,scale);
+ svg.setAttribute('viewBox',`0 0 ${pane.svgWidth} ${pane.height}`);
+ svg.style.width=pane.svgWidth+'px';
+ svg.innerHTML=pane.html;
+ if(wrap.scrollLeft!==chartViewport.scrollLeft)wrap.scrollLeft=chartViewport.scrollLeft;
+}
 function renderChart(){
- if(!bars.length){chart.innerHTML='';chart.setAttribute('viewBox','0 0 1000 390');chart.style.width='100%';setEmptyState(true);return;}
+ if(!bars.length){chart.innerHTML='';chart.setAttribute('viewBox','0 0 1000 390');chart.style.width='100%';clearDeltaPane();setEmptyState(true);return;}
  setEmptyState(false);
  const left=64;
  // The chart fills the panel at any window width (up to 4K) and compresses history into it: a bar
@@ -162,6 +177,7 @@ function renderChart(){
  if(i%labelStep===0)html+=`<text x="${cx}" y="378" text-anchor="middle" class="time-label">${axisLabel(b)}</text>`;});
  const last=bars.at(-1),py=y(last.c);html+=`<line x1="${left}" y1="${py}" x2="${left+width}" y2="${py}" class="last-price-line"/><rect x="${left+width-2}" y="${py-11}" width="70" height="22" rx="5" class="last-price-tag"/><text x="${left+width+33}" y="${py+4}" text-anchor="middle" class="last-price-text">${fmt(last.c)}</text>`;
  chart.setAttribute('viewBox',`0 0 ${svgWidth} 390`);chart.style.width=svgWidth+'px';chart.innerHTML=html;
+ renderDeltaPane(scale);
  updateChartZoomControls();
  chart.querySelectorAll('.candle').forEach(n=>{const f=()=>{if(performance.now()<suppressChartClickUntil)return;select(Number(n.dataset.index));};n.addEventListener('click',f);n.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();f();}});});if(live&&!hasAutoScrolled){chartViewport.scrollLeft=chartViewport.scrollWidth;hasAutoScrolled=true;}
 }

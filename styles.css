@@ -447,3 +447,19 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .footprint-source-status.is-dense{border-color:rgba(153,255,228,.2)}
 .footprint-source-status.is-dense strong{color:var(--cyan)}
 @media(max-width:700px){.footprint-source-status{align-items:flex-start;flex-direction:column;margin-left:8px;margin-right:8px;font-size:7px}}
+
+.delta-wrap{overflow-x:auto;overflow-y:hidden;background:rgba(8,8,10,.35);border-top:1px solid var(--line);scrollbar-width:none}
+.delta-wrap::-webkit-scrollbar{height:0}
+.delta-wrap svg{display:block}
+.delta-zero{stroke:rgba(165,180,210,.22);stroke-width:1;stroke-dasharray:3 3}
+.delta-area.up{fill:rgba(153,255,228,.13)}
+.delta-area.down{fill:rgba(255,128,128,.13)}
+.delta-line{fill:none;stroke-width:1.4;stroke-linejoin:round}
+.delta-line.up{stroke:var(--cyan)}
+.delta-line.down{stroke:var(--red)}
+.delta-dot.up{fill:var(--cyan)}
+.delta-dot.down{fill:var(--red)}
+.delta-caption{font:8px var(--mono);fill:var(--muted-2);letter-spacing:.05em}
+.delta-value{font:600 9px var(--mono)}
+.delta-value.up{fill:var(--cyan)}
+.delta-value.down{fill:var(--red)}

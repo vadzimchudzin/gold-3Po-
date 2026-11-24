@@ -26,7 +26,7 @@ test('unclassified OTC ticks remain unknown rather than fabricated bid/ask volum
   assert.equal(out.bars[0].bid,0);
   assert.equal(out.bars[0].ask,0);
   assert.equal(out.bars[0].unknown,2);
-  assert.equal(out.sideClassification,'only_explicit_mt5_tick_flags; otherwise_unknown');
+  assert.equal(out.sideClassification,'explicit_mt5_tick_flags; otherwise_price_against_quote');
 });
 test('timeframe aggregation separates bars and orders ticks chronologically',()=>{
   const out=buildMarketAnalysis([
@@ -254,4 +254,30 @@ test('an empty side of price still gets one reference level',()=>{
  const last=bars.at(-1).c,zones=detectLiquidityZones(bars,0.1,{minZones:1,maxZones:7});
  assert.ok(zones.some(z=>z.high<last),'a level below price is offered');
  assert.ok(zones.some(z=>z.low>last),'a level above price is offered');
+});
+
+test('a print at the ask counts as buying when the broker ships no aggressor flag',()=>{
+  const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2650.1,tickVolume:2,source:'mt5',symbol:'XAUUSD'});
+  assert.equal(t.direction,'buy');
+});
+test('a print at the bid counts as selling when the broker ships no aggressor flag',()=>{
+  const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2649.9,tickVolume:2,source:'mt5',symbol:'XAUUSD'});
+  assert.equal(t.direction,'sell');
+});
+test('a print inside the spread stays unclassified instead of being guessed',()=>{
+  const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2650,tickVolume:2,source:'mt5',symbol:'XAUUSD'});
+  assert.equal(t.direction,'unknown');
+});
+test('an explicit broker flag wins over the price rule',()=>{
+  const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2650.1,tickVolume:2,aggressorSide:'sell',source:'mt5',symbol:'XAUUSD'});
+  assert.equal(t.direction,'sell');
+});
+test('inferred sides land in the footprint instead of the unknown bucket',()=>{
+  const out=buildMarketAnalysis([
+    {timestamp:'2026-11-17T10:01:00.000Z',bid:2650,ask:2650.2,last:2650.2,tickVolume:3,source:'mt5',symbol:'XAUUSD'},
+    {timestamp:'2026-11-17T10:02:00.000Z',bid:2650,ask:2650.2,last:2650,tickVolume:5,source:'mt5',symbol:'XAUUSD'}
+  ]);
+  assert.equal(out.bars[0].unknown,0,'nothing is left without a side');
+  assert.ok(out.bars[0].ask>0&&out.bars[0].bid>0,'both sides get volume');
+  assert.ok(out.bars[0].delta<0,'more selling than buying');
 });
