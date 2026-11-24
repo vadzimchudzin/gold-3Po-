@@ -7,6 +7,7 @@ const release = (tag, assets = [{ name: 'GOLD-3Po Market Lab Setup 0.9.7.exe', b
 });
 
 const respond = payload => async () => ({ ok: true, status: 200, json: async () => payload });
+const listing = (...releases) => respond(releases);
 
 test('versions compare numerically, part by part', () => {
   assert.equal(compareVersions('0.9.10', '0.9.9'), 1);
@@ -30,23 +31,23 @@ test('release notes are trimmed so the panel cannot explode', () => {
 });
 
 test('a newer release is offered with its installer, an equal one is not', async () => {
-  const newer = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: respond(release('v0.9.7')) });
+  const newer = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: listing(release('v0.9.7')) });
   const offered = await newer.check();
   assert.equal(offered.state, 'available');
   assert.equal(offered.version, 'v0.9.7');
   assert.equal(offered.url, 'https://example.test/setup.exe');
   assert.equal(newer.pending().version, 'v0.9.7');
 
-  const same = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.7', fetchImpl: respond(release('v0.9.7')) });
+  const same = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.7', fetchImpl: listing(release('v0.9.7')) });
   assert.equal((await same.check()).state, 'current');
   assert.equal(same.pending(), null, 'nothing is queued when there is nothing to install');
 });
 
-test('a release without an installer is reported instead of failing later', async () => {
-  const updater = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: respond(release('v0.9.7', [{ name: 'notes.txt' }])) });
+test('a release without an installer is never offered', async () => {
+  const updater = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: listing({ tag_name: 'v0.9.7', assets: [{ name: 'notes.txt' }] }) });
   const result = await updater.check();
-  assert.equal(result.state, 'error');
-  assert.match(result.message, /установщика/);
+  assert.equal(result.state, 'current', 'nothing runnable is published yet');
+  assert.equal(updater.pending(), null);
 });
 
 test('a network problem never crashes the app, it reports', async () => {
@@ -64,7 +65,7 @@ test('no published release yet is not an error', async () => {
 test('applying downloads once and hands the file to the installer', async () => {
   const seen = [];
   const updater = createUpdater({
-    repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: respond(release('v0.9.7')),
+    repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: listing(release('v0.9.7')),
     download: async target => { seen.push(['download', target.version]); return '/tmp/setup.exe'; },
     install: async file => { seen.push(['install', file]); }
   });
@@ -75,13 +76,13 @@ test('applying downloads once and hands the file to the installer', async () => 
 });
 
 test('applying without a checked update does nothing', async () => {
-  const updater = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: respond(release('v0.9.7')) });
+  const updater = createUpdater({ repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: listing(release('v0.9.7')) });
   assert.equal((await updater.apply()).state, 'error');
 });
 
 test('a failed download clears the offer so the button cannot loop', async () => {
   const updater = createUpdater({
-    repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: respond(release('v0.9.7')),
+    repo: 'owner/repo', currentVersion: '0.9.6', fetchImpl: listing(release('v0.9.7')),
     download: async () => { throw new Error('disk full'); },
     install: async () => {}
   });
@@ -91,3 +92,25 @@ test('a failed download clears the offer so the button cannot loop', async () =>
   assert.match(result.message, /disk full/);
   assert.equal(updater.pending(), null);
 });
+
+test('a pre-release is still an update, and the highest version wins', async () => {
+  const updater = createUpdater({
+    repo: 'owner/repo', currentVersion: '0.9.7.36',
+    fetchImpl: listing(release('v0.9.7.35'), { tag_name: 'v0.9.7.38', prerelease: true, assets: releases() }, release('v0.9.7.37'))
+  });
+  const result = await updater.check();
+  assert.equal(result.state, 'available');
+  assert.equal(result.version, 'v0.9.7.38', 'pre-releases are offered too: the pipeline publishes them that way');
+});
+
+test('drafts are ignored so an unpublished build is never offered', async () => {
+  const updater = createUpdater({
+    repo: 'owner/repo', currentVersion: '0.9.6',
+    fetchImpl: listing({ tag_name: 'v0.9.9', draft: true, assets: releases() }, release('v0.9.7'))
+  });
+  assert.equal((await updater.check()).version, 'v0.9.7');
+});
+
+function releases() {
+  return [{ name: 'GOLD-3Po-Setup-0.9.7-x64.exe', browser_download_url: 'https://example.test/setup.exe', size: 1 }];
+}

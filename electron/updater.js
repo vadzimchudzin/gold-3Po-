@@ -44,20 +44,28 @@ export function createUpdater({ repo, currentVersion, fetchImpl = (...args) => f
     if (!repo) return { state: 'unsupported', message: 'Сборка не знает свой репозиторий.' };
     let response;
     try {
-      response = await fetchImpl(`${RELEASE_API}/${repo}/releases/latest`, { headers: { accept: 'application/vnd.github+json' } });
+      // Releases go out as pre-releases, which /releases/latest deliberately skips, so the list is the
+      // only reliable source: read it and keep the highest version that actually ships an installer.
+      response = await fetchImpl(`${RELEASE_API}/${repo}/releases?per_page=20`, { headers: { accept: 'application/vnd.github+json' } });
     } catch (error) {
       return { state: 'error', message: `Нет связи с сервером обновлений: ${error?.message || error}` };
     }
     if (response.status === 404) return { state: 'current', currentVersion, message: 'Опубликованных обновлений ещё нет.' };
     if (!response.ok) return { state: 'error', message: `Сервер обновлений ответил HTTP ${response.status}.` };
-    let release;
-    try { release = await response.json(); }
+    let list;
+    try { list = await response.json(); }
     catch { return { state: 'error', message: 'Ответ сервера обновлений не читается.' }; }
+    if (!Array.isArray(list)) return { state: 'current', currentVersion, message: 'Опубликованных обновлений ещё нет.' };
 
-    const tag = release?.tag_name || release?.name || '';
+    const offering = list
+      .filter(item => item && !item.draft && pickInstaller(item))
+      .sort((left, right) => compareVersions(right.tag_name || right.name, left.tag_name || left.name));
+    if (!offering.length) return { state: 'current', currentVersion, message: 'Опубликованных обновлений ещё нет.' };
+
+    const release = offering[0];
+    const tag = release.tag_name || release.name || '';
     if (!isNewer(tag, currentVersion)) return { state: 'current', currentVersion, latest: tag, message: 'Установлена последняя версия.' };
     const installer = pickInstaller(release);
-    if (!installer) return { state: 'error', version: tag, message: 'В релизе нет установщика Windows.' };
     pending = { version: tag, ...installer, notes: releaseNotes(release) };
     log(`update available: ${tag}`);
     return { state: 'available', currentVersion, ...pending };
