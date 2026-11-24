@@ -239,12 +239,26 @@ try {
   const footprintCell = page.locator('#footprintGrid .foot-cell').first();
   const widthBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
   const heightBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
-  await page.locator('#footZoomXIn').click();
-  const widthAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
-  assert.ok(widthAfter > widthBefore, 'X+ must widen footprint columns');
-  await page.locator('#footZoomYIn').click();
-  const heightAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
-  assert.ok(heightAfter > heightBefore, 'Y+ must increase footprint price-row height');
+  // Wait for the re-render instead of measuring straight after the click: on a loaded CI runner the
+  // live tick that re-renders the grid can land between the click and the read.
+  { const grew = () => page.waitForFunction(
+    before => document.querySelector('#footprintGrid .foot-cell')?.getBoundingClientRect().width > before,
+    widthBefore, { timeout: 4000 }
+  );
+    await page.locator('#footZoomXIn').click();
+    await grew();
+    const widthAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
+    assert.ok(widthAfter > widthBefore, 'X+ must widen footprint columns');
+  }
+  { const grew = () => page.waitForFunction(
+    before => document.querySelector('#footprintGrid .foot-cell')?.getBoundingClientRect().height > before,
+    heightBefore, { timeout: 4000 }
+  );
+    await page.locator('#footZoomYIn').click();
+    await grew();
+    const heightAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
+    assert.ok(heightAfter > heightBefore, 'Y+ must increase footprint price-row height');
+  }
   await page.locator('#footZoomXReset').click();
   await page.locator('#footZoomYReset').click();
   await page.locator('#layoutButton').click();
