@@ -171,6 +171,9 @@ test('MT5 bridge account metadata resolves to the same feed as the desktop conne
   const first = await selected();
   assert.equal(first.feedId, expectedFeedId, 'the bridge and Python connector use the same identity formula');
   assert.equal(first.lastQuote.last, 4360);
+  const zonesUrl = base + '/v1/chart/zones?symbol=XAUUSD&accountLogin=' + accountLogin + '&accountServer=' + encodeURIComponent(accountServer);
+  const zones = await (await fetch(zonesUrl)).json();
+  assert.equal(zones.feedId, expectedFeedId, 'the MT5 chart overlay is calculated from the same account feed');
 
   // A stale bridge without account metadata must not be silently attached to the currently active account.
   const unidentified = await fetch(base + '/v1/ingest/mt5/live-batch', {
