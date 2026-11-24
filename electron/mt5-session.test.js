@@ -196,11 +196,11 @@ test('a transient live ingest failure is retried without losing the tick or disc
       history: { ok: true, ticks: [] },
       poll: { ok: true, ticks: [tick] }
     }),
-    request, publish: async () => {}
+    request, publish: async () => {}, pollMs: 100, maxBackoffMs: 400
   });
   const connected = await session.connect({ terminalPath: 'C:\\MT5\\terminal64.exe', login: '1', password: 'p', server: 'S', symbol: 'XAUUSD' });
   assert.equal(connected.state, 'online');
-  await new Promise(resolve => setTimeout(resolve, 1800));
+  await new Promise(resolve => setTimeout(resolve, 650));
   assert.equal(session.state().state, 'online');
   assert.equal(failed, true);
   assert.ok(api.calls.some(call => call.path.endsWith('/live-batch')), 'the queued tick must eventually be resent');
