@@ -239,8 +239,86 @@ function footCellMarkup(b,p,index,ctx){
  const aria='Свеча '+(index+1)+', цена '+priceLabel(p)+', бид '+v.bid+', аск '+v.ask+', без стороны '+v.unknown+(marks?', '+marks:'');
  return '<button class="foot-cell '+cls+' '+(index===selected?'active':'')+'" data-index="'+index+'" data-price="'+p+'" data-bid="'+v.bid+'" data-ask="'+v.ask+'" data-unknown="'+v.unknown+'" style="--intensity:'+intensity.toFixed(3)+'" title="'+title.replace(/"/g,'&quot;')+'" aria-label="'+aria.replace(/"/g,'&quot;')+'" '+(empty?'disabled aria-hidden="true"':'')+'>'+content+(isPoc?'<i class="poc-mark">◆</i>':'')+'</button>';
 }
+// Marks that colour a whole column: while they stay identical, a tick can only change numbers.
+function footMarkSignature(foot){
+ if(!foot)return '';
+ const va=foot.valueArea?Number(foot.valueArea.low).toFixed(8)+':'+Number(foot.valueArea.high).toFixed(8):'';
+ const imb=(foot.imbalances||[]).map(x=>x.side+Number(x.price).toFixed(8)).join('|');
+ const stk=(foot.stackedImbalances||[]).map(x=>x.side+(x.prices||[]).length).join('|');
+ const abs=(foot.absorbedLevels||[]).map(x=>Number(x.price).toFixed(8)).join('|');
+ return [foot.poc!=null?Number(foot.poc).toFixed(8):'',va,imb,stk,abs,foot.unfinishedHigh?'H':'',foot.unfinishedLow?'L':''].join('/');
+}
+// What the last render left on screen, so a live tick can rewrite the forming column instead of
+// rebuilding every row of the ladder.
+let liveColumnState=null;
+function patchLiveFootprint(){
+ const state=liveColumnState;
+ if(!state||!bars.length||mode!=='bidask'||!showNumbers)return false;
+ if(state.index!==bars.length-1)return false;
+ const foot=barFootprint(bars[bars.length-1]);
+ if(!Array.isArray(foot.levels)||!foot.levels.length)return false;
+ // Rows carry the broker's own precision, so a level is matched to the rendered ladder by price
+ // within half a step instead of by an exact string: float noise must not force a rebuild.
+ const snap=price=>{
+  let best=null,delta=Infinity;
+  for(const candidate of state.rows){
+   const d=Math.abs(candidate-price);
+   if(d<delta){delta=d;best=candidate;}
+  }
+  return delta<=state.step/2+1e-9?best:null;
+ };
+ const index=state.index,targets=[];
+ for(const row of foot.levels){
+  const snapped=snap(Number(row.price));
+  // A price row the ladder does not carry yet changes the rows of every column: rebuild.
+  if(snapped===null)return false;
+  const cell=grid.querySelector('.foot-cell[data-index="'+index+'"][data-price="'+snapped+'"]');
+  if(!cell)return false;
+  targets.push({price:snapped,cell});
+ }
+ // The heat map is normalised over the whole window, so the scales the new column needs are taken
+ // before writing; rescaleFootprintHeat then keeps every other column's colour consistent.
+ let scale=state.scale,bidScale=state.bidScale,askScale=state.askScale;
+ for(const row of foot.levels){
+  const bid=Number(row.bid)||0,ask=Number(row.ask)||0,total=bid+ask+(Number(row.unknown)||0);
+  if(total>scale)scale=total;
+  if(bid>bidScale)bidScale=bid;
+  if(ask>askScale)askScale=ask;
+ }
+ const step=footprintStep();
+ const ctx={mode,showNumbers,scale,bidScale,askScale,step,priceDigits:clamp(Math.ceil(-Math.log10(step)),2,6),selected,formingIndex:index};
+ for(const {price,cell} of targets)cell.outerHTML=footCellMarkup(foot,price,index,ctx);
+ const scales=rescaleFootprintHeat();
+ state.scale=scales.scale;state.bidScale=scales.bidScale;state.askScale=scales.askScale;
+ state.marks=footMarkSignature(foot);
+ const deltaCell=grid.querySelector('.foot-delta[data-index="'+index+'"]');
+ if(deltaCell){
+  const d=(foot.unknown||0)>0?null:(foot.delta??barDelta(bars[bars.length-1]));
+  deltaCell.textContent=d===null?'—':((d>0?'+':'')+fmt(d,0));
+  deltaCell.className='foot-delta '+(d===null?'':d>=0?'positive':'negative')+(index===selected?' active':'');
+ }
+ return true;
+}
+// Renormalise the existing cells in place: same numbers a rebuild would print, no markup churn.
+function rescaleFootprintHeat(){
+ const cells=[...grid.querySelectorAll('.foot-cell[data-index][data-price]')];
+ const rows=cells.map(cell=>{
+  const bid=Number(cell.dataset.bid)||0,ask=Number(cell.dataset.ask)||0,unknown=Number(cell.dataset.unknown)||0;
+  return {cell,bid,ask,total:bid+ask+unknown};
+ });
+ let scale=1,bidScale=1,askScale=1;
+ for(const row of rows){if(row.total>scale)scale=row.total;if(row.bid>bidScale)bidScale=row.bid;if(row.ask>askScale)askScale=row.ask;}
+ for(const row of rows){
+  row.cell.style.setProperty('--intensity',(row.total>0?Math.min(.85,.07+.68*Math.pow(row.total/scale,.65)):0).toFixed(3));
+  const bidSide=row.cell.querySelector('.bid-side'),askSide=row.cell.querySelector('.ask-side');
+  if(bidSide)bidSide.style.setProperty('--side-intensity',sideIntensity(row.bid,bidScale).toFixed(3));
+  if(askSide)askSide.style.setProperty('--side-intensity',sideIntensity(row.ask,askScale).toFixed(3));
+ }
+ return {scale,bidScale,askScale};
+}
+
 function renderFootprint(){
- if(!bars.length){grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
+ if(!bars.length){liveColumnState=null;grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
  // Keep the footprint as a shared price ladder: every candle stays on the same vertical price scale.
  // Each traded cell is rendered as two independent heatmap sides (Bid / Ask), not one blended total.
  const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(46*footprintZoomX),30,112),maxCols=Math.max(3,Math.min(60,Math.floor((available-68-92)/(cellWidth+3)))),rowHeight=clamp(Math.round(23*footprintZoomY),14,64);
@@ -253,7 +331,7 @@ function renderFootprint(){
   if(!traded.has(key))traded.set(key,price);
  }
  const priceRows=[...traded.values()].sort((a,b)=>b-a);
- if(!priceRows.length){grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
+ if(!priceRows.length){liveColumnState=null;grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
  // Data quality is shown, never repaired by inventing prices or distributing OHLC over empty rows.
  const totalSourceTicks=feet.reduce((sum,b)=>sum+(Number(b.tickCount)||0),0);
  const totalSourceLevels=feet.reduce((sum,b)=>sum+(Array.isArray(b.levels)?b.levels.length:0),0);
@@ -297,6 +375,12 @@ const rows=priceRows.map(p=>'<div class="foot-row" style="grid-template-columns:
   if(target){const row=target.closest('.foot-row'),box=grid.getBoundingClientRect(),rect=row.getBoundingClientRect();
    if(rect.top<box.top+50||rect.bottom>box.bottom-50)grid.scrollTop+=rect.top-box.top-Math.round((box.height-rect.height)/2);}
  }
+ // Remember what this render put on screen: while the ladder, the marks and the window hold, a
+ // live tick only has to rewrite the forming column.
+ const lastVisible=offset+visible.length-1;
+ liveColumnState=lastVisible===bars.length-1
+  ?{index:lastVisible,rows:priceRows.map(Number),step,scale,bidScale,askScale,marks:footMarkSignature(feet.at(-1))}
+  :null;
  grid.querySelectorAll('[data-index]').forEach(n=>n.addEventListener('click',()=>select(Number(n.dataset.index))));
 }
 // A wheel or touch scroll means the trader took over the view; stop re-centring the price axis.
@@ -396,7 +480,7 @@ let liveFrame=0,liveRenderedAt=0;
 function scheduleLiveRender(){
  if(liveFrame)return;
  const wait=Math.max(0,120-(performance.now()-liveRenderedAt));
- liveFrame=setTimeout(()=>{liveFrame=0;liveRenderedAt=performance.now();renderChart();renderFootprint();if(selected===bars.length-1)renderInspector();},wait);
+ liveFrame=setTimeout(()=>{liveFrame=0;liveRenderedAt=performance.now();renderChart();if(!patchLiveFootprint())renderFootprint();if(selected===bars.length-1)renderInspector();},wait);
 }
 function applyLiveTick(event){
  if(replayMode||!bars.length||!event)return;
