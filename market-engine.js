@@ -1,6 +1,6 @@
 import { measureZoneReactions } from './zone-reaction.js';
 import { collectSourceLevels } from './zone-sources.js';
-import { applyTickToBar, footprintOf, sessionProfile, cumulativeDivergence, tickVolume, emptyBar } from './footprint-engine.js';
+import { applyTickToBar, footprintOf, sessionProfile, cumulativeDivergence, tickVolume, emptyBar, autoTicksPerRow, validateFootprintOptions } from './footprint-engine.js';
 const finite = n => Number.isFinite(n);
 const floorTime = (ms, interval) => Math.floor(ms / interval) * interval;
 // One place for the strength formula: shape (touches, pivot reaction), measured reaction, confluence, recency, volume, freshness, distance.
@@ -64,8 +64,25 @@ export function aggregateTicks(events, { intervalMs = 15 * 60_000, footprintStep
 // Applies ticks in the order they are given. A buffer that only grew can be extended with the new
 // tail instead of being aggregated again from the start.
 export function addTicks(bars, events, intervalMs, footprintStep) {
+  const rule = bars._tickRule || (bars._tickRule = { prevBid: null, prevAsk: null, prevSide: null });
   for (const event of events) {
     const t = normalizeTick(event);
+    const hasExplicitSide = ['buy', 'sell'].includes(event?.aggressorSide);
+    if (!hasExplicitSide && t.type === 'quote' && finite(t.bid)) {
+      // Bid-mode MT5 quotes carry last === bid. Without Tick Rule every quote would land on sell.
+      if (t.last <= t.bid && rule.prevBid !== null) {
+        if (t.bid > rule.prevBid) t.direction = 'buy';
+        else if (t.bid < rule.prevBid) t.direction = 'sell';
+        else if (finite(t.ask) && rule.prevAsk !== null && t.ask !== rule.prevAsk) t.direction = t.ask > rule.prevAsk ? 'buy' : 'sell';
+        else if (rule.prevSide) t.direction = rule.prevSide;
+        t.volume = tickVolume({ ...event, direction: t.direction });
+      }
+      if (t.last <= t.bid) {
+        rule.prevBid = t.bid;
+        rule.prevAsk = finite(t.ask) ? t.ask : rule.prevAsk;
+        if (t.direction === 'buy' || t.direction === 'sell') rule.prevSide = t.direction;
+      }
+    }
     const start = floorTime(t.time, intervalMs);
     let bar = bars.get(start);
     // The same builder the browser uses for the forming bar, so live and historical bars agree.
@@ -78,14 +95,20 @@ export function addTicks(bars, events, intervalMs, footprintStep) {
 // Everything derived from the bars: footprint columns, sweeps, zones, profile. Reading only.
 export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1, footprintStep = priceStep, limit = 10000, maxZones, zoneOptions = {}, footprintOptions = {}, tickCount = 0, hasComex = false, comexOnly = false } = {}) {
   if (!(bars instanceof Map) || !finite(priceStep) || priceStep <= 0) throw new TypeError('Invalid analysis input');
+  const rawBars = [...bars.values()].slice(-Math.max(1, limit));
+  const validatedFoot = validateFootprintOptions(footprintOptions);
+  const effectiveTicksPerRow = validatedFoot.autoStep
+    ? autoTicksPerRow(rawBars.slice(-16), footprintStep, 28)
+    : validatedFoot.ticksPerRow;
+  const resolvedFootprint = { ...validatedFoot, ticksPerRow: effectiveTicksPerRow, autoStep: false };
   let cumulativeDelta = 0;
-  const result = [...bars.values()].slice(-Math.max(1,limit)).map((bar, barIndex, allBars) => {
+  const result = rawBars.map((bar, barIndex, allBars) => {
     const total=bar.bid+bar.ask+bar.unknown;
     const delta=bar.ask-bar.bid;
     cumulativeDelta += delta;
     // POC, value area, diagonal imbalance, stacked imbalance, absorption and the unfinished
     // auction all come from one module, shared with the live browser path.
-    const foot = footprintOf(bar.levels, { ...footprintOptions, priceStep: footprintStep, h: bar.h, l: bar.l, c: bar.c });
+    const foot = footprintOf(bar.levels, { ...resolvedFootprint, priceStep: footprintStep, h: bar.h, l: bar.l, c: bar.c });
     const levels = foot.levels;
     const imbalances = foot.imbalances;
     const stacked = foot.stackedImbalances;
@@ -103,7 +126,7 @@ export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1
       sweeps,absorption,exhaustion};
   });
   const zones = detectLiquidityZones(result, priceStep, { ...zoneOptions, ...(maxZones === undefined ? {} : { maxZones }) });
-  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, profile:sessionProfile(result, { priceStep: footprintStep, options: footprintOptions }), divergence:cumulativeDivergence(result), tickCount, volumeKind:hasComex?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:comexOnly?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
+  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, effectiveTicksPerRow, rowStep: Number((footprintStep * effectiveTicksPerRow).toFixed(8)), profile:sessionProfile(result, { priceStep: footprintStep, options: resolvedFootprint }), divergence:cumulativeDivergence(result), tickCount, volumeKind:hasComex?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:comexOnly?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
 }
 
 export const DEFAULT_ZONE_OPTIONS = Object.freeze({

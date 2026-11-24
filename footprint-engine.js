@@ -16,15 +16,48 @@ export const DEFAULT_FOOTPRINT_OPTIONS = Object.freeze({
   minLevelVolume: 3,      // a row thinner than this is noise, never an imbalance
   valueAreaShare: 0.7,    // share of the bar's volume the value area must cover
   absorptionMultiple: 2,  // an edge row carrying this many median rows was absorbed
-  ticksPerRow: 1          // price steps grouped into one footprint row (1 = the source precision)
+  ticksPerRow: 1,         // price steps grouped into one footprint row (1 = the source precision)
+  autoStep: false         // when true, aggregate price steps automatically so whole candles fit cleanly on screen
 });
+
+const AUTO_STEP_MULTIPLIERS = Object.freeze([1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500]);
+
+export function autoTicksPerRow(bars, sourceStep, targetRows = 28) {
+  if (!Array.isArray(bars) || !bars.length || !positive(sourceStep)) return 1;
+  let lo = Infinity, hi = -Infinity;
+  const uniquePrices = new Set();
+  for (const b of bars) {
+    const h = Number(b?.h), l = Number(b?.l);
+    if (finite(h) && h > hi) hi = h;
+    if (finite(l) && l < lo) lo = l;
+    if (b?.levels instanceof Map) {
+      for (const row of b.levels.values()) { if (finite(row?.price)) uniquePrices.add(Number(row.price).toFixed(6)); }
+    } else if (Array.isArray(b?.levels)) {
+      for (const row of b.levels) { if (finite(row?.price)) uniquePrices.add(Number(row.price).toFixed(6)); }
+    }
+  }
+  const target = Math.max(8, Number(targetRows) || 28);
+  if (uniquePrices.size > 0 && uniquePrices.size <= target + 8) return 1;
+  const span = hi > lo ? hi - lo : 0;
+  if (!(span > 0)) return 1;
+  const rawSteps = span / sourceStep;
+  if (rawSteps <= target + 8) return 1;
+  const desired = rawSteps / target;
+  for (const mult of AUTO_STEP_MULTIPLIERS) {
+    if (mult >= desired) return mult;
+  }
+  return AUTO_STEP_MULTIPLIERS.at(-1);
+}
 
 export function validateFootprintOptions(input = {}) {
   const o = { ...DEFAULT_FOOTPRINT_OPTIONS };
+  const explicitTicks = input && input.ticksPerRow !== undefined && input.ticksPerRow !== null;
+  const explicitAuto = input && input.autoStep !== undefined && input.autoStep !== null;
   for (const [key, value] of Object.entries(input || {})) {
     if (!(key in o) || value === undefined || value === null) continue;
-    o[key] = Number(value);
+    o[key] = key === 'autoStep' ? Boolean(value) : Number(value);
   }
+  if (explicitTicks && !explicitAuto) o.autoStep = false;
   const num = (key, lo, hi) => {
     if (!finite(o[key]) || o[key] < lo || o[key] > hi) throw new TypeError(`${key} must be between ${lo} and ${hi}`);
   };
@@ -36,7 +69,7 @@ export function validateFootprintOptions(input = {}) {
   };
   int('imbalanceLevels', 2, 10);
   int('minLevelVolume', 1, 100);
-  int('ticksPerRow', 1, 50);
+  int('ticksPerRow', 1, 500);
   return o;
 }
 

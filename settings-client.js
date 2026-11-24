@@ -2,7 +2,7 @@
 // Every change is saved to /v1/settings right away; the MT5 indicator picks it up on its next refresh.
 const $ = id => document.getElementById(id);
 const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true, strongOnly: false },
-  footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1 },
+  footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1, autoStep: true },
   mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark' } };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
 const TF_LABEL = { 5: '5m', 15: '15m', 30: '30m', 60: '1h', 240: '4h' };
@@ -49,7 +49,7 @@ function render() {
   const f = settings.footprint;
   set('setImbalanceRatio', f.imbalanceRatio); set('setValueAreaShare', Math.round(f.valueAreaShare * 100)); set('setAbsorptionMultiple', f.absorptionMultiple);
   set('setImbalanceLevels', f.imbalanceLevels); set('setMinLevelVolume', f.minLevelVolume); set('setTicksPerRow', f.ticksPerRow ?? 1);
-  $('ticksPerRowValue') && ($('ticksPerRowValue').textContent = (f.ticksPerRow ?? 1) === 1 ? 'точность источника' : `${f.ticksPerRow} шагов цены`);
+  $('ticksPerRowValue') && ($('ticksPerRowValue').textContent = f.autoStep ? 'Авто (под масштаб)' : ((f.ticksPerRow ?? 1) === 1 ? 'точность источника' : `${f.ticksPerRow} шагов цены`));
   $('imbalanceRatioValue') && ($('imbalanceRatioValue').textContent = `${Math.round(f.imbalanceRatio * 100)}%`);
   $('valueAreaShareValue') && ($('valueAreaShareValue').textContent = `${Math.round(f.valueAreaShare * 100)}%`);
   $('absorptionMultipleValue') && ($('absorptionMultipleValue').textContent = `${Number(f.absorptionMultiple).toFixed(1)}× медианы`);
@@ -68,7 +68,7 @@ function render() {
   const strongBtn = $('strongZonesToggle');
   if (strongBtn) { strongBtn.setAttribute('aria-pressed', String(!!z.strongOnly)); strongBtn.classList.toggle('is-active', !!z.strongOnly); }
   const stepSel = $('footClusterStep');
-  if (stepSel) stepSel.value = String(f.ticksPerRow ?? 1);
+  if (stepSel) stepSel.value = f.autoStep ? 'auto' : String(f.ticksPerRow ?? 1);
   setSeg('setTheme', settings.ui.theme);
   document.querySelectorAll('.timeframe-label').forEach(el => { el.textContent = `${TF_LABEL[z.timeframeMinutes] || z.timeframeMinutes + 'm'} · BROKER TICKS`; });
   preview();
@@ -82,7 +82,7 @@ function publish(changedZones) {
 async function save() {
   const patch = pending; pending = {};
   // A new row size needs the broker's ticks at their own precision again, so it refetches like a zone change.
-  const zonesChanged = !!patch.zones || !!(patch.footprint && 'ticksPerRow' in patch.footprint);
+  const zonesChanged = !!patch.zones || !!(patch.footprint && ('ticksPerRow' in patch.footprint || 'autoStep' in patch.footprint));
   status('Сохранение…');
   try {
     const response = await fetch('/v1/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) });
@@ -131,7 +131,10 @@ function bind() {
   const ranges = { setMinZones: 'minZones', setMaxZones: 'maxZones', setPivotWidth: 'pivotWidth', setClusterAtr: 'clusterAtr', setZoneWidthAtr: 'zoneWidthAtr', setMaxDistanceAtr: 'maxDistanceAtr', setAtrPeriod: 'atrPeriod', setReactionBars: 'reactionBars' };
   for (const [id, key] of Object.entries(ranges)) $(id)?.addEventListener('input', e => change('zones', key, Number(e.target.value)));
   const footprintRanges = { setImbalanceRatio: ['imbalanceRatio', Number], setAbsorptionMultiple: ['absorptionMultiple', Number], setValueAreaShare: ['valueAreaShare', v => Number(v) / 100], setImbalanceLevels: ['imbalanceLevels', Number], setMinLevelVolume: ['minLevelVolume', Number], setTicksPerRow: ['ticksPerRow', Number] };
-  for (const [id, [key, cast]] of Object.entries(footprintRanges)) $(id)?.addEventListener('input', e => change('footprint', key, cast(e.target.value)));
+  for (const [id, [key, cast]] of Object.entries(footprintRanges)) $(id)?.addEventListener('input', e => {
+    if (key === 'ticksPerRow') { settings.footprint.autoStep = false; (pending.footprint ||= {}).autoStep = false; }
+    change('footprint', key, cast(e.target.value));
+  });
   $('setLineWidth')?.addEventListener('input', e => change('mt5', 'lineWidth', Number(e.target.value)));
   $('setBuyColor')?.addEventListener('input', e => change('mt5', 'buyColor', e.target.value.toUpperCase()));
   $('setSellColor')?.addEventListener('input', e => change('mt5', 'sellColor', e.target.value.toUpperCase()));
@@ -147,7 +150,15 @@ function bind() {
   const zoneToggles = { setSrcDay: 'usePriorDay', setSrcSessions: 'useSessions', setSrcWeek: 'useWeek', setSrcTf: 'useHigherTf', setSrcVolume: 'useVolume', setStrongOnly: 'strongOnly' };
   for (const [id, key] of Object.entries(zoneToggles)) $(id)?.addEventListener('click', () => change('zones', key, !settings.zones[key]));
   $('strongZonesToggle')?.addEventListener('click', () => change('zones', 'strongOnly', !settings.zones.strongOnly));
-  $('footClusterStep')?.addEventListener('change', e => change('footprint', 'ticksPerRow', Number(e.target.value)));
+  $('footClusterStep')?.addEventListener('change', e => {
+    if (e.target.value === 'auto') {
+      change('footprint', 'autoStep', true);
+    } else {
+      settings.footprint.autoStep = false;
+      (pending.footprint ||= {}).autoStep = false;
+      change('footprint', 'ticksPerRow', Number(e.target.value));
+    }
+  });
   $('settingsTabs')?.addEventListener('click', e => {
     const b = e.target.closest('button[data-tab]'); if (!b) return;
     $('settingsTabs').querySelectorAll('button').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-selected', String(x === b)); });

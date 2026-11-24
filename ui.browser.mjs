@@ -526,8 +526,10 @@ try {
   await page.screenshot({ path:'artifacts/market-lab-4k.png', fullPage:true });
 
   // The live forming bar uses the broker tick size the server built the bars on, not a fixed 0.1:
-  // once MT5 reports 0.01, a streamed tick at 2700.43 keeps its own row instead of rounding to 2700.40.
+  // once MT5 reports 0.01 and manual 1x step is chosen, a streamed tick at 2700.43 keeps its own row instead of rounding to 2700.40.
   await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.locator('#footClusterStep').selectOption('1');
+  await page.waitForTimeout(400);
   const specTick = { timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2700.42, ask: 2700.44, last: 2700.41, tickVolume: 1, realVolume: 0, flags: 0 };
   const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId: browserFeedId, spec: { tickSize: 0.01 }, ticks: [specTick] }) });
   assert.equal(specResponse.status, 202, 'a live batch with the broker tick size is accepted');

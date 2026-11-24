@@ -11,7 +11,7 @@ export const TIMEFRAMES = [5, 15, 30, 60, 240];
 
 export const DEFAULT_SETTINGS = Object.freeze({
   zones: { ...DEFAULT_ZONE_OPTIONS, timeframeMinutes: 15 },
-  footprint: { ...DEFAULT_FOOTPRINT_OPTIONS },
+  footprint: { ...DEFAULT_FOOTPRINT_OPTIONS, autoStep: true },
   mt5: {
     buyColor: '#FF0000',   // zones above price (resistance / buy-side liquidity)
     sellColor: '#FF0000',  // zones below price (support / sell-side liquidity)

@@ -1,5 +1,5 @@
 import { barDelta, totalVolume } from './market-data.js';
-import { footprintOf, footprintCell, sessionProfile, applyTickToBar, emptyBar, tickVolume as footprintTickVolume, DEFAULT_FOOTPRINT_OPTIONS } from './footprint-engine.js';
+import { footprintOf, footprintCell, sessionProfile, applyTickToBar, emptyBar, tickVolume as footprintTickVolume, DEFAULT_FOOTPRINT_OPTIONS, autoTicksPerRow } from './footprint-engine.js';
 import { zoneLabelRu, zoneStateRu } from './zone-labels.js';
 import { candlePart } from './footprint-candle.js';
 import { chartScale, priceRange, wheelIntent, zoomScrollAnchor, CHART_AXIS, CHART_ZOOM } from './chart-scale.js';
@@ -207,22 +207,39 @@ function renderZones(){
 const near=(a,b,t=1e-6)=>Math.abs(Number(a)-Number(b))<t;
 // One row of one bar: real per-price volume only. A bar without a level map shows nothing
 // instead of an invented distribution.
+const MAX_FOOTPRINT_ROWS = 96;
+function effectiveRowStep(){
+ const row=Number(analysisMeta?.rowStep);
+ if(Number.isFinite(row)&&row>0&&row<=1000)return row;
+ const base=footprintStep(),opts=footprintOptions();
+ const mult=Number(analysisMeta?.effectiveTicksPerRow)||(opts.autoStep?1:(opts.ticksPerRow||1));
+ return Number((base*Math.max(1,mult)).toFixed(8));
+}
+function buildLevelLookup(b){
+ if(!Array.isArray(b?.levels))return null;
+ const map=new Map();
+ for(const l of b.levels)map.set(Number(l.price).toFixed(8),l);
+ return map;
+}
 function levelOf(b,price){
  if(!Array.isArray(b?.levels))return{bid:0,ask:0,unknown:0,total:0};
- const v=b.levels.find(l=>near(l.price,price));
+ const key=Number(price).toFixed(8);
+ const v=b._levelLookup?b._levelLookup.get(key):b.levels.find(l=>near(l.price,price));
  return v?{bid:v.bid||0,ask:v.ask||0,unknown:v.unknown||0,total:(v.bid||0)+(v.ask||0)+(v.unknown||0)}:{bid:0,ask:0,unknown:0,total:0};
 }
-function barFootprint(b){
- if(b.poc!==undefined&&b.valueArea!==undefined&&Array.isArray(b.levels))return b;
+function barFootprint(b,overrideTicks=null){
+ if(!overrideTicks&&b.poc!==undefined&&b.valueArea!==undefined&&Array.isArray(b.levels))return b;
  if(!Array.isArray(b?.levels))return b;
- return {...b,...footprintOf(b.levels,{...footprintOptions(),h:b.h,l:b.l,c:b.c,priceStep:footprintStep()})};
+ const opts={...footprintOptions(),h:b.h,l:b.l,c:b.c,priceStep:footprintStep()};
+ if(overrideTicks&&overrideTicks>=1){opts.ticksPerRow=overrideTicks;opts.autoStep=false;}
+ return {...b,...footprintOf(b.levels,opts)};
 }
 // One footprint cell's contents: the bid/ask halves plus the unclassified marker. The full render
 // and the live column patch both call it, so a patched cell prints exactly what a rebuild would.
-function footCellContent(v,{mode,showNumbers,bidAlpha=0,askAlpha=0}){
+function footCellContent(v,{mode,showNumbers,bidAlpha=0,askAlpha=0,bidPct=0,askPct=0}){
  if(mode!=='bidask')return null;
  if(!showNumbers)return '<span class="foot-side bid-side" data-side="bid"></span><span class="foot-side ask-side" data-side="ask"></span>';
- let content='<span class="foot-side bid-side" data-side="bid" style="--side-intensity:'+bidAlpha.toFixed(3)+'">'+(v.bid>0?fmt(v.bid,0):'')+'</span><span class="foot-side ask-side" data-side="ask" style="--side-intensity:'+askAlpha.toFixed(3)+'">'+(v.ask>0?fmt(v.ask,0):'')+'</span>';
+ let content='<span class="foot-side bid-side" data-side="bid" style="--side-intensity:'+bidAlpha.toFixed(3)+';--side-pct:'+bidPct+'%">'+(v.bid>0?fmt(v.bid,0):'')+'</span><span class="foot-side ask-side" data-side="ask" style="--side-intensity:'+askAlpha.toFixed(3)+';--side-pct:'+askPct+'%">'+(v.ask>0?fmt(v.ask,0):'')+'</span>';
  if(v.unknown>0){
   const hasSides=v.bid>0||v.ask>0;
   content+='<span class="foot-unknown '+(hasSides?'mixed':'only')+'" title="Неопределённая сторона: '+fmt(v.unknown,0)+'">'+(hasSides?'?':'? '+fmt(v.unknown,0))+'</span>';
@@ -230,6 +247,7 @@ function footCellContent(v,{mode,showNumbers,bidAlpha=0,askAlpha=0}){
  return content;
 }
 const sideIntensity=(value,maximum)=>value>0?Math.min(.9,.08+.8*Math.pow(value/maximum,.58)):0;
+const sidePercent=(value,maximum)=>value>0?Math.min(100,Math.max(8,Math.round(100*value/maximum))):0;
 // One full footprint cell, including its marks and classes. A rebuild and a live patch both call
 // it, so a patched column is identical to a re-rendered one.
 function footCellMarkup(b,p,index,ctx){
@@ -237,6 +255,7 @@ function footCellMarkup(b,p,index,ctx){
  const v=levelOf(b,p),total=v.total||(v.bid+v.ask+v.unknown),empty=total<=0;
  const intensity=total>0?Math.min(.85,.07+.68*Math.pow(total/scale,.65)):0;
  const bidAlpha=sideIntensity(v.bid,bidScale),askAlpha=sideIntensity(v.ask,askScale);
+ const bidPct=sidePercent(v.bid,bidScale),askPct=sidePercent(v.ask,askScale);
  const priceLabel=value=>fmt(value,priceDigits);
  const isPoc=b.poc!=null&&near(b.poc,p),inVa=!!b.valueArea&&p<=b.valueArea.high+1e-9&&p>=b.valueArea.low-1e-9;
  const imbalance=b.imbalances?.find(x=>near(x.price,p))?.side||null;
@@ -246,7 +265,7 @@ function footCellMarkup(b,p,index,ctx){
  const unfinished=(levelRows.length&&near(levelRows[0].price,p)&&b.unfinishedHigh)||(levelRows.length&&near(levelRows.at(-1).price,p)&&b.unfinishedLow);
  let content='',cls='';
  if(mode==='bidask'){
-  content=footCellContent(v,{mode,showNumbers,bidAlpha,askAlpha});
+  content=footCellContent(v,{mode,showNumbers,bidAlpha,askAlpha,bidPct,askPct});
   cls='bidask';
   if(v.unknown>0&&v.bid+v.ask===0)cls+=' unknown-only';
  }else{
@@ -315,11 +334,11 @@ function patchLiveFootprint(){
   if(bid>bidScale)bidScale=bid;
   if(ask>askScale)askScale=ask;
  }
- const step=footprintStep();
+ const step=state.step||effectiveRowStep();
  const ctx={mode,showNumbers,scale,bidScale,askScale,step,priceDigits:clamp(Math.ceil(-Math.log10(step)),2,6),selected,formingIndex:index};
+ foot._levelLookup=buildLevelLookup(foot);
  for(const {price,cell} of targets)cell.outerHTML=footCellMarkup(foot,price,index,ctx);
- const scales=rescaleFootprintHeat();
- state.scale=scales.scale;state.bidScale=scales.bidScale;state.askScale=scales.askScale;
+ state.scale=scale;state.bidScale=bidScale;state.askScale=askScale;
  state.marks=footMarkSignature(foot);
  const deltaCell=grid.querySelector('.foot-delta[data-index="'+index+'"]');
  if(deltaCell){
@@ -329,23 +348,6 @@ function patchLiveFootprint(){
  }
  return true;
 }
-// Renormalise the existing cells in place: same numbers a rebuild would print, no markup churn.
-function rescaleFootprintHeat(){
- const cells=[...grid.querySelectorAll('.foot-cell[data-index][data-price]')];
- const rows=cells.map(cell=>{
-  const bid=Number(cell.dataset.bid)||0,ask=Number(cell.dataset.ask)||0,unknown=Number(cell.dataset.unknown)||0;
-  return {cell,bid,ask,total:bid+ask+unknown};
- });
- let scale=1,bidScale=1,askScale=1;
- for(const row of rows){if(row.total>scale)scale=row.total;if(row.bid>bidScale)bidScale=row.bid;if(row.ask>askScale)askScale=row.ask;}
- for(const row of rows){
-  row.cell.style.setProperty('--intensity',(row.total>0?Math.min(.85,.07+.68*Math.pow(row.total/scale,.65)):0).toFixed(3));
-  const bidSide=row.cell.querySelector('.bid-side'),askSide=row.cell.querySelector('.ask-side');
-  if(bidSide)bidSide.style.setProperty('--side-intensity',sideIntensity(row.bid,bidScale).toFixed(3));
-  if(askSide)askSide.style.setProperty('--side-intensity',sideIntensity(row.ask,askScale).toFixed(3));
- }
- return {scale,bidScale,askScale};
-}
 
 function renderFootprint(){
  if(!bars.length){liveColumnState=null;grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
@@ -353,46 +355,71 @@ function renderFootprint(){
  // Each traded cell is rendered as two independent heatmap sides (Bid / Ask), not one blended total.
  // ATAS-style zoom range: compresses down to 10x5px micro-clusters (up to 160 candles) for the full
  // picture, or stretches up to 140x64px for reading individual Bid x Ask prints.
- const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(52*footprintZoomX),10,140),maxCols=Math.max(3,Math.min(160,Math.floor((available-68-92)/Math.max(cellWidth,10)))),rowHeight=clamp(Math.round(22*footprintZoomY),5,64);
- const isMicro=cellWidth<22||rowHeight<9,isCompact=!isMicro&&(cellWidth<38||rowHeight<13);
+ const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(58*footprintZoomX),10,140),maxCols=Math.max(3,Math.min(160,Math.floor((available-68-92)/Math.max(cellWidth,10))));
  const windowSize=maxCols,start=Math.max(0,Math.min(Math.max(0,bars.length-windowSize),selected-Math.floor(windowSize/2))),visible=bars.slice(start,start+windowSize),offset=start;
- const feet=visible.map(barFootprint);
+ const opts=footprintOptions(),sourceStep=footprintStep(),serverStep=effectiveRowStep();
+ const serverTicks=Math.max(1,Math.round(serverStep/sourceStep));
+ const targetAutoRows=clamp(Math.round(28/Math.max(0.4,footprintZoomY)),10,56);
+ const autoMult=opts.autoStep?autoTicksPerRow(visible,sourceStep,targetAutoRows):null;
+ const overrideTicks=(autoMult&&autoMult>serverTicks)?autoMult:null;
+ const feet=visible.map(b=>{const f=barFootprint(b,overrideTicks);f._levelLookup=buildLevelLookup(f);return f;});
+ const activeTicks=overrideTicks||serverTicks;
+ const step=Number((sourceStep*activeTicks).toFixed(8));
+ const autoOpt=document.querySelector('#footClusterStep option[value="auto"]');
+ if(autoOpt){const stepDigits=step<0.1?2:step<1?2:step<10?1:0;autoOpt.textContent='Авто ('+fmt(step,stepDigits)+')';}
  const traded=new Map();
  for(const b of feet)for(const row of (Array.isArray(b.levels)?b.levels:[])){
   if(!(row.bid||row.ask||row.unknown))continue;
   const price=Number(row.price),key=price.toFixed(8);
   if(!traded.has(key))traded.set(key,price);
  }
- const priceRows=[...traded.values()].sort((a,b)=>b-a);
+ let priceRows=[...traded.values()].sort((a,b)=>b-a);
  if(!priceRows.length){liveColumnState=null;grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
+ let clippedNotice='';
+ if(priceRows.length>MAX_FOOTPRINT_ROWS){
+  const focusBar=feet[clamp(selected-offset,0,feet.length-1)]||feet.at(-1);
+  const focusPrice=Number(focusBar?.poc??focusBar?.c??priceRows[Math.floor(priceRows.length/2)]);
+  let bestIdx=0,bestDist=Infinity;
+  for(let i=0;i<priceRows.length;i++){const d=Math.abs(priceRows[i]-focusPrice);if(d<bestDist){bestDist=d;bestIdx=i;}}
+  const half=Math.floor(MAX_FOOTPRINT_ROWS/2);
+  const loIdx=clamp(bestIdx-half,0,Math.max(0,priceRows.length-MAX_FOOTPRINT_ROWS));
+  clippedNotice=' · показано '+MAX_FOOTPRINT_ROWS+' из '+priceRows.length+' уровней (включите «Авто» для полной свечи)';
+  priceRows=priceRows.slice(loIdx,loIdx+MAX_FOOTPRINT_ROWS);
+ }
+ // Auto-fit row height so the entire visible range fits in the panel without vertical scrolling
+ // (like ATAS), while still letting Y+/Y- stretch or compress rows.
+ const panelHeight=Math.max(360,grid.clientHeight||500)-112;
+ const fitRowHeight=priceRows.length<=48?clamp(Math.floor(panelHeight/Math.max(1,priceRows.length)),15,26):20;
+ const rowHeight=Math.abs(footprintZoomY-1)<0.02?fitRowHeight:clamp(Math.round(fitRowHeight*footprintZoomY),6,64);
+ const isMicro=cellWidth<22||rowHeight<10,isCompact=!isMicro&&(cellWidth<38||rowHeight<14);
  // Data quality is shown, never repaired by inventing prices or distributing OHLC over empty rows.
  const totalSourceTicks=feet.reduce((sum,b)=>sum+(Number(b.tickCount)||0),0);
  const totalSourceLevels=feet.reduce((sum,b)=>sum+(Array.isArray(b.levels)?b.levels.length:0),0);
  const sparseBars=feet.filter(b=>(Array.isArray(b.levels)?b.levels.length:0)<3).length;
  const volumeKind=String(analysisMeta?.volumeKind||'');
  const sourceLabel=volumeKind.includes('exchange_trade_size')
-  ?'ИСТОЧНИК · БИРЖЕВЫЕ СДЕЛКИ / ОБЪЁМ КОНТРАКТОВ'
-  :'ИСТОЧНИК · MT5 OTC / ТИКОВАЯ АКТИВНОСТЬ, НЕ БИРЖЕВОЙ ОБЪЁМ';
- const sourceQuality=sparseBars
+  ?'ИСТОЧНИК · БИРЖЕВЫЕ СДЕЛКИ / ОБЪЁМ КОНТРАКТОВ · ШАГ '+fmt(step,step<1?2:1)
+  :'ИСТОЧНИК · MT5 OTC / ТИКОВАЯ АКТИВНОСТЬ, НЕ БИРЖЕВОЙ ОБЪЁМ · ШАГ '+fmt(step,step<1?2:1);
+ const sourceQuality=(sparseBars
   ?'РЕДКИЕ ДАННЫЕ · '+sparseBars+'/'+feet.length+' свечей имеют менее 3 реальных ценовых уровней · пропуски не интерполируются'
-  :'ПЛОТНОСТЬ · '+totalSourceTicks+' исходных тиков / '+totalSourceLevels+' фактических ценовых уровней';
+  :'ПЛОТНОСТЬ · '+totalSourceTicks+' исходных тиков / '+totalSourceLevels+' кластеров')+clippedNotice;
  const sourceStatus='<div class="footprint-source-status '+(sparseBars?'is-sparse':'is-dense')+'" role="status" aria-live="polite"><strong>'+sourceLabel+'</strong><span>'+sourceQuality+'</span></div>';
  const allLevels=feet.flatMap(b=>Array.isArray(b.levels)?b.levels:[]);
  const scale=Math.max(1,...feet.map(b=>Number(b.maxLevelVolume)||0));
  const bidScale=Math.max(1,...allLevels.map(row=>Number(row.bid)||0));
  const askScale=Math.max(1,...allLevels.map(row=>Number(row.ask)||0));
- const profile=sessionProfile(bars,{priceStep:footprintStep(),options:footprintOptions()});
+ const profile=sessionProfile(bars,{priceStep:sourceStep,options:{...opts,ticksPerRow:activeTicks,autoStep:false}});
  const currentProfile=profile.current;
  const profileRows=new Map((currentProfile?.levels||[]).map(row=>[Number(row.price).toFixed(8),row]));
  const profileMax=Math.max(1,...(currentProfile?.levels||[]).map(row=>row.total));
  const va=currentProfile?.valueArea||null;
- const step=footprintStep(),priceDigits=clamp(Math.ceil(-Math.log10(step)),2,6),priceLabel=p=>fmt(p,priceDigits);
+ const priceDigits=clamp(Math.ceil(-Math.log10(step)),2,6),priceLabel=p=>fmt(p,priceDigits);
  const densityClass=isMicro?' is-micro':isCompact?' is-compact':'';
  const labelStride=cellWidth<16?6:cellWidth<26?3:cellWidth<38?2:1;
  const cols=visible.length,template='68px repeat('+cols+','+cellWidth+'px) 92px',minWidth=68+cols*cellWidth+92;
- const head='<div class="foot-row foot-head" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ЦЕНА</div>'+visible.map((b,i)=>{const levels=Array.isArray(b.levels)?b.levels.length:0,ticks=Number(b.tickCount)||0;const show=i%labelStride===0||offset+i===selected;return '<div class="bar-head '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-source-ticks="'+ticks+'" data-source-levels="'+levels+'" title="'+timeLabel(b.time,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' · исходных тиков: '+ticks+' · фактических ценовых уровней: '+levels+'">'+(show?'#'+String(offset+i+1).padStart(3,'0'):'')+'</div>';}).join('')+'<div class="foot-profile-head">ПРОФИЛЬ</div></div>';
+ const head='<div class="foot-row foot-head" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ЦЕНА</div>'+visible.map((b,i)=>{const levels=Array.isArray(b.levels)?b.levels.length:0,ticks=Number(b.tickCount)||0;const show=i%labelStride===0||offset+i===selected;return '<div class="bar-head '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-source-ticks="'+ticks+'" data-source-levels="'+levels+'" title="'+timeLabel(b.time,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' · исходных тиков: '+ticks+' · кластеров: '+levels+'">'+(show?'#'+String(offset+i+1).padStart(3,'0'):'')+'</div>';}).join('')+'<div class="foot-profile-head">ПРОФИЛЬ</div></div>';
  const cellCtx={mode,showNumbers,scale,bidScale,askScale,step,priceDigits,selected,formingIndex:bars.length-1};
-const rows=priceRows.map((p,rowIdx)=>'<div class="foot-row" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level" data-price="'+p+'">'+((!isMicro||rowIdx%3===0)?priceLabel(p):'')+'</div>'+feet.map((b,i)=>footCellMarkup(b,p,offset+i,cellCtx)).join('')+(function(){
+ const rows=priceRows.map((p,rowIdx)=>'<div class="foot-row" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level" data-price="'+p+'">'+((!isMicro||rowIdx%3===0)?priceLabel(p):'')+'</div>'+feet.map((b,i)=>footCellMarkup(b,p,offset+i,cellCtx)).join('')+(function(){
   const row=profileRows.get(Number(p).toFixed(8));
   if(!row||!row.total)return '<div class="foot-profile empty"></div>';
   const isPoc=va&&near(currentProfile.poc,p),inVa=va&&p<=va.high+1e-9&&p>=va.low-1e-9;
@@ -405,7 +432,7 @@ const rows=priceRows.map((p,rowIdx)=>'<div class="foot-row" style="grid-template
  grid.innerHTML=sourceStatus+'<div class="footprint-table'+densityClass+'" style="min-width:'+minWidth+'px;--footprint-row-height:'+rowHeight+'px">'+head+deltas+rows+times+'</div>';
  updateFootprintZoomControls();
  // Keep the newest traded price in view unless the trader has taken over scrolling.
- if(grid.dataset.autoScroll!=='0'){
+ if(grid.dataset.autoScroll!=='0'&&grid.scrollHeight>grid.clientHeight+16){
   const target=grid.querySelector('.foot-cell.foot-forming.foot-poc')||[...grid.querySelectorAll('.foot-cell.foot-forming:not(.empty-level)')].find(node=>node.textContent.trim());
   if(target){const row=target.closest('.foot-row'),box=grid.getBoundingClientRect(),rect=row.getBoundingClientRect();
    if(rect.top<box.top+50||rect.bottom>box.bottom-50)grid.scrollTop+=rect.top-box.top-Math.round((box.height-rect.height)/2);}
@@ -416,8 +443,11 @@ const rows=priceRows.map((p,rowIdx)=>'<div class="foot-row" style="grid-template
  liveColumnState=lastVisible===bars.length-1
   ?{index:lastVisible,rows:priceRows.map(Number),step,scale,bidScale,askScale,marks:footMarkSignature(feet.at(-1))}
   :null;
- grid.querySelectorAll('[data-index]').forEach(n=>n.addEventListener('click',()=>select(Number(n.dataset.index))));
 }
+grid.addEventListener('click',event=>{
+ const node=event.target.closest('[data-index]');
+ if(node&&grid.contains(node)&&!node.disabled)select(Number(node.dataset.index));
+});
 // A wheel or touch scroll means the trader took over the view; stop re-centring the price axis.
 for(const type of ['wheel','touchmove','pointerdown'])grid.addEventListener(type,()=>{grid.dataset.autoScroll='0';},{passive:true});
 $('#resetView')?.addEventListener('click',()=>{grid.dataset.autoScroll='1';});
@@ -513,10 +543,10 @@ panelResizer?.addEventListener('keydown',event=>{
 applyWorkspaceLayout();
 // A streamed tick updates the forming bar in place: the last footprint column and the last
 // candle move between authoritative refetches instead of waiting for the next 1.5 s poll.
-let liveFrame=0,liveRenderedAt=0,lastLiveTick=null;
+let liveFrame=0,liveRenderedAt=0,lastLiveTick=null,liveRuleBid=null,liveRuleAsk=null,liveRuleSide=null;
 function scheduleLiveRender(){
  if(liveFrame)return;
- const wait=Math.max(0,120-(performance.now()-liveRenderedAt));
+ const wait=Math.max(0,180-(performance.now()-liveRenderedAt));
  liveFrame=setTimeout(()=>{liveFrame=0;liveRenderedAt=performance.now();renderChart();if(!patchLiveFootprint())renderFootprint();if(selected===bars.length-1)renderInspector();},wait);
 }
 function applyLiveTick(event){
@@ -536,9 +566,23 @@ function applyLiveTick(event){
   bars.at(-1).levelMap=new Map(bars.at(-1).levels.map(row=>[Number(row.price).toFixed(8),{...row}]));
  }
  const bar=bars.at(-1);
+ const bidNum=Number(event.bid),askNum=Number(event.ask),lastNum=Number(event.last);
+ let side=['buy','sell'].includes(event.aggressorSide)?event.aggressorSide:null;
+ if(!side&&Number.isFinite(bidNum)&&Number.isFinite(lastNum)&&lastNum<=bidNum){
+  if(liveRuleBid!==null){
+   if(bidNum>liveRuleBid)side='buy';
+   else if(bidNum<liveRuleBid)side='sell';
+   else if(Number.isFinite(askNum)&&liveRuleAsk!==null&&askNum!==liveRuleAsk)side=askNum>liveRuleAsk?'buy':'sell';
+   else if(liveRuleSide)side=liveRuleSide;
+  }
+  liveRuleBid=bidNum;
+  if(Number.isFinite(askNum))liveRuleAsk=askNum;
+  if(side)liveRuleSide=side;
+ }
+ const rowStep=effectiveRowStep();
  const state={levels:bar.levelMap,o:bar.o,h:bar.h,l:bar.l,c:bar.c,volume:bar.volume||0,bid:bar.bid||0,ask:bar.ask||0,unknown:bar.unknown||0,tickCount:bar.tickCount||0};
- applyTickToBar(state,{last:Number(event.last),volume:footprintTickVolume(event),aggressorSide:event.aggressorSide,flags:event.flags},footprintStep());
- const foot=footprintOf(state.levels,{...footprintOptions(),priceStep:footprintStep(),h:state.h,l:state.l,c:state.c});
+ applyTickToBar(state,{last:lastNum,volume:footprintTickVolume({...event,aggressorSide:side||event.aggressorSide}),aggressorSide:side||event.aggressorSide,flags:event.flags},rowStep);
+ const foot=footprintOf(state.levels,{...footprintOptions(),autoStep:false,ticksPerRow:1,priceStep:rowStep,h:state.h,l:state.l,c:state.c});
  bar.levelMap=state.levels;
  Object.assign(bar,{o:state.o,h:state.h,l:state.l,c:state.c,volume:state.volume,bid:state.bid,ask:state.ask,unknown:state.unknown,tickCount:state.tickCount,
   levels:foot.levels,delta:foot.delta,deltaRatio:foot.deltaRatio,poc:foot.poc,valueArea:foot.valueArea,imbalances:foot.imbalances,
