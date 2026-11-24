@@ -5,6 +5,7 @@ let symbol = 'XAUUSD';
 let feedId = null;
 export const marketSymbol = () => symbol;
 export const marketFeedId = () => feedId;
+export const hasMt5Bridge = () => Boolean(bridge);
 
 const dialog = $('mt5Dialog');
 const detail = $('mt5Detail');

@@ -1,4 +1,4 @@
-import { marketSymbol, marketFeedId } from './mt5-client.js';
+import { marketSymbol, marketFeedId, hasMt5Bridge } from './mt5-client.js';
 const api=document.querySelector('#apiStatus'),mt5=document.querySelector('#mt5Status'),comex=document.querySelector('#comexStatus');
 const labels={mt5,comex};let source;let analysisTimer=null;let lastAnalysisAt=0;let reconnectTimer=null;
 const STALE_MS=45000;
@@ -31,14 +31,15 @@ function clearFeedDisplay(){
 }
 async function refreshAnalysis(){
  const feedId=marketFeedId();
- if(!feedId){if(!clearedWithoutFeed){clearFeedDisplay();clearedWithoutFeed=true;}lastAnalysisAt=Date.now();return;}
+ if(!feedId&&hasMt5Bridge()){if(!clearedWithoutFeed){clearFeedDisplay();clearedWithoutFeed=true;}lastAnalysisAt=Date.now();return;}
  clearedWithoutFeed=false;
+ const requestedFeedId=feedId||'legacy';
  try{
-  const params=new URLSearchParams({symbol:marketSymbol(),priceStep:'0.1',feedId});
+  const params=new URLSearchParams({symbol:marketSymbol(),priceStep:'0.1',feedId:requestedFeedId});
   const response=await fetch('/v1/market/analysis?'+params,{cache:'no-store'});
   if(!response.ok)throw new Error('HTTP '+response.status);
   const data=await response.json();
-  if(data.feedId!==feedId)return;
+  if((data.feedId||null)!==(feedId||null))return;
   if(data.bars?.length){
    window.dispatchEvent(new CustomEvent('market-analysis',{detail:data}));
    const mode=document.querySelector('#dataMode');if(mode)mode.textContent=data.feed?.status==='online'?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';
@@ -68,7 +69,7 @@ function connectStream(){
  source=new EventSource('/v1/stream');source.onopen=()=>{refreshHealth();scheduleAnalysis();};source.onerror=()=>{paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');reconnect();};
  source.addEventListener('market',event=>{try{
    const message=JSON.parse(event.data),target=labels[message.source];
-   if(message.source==='mt5'&&message.symbol===marketSymbol()&&message.feedId===marketFeedId()){
+   if(message.source==='mt5'&&message.symbol===marketSymbol()&&(message.feedId||null)===(marketFeedId()||null)){
     if(!message.historical)paint(mt5,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
     if(!message.historical)updateReferencePrice(message.last,message.timestamp);
     scheduleAnalysis();
