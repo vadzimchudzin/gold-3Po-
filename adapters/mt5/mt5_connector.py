@@ -146,16 +146,23 @@ def account_number(value):
     return value
 
 
-def symbol_spec(api, symbol):
+_SYMBOL_INFO_NOT_READ = object()
+_SYMBOL_INFO_FAILED = object()
+
+
+def symbol_spec(api, symbol, info=_SYMBOL_INFO_NOT_READ):
     """The broker's own price grid for the symbol: (spec, None) or (None, reason).
 
-    The tick size is the smallest price change the broker quotes; it is the source precision the
-    footprint groups rows from, instead of assuming 0.1 for every broker. The reason says why there
-    is no spec, so a failing MT5 call is not mistaken for a broker that reports no tick size.
+    The caller may pass the result of its existing symbol_info call so connection
+    setup does not query MT5 twice. The reason distinguishes a failed read, no
+    metadata, and an unusable tick grid.
     """
-    try:
-        info = api.symbol_info(symbol)
-    except Exception:
+    if info is _SYMBOL_INFO_NOT_READ:
+        try:
+            info = api.symbol_info(symbol)
+        except Exception:
+            return None, "symbol_info_failed"
+    elif info is _SYMBOL_INFO_FAILED:
         return None, "symbol_info_failed"
     if info is None:
         return None, "symbol_info_empty"
@@ -356,8 +363,8 @@ class Worker:
             try:
                 symbol_info = self.api.symbol_info(symbol)
             except Exception:
-                symbol_info = None
-            chart_mode = getattr(symbol_info, "chart_mode", None) if symbol_info is not None else None
+                symbol_info = _SYMBOL_INFO_FAILED
+            chart_mode = getattr(symbol_info, "chart_mode", None) if symbol_info not in (None, _SYMBOL_INFO_FAILED) else None
             self.chart_mode = chart_mode if chart_mode in (SYMBOL_CHART_MODE_BID, SYMBOL_CHART_MODE_LAST) else None
             for path in (terminal.commondata_path, terminal.data_path):
                 if not isinstance(path, str) or not path or len(path) > 4096:
@@ -376,7 +383,7 @@ class Worker:
                 "dataPath": terminal.data_path, "terminalPath": terminal_path,
                 "accountLogin": str(login), "server": server
             }
-            spec, missing = symbol_spec(self.api, symbol)
+            spec, missing = symbol_spec(self.api, symbol, symbol_info)
             if spec:
                 result["spec"] = spec
             else:
