@@ -145,70 +145,99 @@ function barFootprint(b){
 }
 function renderFootprint(){
  if(!bars.length){grid.innerHTML='<div class="detail-caption">Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.</div>';return;}
- // Column count follows the panel width, so the session profile stays on screen instead of
- // hiding behind a horizontal scrollbar.
- const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(34*footprintZoomX),22,112),maxCols=Math.max(3,Math.min(60,Math.floor((available-68-92)/(cellWidth+3)))),rowHeight=clamp(Math.round(23*footprintZoomY),14,64);
+ // Keep the footprint as a shared price ladder: every candle stays on the same vertical price scale.
+ // Each traded cell is rendered as two independent heatmap sides (Bid / Ask), not one blended total.
+ const available=Math.max(320,(grid.clientWidth||900)-24),cellWidth=clamp(Math.round(46*footprintZoomX),30,112),maxCols=Math.max(3,Math.min(60,Math.floor((available-68-92)/(cellWidth+3)))),rowHeight=clamp(Math.round(23*footprintZoomY),14,64);
  const windowSize=maxCols,start=Math.max(0,Math.min(Math.max(0,bars.length-windowSize),selected-Math.floor(windowSize/2))),visible=bars.slice(start,start+windowSize),offset=start;
- // Only prices that actually traded are drawn: a row of zeros is not information. Rows come from the
- // computed footprint, so a ticks-per-row grouping changes the ladder the same way it changes the marks.
  const feet=visible.map(barFootprint);
  const traded=new Map();
  for(const b of feet)for(const row of (Array.isArray(b.levels)?b.levels:[])){
   if(!(row.bid||row.ask||row.unknown))continue;
-  const key=Number(row.price).toFixed(2);
-  if(!traded.has(key))traded.set(key,{price:Number(row.price),total:0,volume:(b.volume||0)});
-  traded.get(key).total+=(row.bid||0)+(row.ask||0)+(row.unknown||0);
+  const price=Number(row.price),key=price.toFixed(8);
+  if(!traded.has(key))traded.set(key,price);
  }
- const priceRows=[...traded.values()].sort((a,b)=>b.price-a.price).map(item=>item.price);
+ const priceRows=[...traded.values()].sort((a,b)=>b-a);
  if(!priceRows.length){grid.innerHTML='<div class="detail-caption">В выбранном окне нет сделок: футпринт появится с первыми тиками.</div>';return;}
- // One scale for the whole panel: a colour means the same thing in every column.
+ // Data quality is shown, never repaired by inventing prices or distributing OHLC over empty rows.
+ const totalSourceTicks=feet.reduce((sum,b)=>sum+(Number(b.tickCount)||0),0);
+ const totalSourceLevels=feet.reduce((sum,b)=>sum+(Array.isArray(b.levels)?b.levels.length:0),0);
+ const sparseBars=feet.filter(b=>(Array.isArray(b.levels)?b.levels.length:0)<3).length;
+ const volumeKind=String(analysisMeta?.volumeKind||'');
+ const sourceLabel=volumeKind.includes('exchange_trade_size')
+  ?'ИСТОЧНИК · БИРЖЕВЫЕ СДЕЛКИ / ОБЪЁМ КОНТРАКТОВ'
+  :'ИСТОЧНИК · MT5 OTC / ТИКОВАЯ АКТИВНОСТЬ, НЕ БИРЖЕВОЙ ОБЪЁМ';
+ const sourceQuality=sparseBars
+  ?'РЕДКИЕ ДАННЫЕ · '+sparseBars+'/'+feet.length+' свечей имеют менее 3 реальных ценовых уровней · пропуски не интерполируются'
+  :'ПЛОТНОСТЬ · '+totalSourceTicks+' исходных тиков / '+totalSourceLevels+' фактических ценовых уровней';
+ const sourceStatus='<div class="footprint-source-status '+(sparseBars?'is-sparse':'is-dense')+'" role="status" aria-live="polite"><strong>'+sourceLabel+'</strong><span>'+sourceQuality+'</span></div>';
+ const allLevels=feet.flatMap(b=>Array.isArray(b.levels)?b.levels:[]);
  const scale=Math.max(1,...feet.map(b=>Number(b.maxLevelVolume)||0));
+ const bidScale=Math.max(1,...allLevels.map(row=>Number(row.bid)||0));
+ const askScale=Math.max(1,...allLevels.map(row=>Number(row.ask)||0));
+ const sideIntensity=(value,maximum)=>value>0?Math.min(.9,.08+.8*Math.pow(value/maximum,.58)):0;
  const profile=sessionProfile(bars,{priceStep:footprintStep(),options:footprintOptions()});
  const currentProfile=profile.current;
- const profileRows=new Map((currentProfile?.levels||[]).map(row=>[row.price.toFixed(2),row]));
+ const profileRows=new Map((currentProfile?.levels||[]).map(row=>[Number(row.price).toFixed(8),row]));
  const profileMax=Math.max(1,...(currentProfile?.levels||[]).map(row=>row.total));
  const va=currentProfile?.valueArea||null;
- const cols=visible.length,template=`68px repeat(${cols},${cellWidth}px) 92px`,minWidth=68+cols*(cellWidth+3)+92;
- const head=`<div class="foot-row foot-head" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">ЦЕНА</div>${visible.map((b,i)=>`<div class="bar-head ${offset+i===selected?'active':''}">#${String(offset+i+1).padStart(3,'0')}</div>`).join('')}<div class="foot-profile-head">ПРОФИЛЬ</div></div>`;
- const rows=priceRows.map(p=>`<div class="foot-row" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">${fmt(p)}</div>${feet.map((b,i)=>{
-  const v=levelOf(b,p),delta=v.ask-v.bid,total=v.total||(v.ask+v.bid+v.unknown);
+ const step=footprintStep(),priceDigits=clamp(Math.ceil(-Math.log10(step)),2,6),priceLabel=p=>fmt(p,priceDigits);
+ const cols=visible.length,template='68px repeat('+cols+','+cellWidth+'px) 92px',minWidth=68+cols*(cellWidth+3)+92;
+ const head='<div class="foot-row foot-head" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ЦЕНА</div>'+visible.map((b,i)=>{const levels=Array.isArray(b.levels)?b.levels.length:0,ticks=Number(b.tickCount)||0;return '<div class="bar-head '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-source-ticks="'+ticks+'" data-source-levels="'+levels+'" title="'+timeLabel(b.time,{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' · исходных тиков: '+ticks+' · фактических ценовых уровней: '+levels+'">#'+String(offset+i+1).padStart(3,'0')+'</div>';}).join('')+'<div class="foot-profile-head">ПРОФИЛЬ</div></div>';
+ const rows=priceRows.map(p=>'<div class="foot-row" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level" data-price="'+p+'">'+priceLabel(p)+'</div>'+feet.map((b,i)=>{
+  const v=levelOf(b,p),total=v.total||(v.bid+v.ask+v.unknown),empty=total<=0;
   const intensity=total>0?Math.min(.85,.07+.68*Math.pow(total/scale,.65)):0;
+  const bidAlpha=sideIntensity(v.bid,bidScale),askAlpha=sideIntensity(v.ask,askScale);
   const isPoc=b.poc!=null&&near(b.poc,p),inVa=!!b.valueArea&&p<=b.valueArea.high+1e-9&&p>=b.valueArea.low-1e-9;
   const imbalance=b.imbalances?.find(x=>near(x.price,p))?.side||null;
+  const stacked=!!imbalance&&(b.stackedImbalances||[]).some(item=>item.side===imbalance&&Array.isArray(item.prices)&&item.prices.some(price=>near(price,p)));
   const absorbed=(b.absorbedLevels||[]).some(x=>near(x.price,p));
   const levelRows=Array.isArray(b.levels)?b.levels:[];
   const unfinished=(levelRows.length&&near(levelRows[0].price,p)&&b.unfinishedHigh)||(levelRows.length&&near(levelRows.at(-1).price,p)&&b.unfinishedLow);
   let content='',cls='';
-  // Every display mode uses the engine's single cell contract; Bid/Ask keeps its two-column visual split.
-  const cell=footprintCell(v,mode);
-  if(mode==='bidask'){content=showNumbers?(cell.text==='·'?'·':cell.text?`<span>${v.bid}</span><span>${v.ask}</span>`:''):'';cls='bidask';}
-  else {content=showNumbers?cell.text:'';cls=cell.tone==='positive'?'delta-positive':cell.tone==='negative'?'delta-negative':'volume-cell';}
+  if(mode==='bidask'){
+   content=showNumbers
+    ?'<span class="foot-side bid-side" data-side="bid" style="--side-intensity:'+bidAlpha.toFixed(3)+'">'+(v.bid>0?fmt(v.bid,0):'')+'</span><span class="foot-side ask-side" data-side="ask" style="--side-intensity:'+askAlpha.toFixed(3)+'">'+(v.ask>0?fmt(v.ask,0):'')+'</span>'
+    :'<span class="foot-side bid-side" data-side="bid"></span><span class="foot-side ask-side" data-side="ask"></span>';
+   if(showNumbers&&v.unknown>0){
+    const hasSides=v.bid>0||v.ask>0;
+    content+='<span class="foot-unknown '+(hasSides?'mixed':'only')+'" title="Неопределённая сторона: '+fmt(v.unknown,0)+'">'+(hasSides?'?':'? '+fmt(v.unknown,0))+'</span>';
+   }
+   cls='bidask';
+   if(v.unknown>0&&v.bid+v.ask===0)cls+=' unknown-only';
+  }else{
+   const cell=footprintCell(v,mode);
+   content=showNumbers?cell.text:'';
+   cls=cell.tone==='positive'?'delta-positive':cell.tone==='negative'?'delta-negative':'volume-cell';
+  }
+  if(empty)cls+=' empty-level';
   if(imbalance)cls+=' imbalance-'+imbalance;
+  if(stacked)cls+=' foot-stacked-'+imbalance;
   if(isPoc)cls+=' foot-poc';
   if(inVa)cls+=' foot-va';
   if(absorbed)cls+=' foot-absorbed';
   if(unfinished)cls+=' foot-unfinished';
   if(offset+i===bars.length-1)cls+=' foot-forming';
-  // Each column reads as its candle: rows between open and close are the body (coloured by the bar's
-  // direction), traded rows outside it are the wick, and rows the bar never reached stay blank.
-  const part=candlePart(b,p,footprintStep());
+  const part=candlePart(b,p,step);
   cls+=' candle-'+part+(part==='body'?(b.c>=b.o?' candle-up':' candle-down'):'');
-  const marks=[isPoc?'POC':'',inVa?'зона стоимости':'',imbalance?(imbalance==='buy'?'имбаланс покупателей':'имбаланс продавцов'):'',absorbed?'поглощение':'',unfinished?'незакрытый аукцион':''].filter(Boolean).join(' · ');
-  return `<button class="foot-cell ${cls} ${offset+i===selected?'active':''}" data-index="${offset+i}" style="--intensity:${intensity.toFixed(3)}" title="Бид ${v.bid}; аск ${v.ask}; без стороны ${v.unknown}${marks?' · '+marks:''}" aria-label="Свеча ${offset+i+1}, цена ${fmt(p)}, бид ${v.bid}, аск ${v.ask}, без стороны ${v.unknown}${marks?', '+marks:''}">${content}${isPoc?'<i class="poc-mark">◆</i>':''}</button>`;}).join('')}${(()=>{
-  const row=profileRows.get(Number(p).toFixed(2));
+  const marks=[isPoc?'POC':'',inVa?'зона стоимости':'',imbalance?(imbalance==='buy'?'имбаланс покупателей':'имбаланс продавцов'):'',stacked?'стек имбалансов':'',absorbed?'поглощение':'',unfinished?'незакрытый аукцион':'',v.unknown>0?'неопределённая сторона: '+fmt(v.unknown,0):''].filter(Boolean).join(' · ');
+  const title='Бид '+v.bid+'; аск '+v.ask+'; без стороны '+v.unknown+(marks?' · '+marks:'');
+  const aria='Свеча '+(offset+i+1)+', цена '+priceLabel(p)+', бид '+v.bid+', аск '+v.ask+', без стороны '+v.unknown+(marks?', '+marks:'');
+  return '<button class="foot-cell '+cls+' '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'" data-price="'+p+'" data-bid="'+v.bid+'" data-ask="'+v.ask+'" data-unknown="'+v.unknown+'" style="--intensity:'+intensity.toFixed(3)+'" title="'+title.replace(/"/g,'&quot;')+'" aria-label="'+aria.replace(/"/g,'&quot;')+'" '+(empty?'disabled aria-hidden="true"':'')+'>'+content+(isPoc?'<i class="poc-mark">◆</i>':'')+'</button>';
+ }).join('')+(function(){
+  const row=profileRows.get(Number(p).toFixed(8));
   if(!row||!row.total)return '<div class="foot-profile empty"></div>';
   const isPoc=va&&near(currentProfile.poc,p),inVa=va&&p<=va.high+1e-9&&p>=va.low-1e-9;
   const isVah=va&&near(va.high,p),isVal=va&&near(va.low,p);
   const width=Math.max(1,Math.round(100*row.total/profileMax));
-  return `<div class="foot-profile ${inVa?'va':''} ${isPoc?'poc':''}" title="Профиль сессии: ${fmt(row.total,0)} · ${isPoc?'POC':'внутри зоны стоимости'}"><i style="width:${width}%"></i>${isVah?'<b>VAH</b>':isVal?'<b>VAL</b>':isPoc?'<b>POC</b>':''}</div>`;
- })()}</div>`).join('');
- const deltas=`<div class="foot-row foot-deltas" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">Δ СВЕЧИ</div>${feet.map((b,i)=>{const d=b.unknown>0?null:(b.delta??barDelta(b));return `<div class="foot-delta ${d===null?'':d>=0?'positive':'negative'} ${offset+i===selected?'active':''}">${d===null?'—':((d>0?'+':'')+fmt(d,0))}</div>`;}).join('')}<div class="foot-profile-total">${currentProfile?fmt(currentProfile.volume,0):'—'}</div></div>`;
- const times=`<div class="foot-row foot-times" style="grid-template-columns:${template};min-width:${minWidth}px"><div class="price-level">ВРЕМЯ</div>${visible.map((b,i)=>`<button class="bar-time ${offset+i===selected?'active':''}" data-index="${offset+i}">${timeLabel(b.time,{hour:'2-digit',minute:'2-digit',timeZone:'UTC'},'toLocaleTimeString')}</button>`).join('')}<div class="foot-profile-head">СЕССИЯ</div></div>`;
- grid.innerHTML=`<div class="footprint-table" style="min-width:${minWidth}px;--footprint-row-height:${rowHeight}px">${head}${deltas}${rows}${times}</div>`;
+  return '<div class="foot-profile '+(inVa?'va ':'')+(isPoc?'poc':'')+'" title="Профиль сессии: '+fmt(row.total,0)+' · '+(isPoc?'POC':'внутри зоны стоимости')+'"><i style="width:'+width+'%"></i>'+(isVah?'<b>VAH</b>':isVal?'<b>VAL</b>':isPoc?'<b>POC</b>':'')+'</div>';
+ })()+'</div>').join('');
+ const deltas='<div class="foot-row foot-deltas" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">Δ СВЕЧИ</div>'+feet.map((b,i)=>{const d=b.unknown>0?null:(b.delta??barDelta(b));return '<div class="foot-delta '+(d===null?'':d>=0?'positive':'negative')+' '+(offset+i===selected?'active':'')+'">'+(d===null?'—':((d>0?'+':'')+fmt(d,0)))+'</div>';}).join('')+'<div class="foot-profile-total">'+(currentProfile?fmt(currentProfile.volume,0):'—')+'</div></div>';
+ const times='<div class="foot-row foot-times" style="grid-template-columns:'+template+';min-width:'+minWidth+'px"><div class="price-level">ВРЕМЯ</div>'+visible.map((b,i)=>'<button class="bar-time '+(offset+i===selected?'active':'')+'" data-index="'+(offset+i)+'">'+timeLabel(b.time,{hour:'2-digit',minute:'2-digit',timeZone:'UTC'},'toLocaleTimeString')+'</button>').join('')+'<div class="foot-profile-head">СЕССИЯ</div></div>';
+ grid.innerHTML=sourceStatus+'<div class="footprint-table" style="min-width:'+minWidth+'px;--footprint-row-height:'+rowHeight+'px">'+head+deltas+rows+times+'</div>';
  updateFootprintZoomControls();
- // Keep the latest price in view unless the trader scrolled the panel themselves.
+ // Keep the newest traded price in view unless the trader has taken over scrolling.
  if(grid.dataset.autoScroll!=='0'){
-  const target=grid.querySelector('.foot-cell.foot-forming.foot-poc')||[...grid.querySelectorAll('.foot-cell.foot-forming')].find(node=>node.textContent.trim());
+  const target=grid.querySelector('.foot-cell.foot-forming.foot-poc')||[...grid.querySelectorAll('.foot-cell.foot-forming:not(.empty-level)')].find(node=>node.textContent.trim());
   if(target){const row=target.closest('.foot-row'),box=grid.getBoundingClientRect(),rect=row.getBoundingClientRect();
    if(rect.top<box.top+50||rect.bottom>box.bottom-50)grid.scrollTop+=rect.top-box.top-Math.round((box.height-rect.height)/2);}
  }

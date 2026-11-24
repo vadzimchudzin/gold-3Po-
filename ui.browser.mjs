@@ -81,6 +81,18 @@ try {
   assert.ok(await page.locator('.candle').count() >= 30, 'live chart should render the ingested 30-day broker history');
   assert.equal(await page.locator('#chartEmpty').isHidden(), true, 'empty state must disappear once broker data arrives');
   assert.ok(await page.locator('.zone-row').count() > 0, 'liquidity zones should appear once broker history arrives');
+  await page.waitForSelector('.footprint-source-status', { timeout:5000 });
+  const dataProvenance = await page.evaluate(() => ({
+    status: document.querySelector('.footprint-source-status')?.innerText || '',
+    headers: [...document.querySelectorAll('#footprintGrid .bar-head')].map(node => ({
+      ticks: Number(node.dataset.sourceTicks),
+      levels: Number(node.dataset.sourceLevels)
+    }))
+  }));
+  assert.match(dataProvenance.status, /MT5 OTC.*ТИКОВАЯ АКТИВНОСТЬ.*НЕ БИРЖЕВОЙ ОБЪЁМ/, 'OTC data must not be represented as exchange trade volume');
+  assert.match(dataProvenance.status, /РЕДКИЕ ДАННЫЕ/, 'sparse source history must be called out instead of looking like a complete footprint');
+  assert.match(dataProvenance.status, /не интерполируются/, 'missing price levels must never be filled from OHLC');
+  assert.ok(dataProvenance.headers.length > 0 && dataProvenance.headers.every(item => item.levels >= 0 && item.ticks >= 0), 'each candle header must expose the number of actual source ticks and price levels');
   const chartWidthBeforeZoom=await page.locator('#priceChart').evaluate(el=>el.getBoundingClientRect().width);
   await page.locator('#chartZoomIn').click();
   const chartWidthAfterZoom=await page.locator('#priceChart').evaluate(el=>el.getBoundingClientRect().width);
@@ -144,8 +156,24 @@ try {
   assert.ok(buyTexts.includes('9') && buyTexts.includes('2') && sellTexts.includes('3') && sellTexts.includes('7'), 'buy shows the ask side and sell the bid side: ' + buyTexts.join(' ') + ' / ' + sellTexts.join(' '));
   assert.notDeepEqual(buyTexts, sellTexts, 'buy and sell modes show different sides of the rows');
   await page.locator('#footprintModes [data-mode="bidask"]').click();
+  const clusterRender = await page.evaluate(() => {
+    const cells = [...document.querySelectorAll('.foot-cell.bidask:not(.empty-level)')];
+    const values = side => cells.flatMap(cell => [...cell.querySelectorAll('.foot-side[data-side="' + side + '"]')])
+      .filter(node => Number(node.textContent.trim()) > 0);
+    const bid = values('bid'), ask = values('ask');
+    return {
+      cells: cells.length,
+      bid: bid.length,
+      ask: ask.length,
+      bidHeat: bid.some(node => Number(node.style.getPropertyValue('--side-intensity')) > 0),
+      askHeat: ask.some(node => Number(node.style.getPropertyValue('--side-intensity')) > 0)
+    };
+  });
+  assert.ok(clusterRender.cells > 0, 'traded price rows render as footprint clusters');
+  assert.ok(clusterRender.bid > 0 && clusterRender.ask > 0, 'each cluster keeps separate Bid and Ask values');
+  assert.ok(clusterRender.bidHeat && clusterRender.askHeat, 'Bid and Ask heatmaps use independent volume intensity');
   await page.locator('#numbersToggle').click();
-  assert.ok(await page.locator('.foot-cell').first().innerText().then(v => v.trim()).then(v => v === ''), 'number toggle should hide cell values');
+  assert.ok(await page.locator('.foot-cell:not(.empty-level)').first().innerText().then(v => v.trim()).then(v => v === ''), 'number toggle should hide cell values');
   await page.locator('#numbersToggle').click();
 
   // Footprint math: POC, value area, session profile, delta row and the markers are on screen.
@@ -182,7 +210,7 @@ try {
   assert.ok(await formingVolume() >= beforeTick + 9, 'the forming bar must absorb the tick volume immediately');
   assert.ok(await page.locator('.foot-cell.foot-forming').count() > 0, 'the forming column survives the tick');
 
-  const firstCell = page.locator('.foot-cell').first();
+  const firstCell = page.locator('.foot-cell:not(.empty-level)').first();
   const firstIndex = Number(await firstCell.getAttribute('data-index'));
   await firstCell.click();
   assert.match(await page.locator('#selectedBar').innerText(), new RegExp('#'+String(firstIndex+1).padStart(3,'0')));

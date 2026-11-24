@@ -346,3 +346,100 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 .trading-layout .footprint-zoom-controls button{padding:4px 5px;font-size:8px}
 @media(max-width:1120px){.trading-layout .chart-column{grid-template-columns:minmax(0,1fr);gap:14px}.trading-layout .price-panel,.trading-layout .footprint-panel{grid-column:1}.trading-layout .panel-resizer{display:none}}
 @media(max-width:850px){.trading-layout .chart-column{display:flex}.footprint-zoom-controls button{padding:4px 5px}}
+
+/* Stage 1 cluster renderer: independent Bid/Ask heat, explicit unknown flow and clean empty ladder cells. */
+.foot-cell.bidask{
+ background-image:none!important;
+ display:grid;
+ grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+ gap:1px;
+ padding:1px;
+ overflow:hidden;
+ background:var(--surface-2);
+}
+.foot-cell.bidask .foot-side{
+ display:flex;
+ align-items:center;
+ min-width:0;
+ height:100%;
+ overflow:hidden;
+ padding:0 2px;
+ white-space:nowrap;
+ font:inherit;
+ font-variant-numeric:tabular-nums;
+}
+.foot-cell.bidask .bid-side{
+ justify-content:flex-end;
+ color:#ffe4e7;
+ background:rgba(220,104,120,var(--side-intensity,0));
+}
+.foot-cell.bidask .ask-side{
+ justify-content:flex-start;
+ color:#ddfff4;
+ background:rgba(73,190,158,var(--side-intensity,0));
+}
+.foot-cell.bidask .foot-side:empty{background:transparent}
+.foot-cell.bidask .foot-unknown{
+ position:absolute;
+ z-index:2;
+ color:#fff0c9;
+ font:600 7px var(--mono);
+ line-height:1;
+ pointer-events:none;
+}
+.foot-cell.bidask .foot-unknown.mixed{
+ top:1px;
+ right:2px;
+ padding:1px 2px;
+ border-radius:2px;
+ background:#33291f;
+}
+.foot-cell.bidask .foot-unknown.only{
+ inset:0;
+ display:grid;
+ place-items:center;
+ background:rgba(120,130,150,.24);
+ color:#e2e7ee;
+ font-size:8px;
+}
+.foot-cell.bidask.unknown-only{background:rgba(120,130,150,.16)}
+.foot-cell.empty-level{
+ opacity:0!important;
+ background:transparent!important;
+ border-color:transparent!important;
+ box-shadow:none!important;
+ outline:none!important;
+ pointer-events:none!important;
+}
+.foot-cell.foot-stacked-buy{box-shadow:inset 0 0 0 1px var(--cyan),inset 0 0 8px rgba(73,190,158,.16)}
+.foot-cell.foot-stacked-sell{box-shadow:inset 0 0 0 1px var(--red),inset 0 0 8px rgba(220,104,120,.16)}
+.foot-cell.foot-absorbed{border-bottom:1px dotted var(--gold)}
+.foot-cell.foot-unfinished{border-left:1px dashed var(--gold);border-right:1px dashed var(--gold)}
+@media(max-width:700px){
+ .foot-cell.bidask .foot-side{padding:0 1px;font-size:7px}
+ .foot-cell.bidask .foot-unknown.mixed{font-size:6px}
+}
+
+/* Source provenance and sparse-history warning: never disguise missing ticks as a full cluster. */
+.footprint-source-status{
+ display:flex;
+ align-items:center;
+ justify-content:space-between;
+ flex-wrap:wrap;
+ gap:6px 14px;
+ margin:0 12px 8px;
+ padding:7px 9px;
+ border:1px solid var(--line);
+ border-radius:5px;
+ color:var(--muted);
+ background:rgba(255,255,255,.018);
+ font:8px var(--mono);
+ letter-spacing:.025em;
+}
+.footprint-source-status strong{font-weight:600;color:var(--muted)}
+.footprint-source-status span{color:var(--muted-2)}
+.footprint-source-status.is-sparse{border-color:rgba(255,199,153,.32);background:rgba(255,199,153,.045)}
+.footprint-source-status.is-sparse strong,.footprint-source-status.is-sparse span{color:#ffc799}
+.footprint-source-status.is-dense{border-color:rgba(153,255,228,.2)}
+.footprint-source-status.is-dense strong{color:var(--cyan)}
+@media(max-width:700px){.footprint-source-status{align-items:flex-start;flex-direction:column;margin-left:8px;margin-right:8px;font-size:7px}}
