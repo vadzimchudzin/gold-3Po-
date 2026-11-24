@@ -471,10 +471,32 @@ void SetZonesStatus(const string text)
    ObjectSetString(0, name, OBJPROP_TEXT, text);
 }
 
+string UrlEncodeUtf8(const string value)
+{
+   uchar bytes[];
+   int count = StringToCharArray(value, bytes, 0, WHOLE_ARRAY, CP_UTF8);
+   if(count <= 1) return "";
+   string encoded = "";
+   for(int i=0; i<count-1; i++)
+   {
+      uchar ch = bytes[i];
+      bool safe = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~';
+      if(safe) encoded += CharToString(ch);
+      else encoded += StringFormat("%%%02X", (int)ch);
+   }
+   return encoded;
+}
+
 void RefreshZones()
 {
    string response;
-   string url = ZonesUrl + "?symbol=" + _Symbol + "&source=mt5";
+   string accountServer = AccountInfoString(ACCOUNT_SERVER);
+   StringTrimLeft(accountServer);
+   StringTrimRight(accountServer);
+   string accountLogin = StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
+   string url = ZonesUrl + "?symbol=" + _Symbol + "&source=mt5&accountLogin=" + accountLogin +
+                "&accountServer=" + UrlEncodeUtf8(accountServer);
    if(!GetJson(url, response))
    {
       DeleteZoneObjects();
