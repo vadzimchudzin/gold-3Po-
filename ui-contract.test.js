@@ -92,10 +92,11 @@ test('EA bridge token is kept out of renderer IPC and handed to MT5 automaticall
 test('live quote strip displays BID, ASK and spread only for the active MT5 account',async()=>{
  const client=await readFile(new URL('./market-client.js',import.meta.url),'utf8');
  const quote=await readFile(new URL('./quote-display.js',import.meta.url),'utf8');
- for(const id of ['bidPrice','askPrice','spreadPrice','referencePrice'])assert.ok(html.includes('id="'+id+'"'),'Missing live quote target '+id);
+ for(const id of ['bidPrice','askPrice','spreadPrice','referencePrice','feedConflict'])assert.ok(html.includes('id="'+id+'"'),'Missing live quote target '+id);
  assert.ok(client.includes("window.addEventListener('market-tick'"));
- assert.ok(client.includes('const activeFeedId=marketFeedId()'));
- assert.ok(client.includes('tick.feedId!==activeFeedId'));
+ assert.ok(client.includes('function activeFeedId(){return feedOverride||displayedFeedId||marketFeedId()||null;}'),'the strip, the stream and the chart agree on the feed on screen');
+ assert.ok(client.includes("(tick.feedId||null)!==(shownFeedId||null)"),'streamed ticks follow the displayed feed');
+ assert.ok(client.includes('function activeFeedId()'),'one definition of the feed on screen');
  // The strip and the reference price share one ordering gate and one formatter, so a replayed or
  // late frame cannot move a quote backwards and every field prints the same decimals.
  assert.match(client,/paintQuote\(quotes\.accept\(tick\)\)/);

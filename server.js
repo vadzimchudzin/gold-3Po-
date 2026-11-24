@@ -100,6 +100,20 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     if (!/^[0-9]{1,20}$/.test(login) || !server || server.length > 128) return null;
     return createHash('sha256').update([server, login, symbol.trim().toUpperCase()].join('|')).digest('hex').slice(0, 32);
   }
+  // The chart must show the data the terminal is streaming right now. An unqualified request is
+  // therefore resolved to the feed with the newest event instead of "whatever account was ingested
+  // last": a leftover bucket written without account metadata must never win over a live account.
+  function newestFeed(source, symbol) {
+    let best = null, bestTime = -1, bestBound = false;
+    for (const [feedId, item] of feedQuoteIndex(source, symbol)) {
+      const bound = feedId !== null;
+      if (item.timeMs > bestTime) { best = feedId; bestTime = item.timeMs; bestBound = bound; continue; }
+      // Same tick time: an account-bound feed beats an unattached one, and between two accounts the
+      // one ingested last is the live one.
+      if (item.timeMs === bestTime && (bound ? !bestBound || bestBound : false)) { best = feedId; bestBound = bound; }
+    }
+    return bestTime < 0 ? undefined : best;
+  }
   function selectFeedEvents(source, symbol, url) {
     const requested = url.searchParams.get('feedId');
     if (requested !== null && requested !== 'legacy' && !/^[a-f0-9]{32}$/i.test(requested)) return null;
@@ -107,8 +121,10 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       accountLogin: url.searchParams.get('accountLogin'),
       accountServer: url.searchParams.get('accountServer')
     }, symbol) : null;
+    const newest = requested === null ? newestFeed(source, symbol) : undefined;
     const feedId = requested === 'legacy' ? null
       : requested !== null ? requested
+      : newest !== undefined ? newest
       : accountFeedId ?? activeFeeds.get(feedScopeKey(source, symbol))?.feedId ?? null;
     if (feedId) activeFeeds.set(feedScopeKey(source, symbol), { feedId, receivedAt: now() });
     return { feedId, events: events.filter(event =>
@@ -194,6 +210,38 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
   // analysis step. The user's row grouping is applied on top of this, never instead.
   function footprintStepFor(source, symbol, feedId, analysisStep) {
     return symbolSpecs.get(feedSequenceKey(source, symbol, feedId))?.tickSize ?? analysisStep;
+  }
+  // One XAUUSD symbol can be fed by several MT5 accounts at once, each with its own price level.
+  // The newest price per feed is what makes a "the app says 4000, the terminal says 3600" report
+  // attributable instead of invisible.
+  function feedQuoteIndex(source, symbol) {
+    const index = new Map();
+    for (const event of events) {
+      if (event.source !== source || event.symbol !== symbol) continue;
+      const price = Number.isFinite(event.last) ? event.last : Number.isFinite(event.bid) ? event.bid : null;
+      if (!(price > 0)) continue;
+      const key = event.feedId || null;
+      const timeMs = Date.parse(event.timestamp) || 0;
+      const entry = index.get(key);
+      if (!entry || timeMs >= entry.timeMs) index.set(key, { feedId: key, price, timeMs, timestamp: event.timestamp });
+    }
+    return index;
+  }
+  // Two accounts quoting the same instrument more than 1.5% apart are not the same market: the
+  // app is showing one of them, the terminal may be showing the other.
+  const PRICE_CONFLICT_RATIO = 1.015;
+  function priceConflictOf(feedPrices) {
+    if (feedPrices.length < 2) return null;
+    const levels = feedPrices.map(feed => feed.price).filter(price => Number.isFinite(price) && price > 0);
+    if (levels.length < 2) return null;
+    const low = Math.min(...levels), high = Math.max(...levels);
+    if (!(low > 0) || high / low < PRICE_CONFLICT_RATIO) return null;
+    return {
+      ratio: Number((high / low).toFixed(4)),
+      low,
+      high,
+      feeds: feedPrices.map(feed => ({ feedId: feed.feedId, price: feed.price, timestamp: feed.timestamp, active: feed.active }))
+    };
   }
   // The analysis grid for zones and bar heuristics: the caller's priceStep, otherwise 0.1.
   function analysisStep(requested) {
@@ -305,11 +353,21 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const lastQuote = selected.reduce((latest, event) =>
         !latest || Date.parse(event.timestamp) > Date.parse(latest.timestamp) ? event : latest, null);
       const feed = health().feeds.find(f => f.source === source && f.symbol === symbol && (f.feedId || null) === feedId) || null;
+      const feedPrices = source === 'mt5'
+        ? [...feedQuoteIndex(source, symbol).values()]
+            .sort((a, b) => b.timeMs - a.timeMs)
+            .map(item => ({ feedId: item.feedId, price: item.price, timestamp: item.timestamp, ageMs: Math.max(0, now() - item.timeMs), active: (item.feedId || null) === (feedId || null) }))
+        : [];
       return json(res, 200, {
         symbol, source, feedId, intervalMs, timeframeMinutes: intervalMs / 60000,
         ...buildMarketAnalysis(selected, { intervalMs, priceStep, footprintStep, zoneOptions: current.zones, footprintOptions: current.footprint }),
         lastQuote: lastQuote && source === 'mt5' ? { bid: lastQuote.bid, ask: lastQuote.ask, last: lastQuote.last, timestamp: lastQuote.timestamp, receivedAt: lastQuote.receivedAt } : null,
-        feed
+        feed,
+        // The feed the terminal is streaming right now, whatever this request asked for, so a client
+        // pinned to a silent account can follow the live one instead of showing a stale level.
+        liveFeedId: source === 'mt5' ? newestFeed(source, symbol) ?? null : null,
+        feedPrices,
+        priceConflict: priceConflictOf(feedPrices)
       });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/replay') {

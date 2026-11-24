@@ -597,3 +597,57 @@ test('a tick on the single-tick route uses the same broker grid as the batches f
   const reset = await (await fetch(base + '/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json();
   assert.equal(reset.footprintStep, 0.1, 'after disconnect the previous broker grid is no longer retained');
 });
+
+test('analysis names every MT5 account feeding one symbol and flags conflicting price levels',async()=>{
+  // 4000 against 3600: the shape of "the app shows 4000, my terminal shows 3600".
+  const rich='c'.repeat(32),spot='d'.repeat(32);
+  const timestamp=new Date(Date.now()-30000).toISOString();
+  const post=async(feedId,last,sequence)=>fetch(base+'/v1/ingest/mt5/history',{
+    method:'POST',headers:auth,body:JSON.stringify({source:'mt5',symbol:'XAUUSD',feedId,ticks:[{
+      timestamp,sequence,bid:last-0.2,ask:last+0.2,last,tickVolume:2,realVolume:0,flags:0
+    }]})
+  });
+  assert.equal((await post(rich,4000,1)).status,202);
+  assert.equal((await post(spot,3600,1)).status,202);
+
+  const data=await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json();
+  const priced=new Map(data.feedPrices.map(item=>[item.feedId,item.price]));
+  assert.equal(priced.get(rich),4000,'every account feeding the symbol is reported with its own level');
+  assert.equal(priced.get(spot),3600);
+  assert.equal(data.feedPrices.filter(item=>item.active).length,1,'exactly one feed is the one on screen');
+  assert.equal(data.feedPrices.find(item=>item.active).feedId,data.feedId);
+
+  assert.ok(data.priceConflict,'levels more than 1.5% apart must be flagged');
+  assert.ok(data.priceConflict.ratio>=1.015);
+  assert.equal(data.priceConflict.low,Math.min(...data.feedPrices.map(item=>item.price)));
+  assert.equal(data.priceConflict.high,Math.max(...data.feedPrices.map(item=>item.price)));
+  assert.ok(data.priceConflict.feeds.some(item=>item.feedId===rich),'the conflict names the accounts, it does not just warn');
+  assert.ok(data.priceConflict.feeds.some(item=>item.feedId===spot));
+
+  const pinned=await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&feedId='+spot+'&intervalMs=900000')).json();
+  assert.equal(pinned.bars.at(-1).c,3600,'pinning a feed still shows that account only');
+  assert.equal(pinned.feedPrices.find(item=>item.active).feedId,spot);
+});
+
+test('an unqualified analysis follows the live feed instead of a stale legacy bucket',async()=>{
+  // The reported symptom: the app shows 4100 while the terminal streams 3600. The 4100 sits in the
+  // bucket written without account metadata; the account feed is the live one.
+  const account='e'.repeat(32);
+  const post=async(feedId,last,timestamp)=>fetch(base+'/v1/ingest/mt5/history',{
+    method:'POST',headers:auth,body:JSON.stringify({source:'mt5',symbol:'XAUUSD',feedId,ticks:[{
+      timestamp,sequence:1,bid:last-0.2,ask:last+0.2,last,tickVolume:2,realVolume:0,flags:0
+    }]})
+  });
+  const ahead=new Date(Date.now()+60000).toISOString();
+  const stale=new Date(Date.now()-3600000).toISOString();
+  assert.equal((await post(null,4100,stale)).status,202,'an old bucket without account metadata');
+  assert.equal((await post(account,3600,ahead)).status,202,'the terminal keeps streaming this account');
+
+  const live=await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&intervalMs=900000')).json();
+  assert.equal(live.feedId,account,'the chart must follow the newest feed, not the legacy bucket');
+  assert.equal(live.bars.at(-1).c,3600,'the app shows the terminal price, not 4100');
+
+  const legacy=await (await fetch(base+'/v1/market/analysis?symbol=XAUUSD&feedId=legacy&intervalMs=900000')).json();
+  assert.equal(legacy.feedId,null,'an explicit legacy request still reads the unattached bucket');
+  assert.equal(legacy.bars.at(-1).c,4100,'and that data is kept, it is just not shown by default');
+});
