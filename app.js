@@ -190,14 +190,18 @@ function renderChart(){
  const zGlow=zs.glow!==false;
  let html=`<defs><linearGradient id="zg-buy" x1="0" x2="1"><stop offset="0%" stop-color="${zBuyCol}" stop-opacity="${zBaseOp.toFixed(2)}"/><stop offset="100%" stop-color="${zBuyCol}" stop-opacity="${(zBaseOp*0.28).toFixed(2)}"/></linearGradient><linearGradient id="zg-sell" x1="0" x2="1"><stop offset="0%" stop-color="${zSellCol}" stop-opacity="${zBaseOp.toFixed(2)}"/><stop offset="100%" stop-color="${zSellCol}" stop-opacity="${(zBaseOp*0.28).toFixed(2)}"/></linearGradient><pattern id="zg-stripe" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="8" stroke="#ffffff" stroke-width="1.2" stroke-opacity=".28"/></pattern></defs>`;
  for(let p=Math.ceil(min/gridStep)*gridStep;p<=max;p+=gridStep)html+=`<line x1="${left}" y1="${y(p)}" x2="${left+width}" y2="${y(p)}" class="grid-line"/><text x="${left+width+12}" y="${y(p)+4}" class="axis-label">${fmt(p,gridStep<1?2:gridStep<10?1:0)}</text>`;
- if(showZones)for(const z of zones){
-  const top=y(z.high),bot=y(z.low),h=Math.max(4,bot-top),c=z.side==='buy'?'zone-buy':'zone-sell';
+ let lastLabelY=-Infinity;
+ const sortedZones=showZones?[...zones].map(z=>({z,top:y(z.high),bot:y(z.low)})).sort((a,b)=>a.top-b.top):[];
+ for(const {z,top,bot} of sortedZones){
+  const h=Math.max(4,bot-top),c=z.side==='buy'?'zone-buy':'zone-sell';
   const col=z.side==='buy'?zBuyCol:zSellCol,gradId=z.side==='buy'?'zg-buy':'zg-sell';
   const op=clamp(zBaseOp*(0.65+Number(z.strength||0.5)*0.7),0.06,0.75);
   const fillAttr=zFillStyle==='outline'?'none':zFillStyle==='gradient'?`url(#${gradId})`:col;
   const fillOp=zFillStyle==='outline'?0:zFillStyle==='gradient'?1:op;
   const isSel=selectedZone===z.id,isHov=hoveredZone===z.id;
-  const lbl=zs.showLabels!==false?`<text x="${left+width-8}" y="${top-4}" text-anchor="end" class="zone-chart-label" fill="${col}">${zoneLabelText(z.label)}${zs.showStrength!==false?' · '+Math.round((z.strength||0)*100)+'%':''}</text>`:'';
+  const crowded=!isSel&&!isHov&&(top-lastLabelY)<14;
+  if(!crowded)lastLabelY=top;
+  const lbl=zs.showLabels!==false?`<text x="${left+width-8}" y="${top-4}" text-anchor="end" class="zone-chart-label ${crowded?'is-crowded':''}" fill="${col}">${zoneLabelText(z.label)}${zs.showStrength!==false?' · '+Math.round((z.strength||0)*100)+'%':''}</text>`:'';
   html+=`<g class="chart-zone ${c} ${isSel?'selected-zone':''} ${isHov?'is-hovered':''} ${zGlow?'has-glow':''}" data-zone-id="${z.id}" style="--zone-color:${col}"><rect x="${left}" y="${top}" width="${width}" height="${h}" class="zone-body ${c}" fill="${fillAttr}" fill-opacity="${fillOp.toFixed(3)}"/>${zFillStyle==='stripe'?`<rect x="${left}" y="${top}" width="${width}" height="${h}" class="zone-stripe" fill="url(#zg-stripe)" opacity="${Math.min(0.9,op*1.8).toFixed(2)}"/>`:''}<line x1="${left}" y1="${top}" x2="${left+width}" y2="${top}" class="zone-edge ${c}-edge" stroke="${col}" stroke-width="${zLineW}" ${zDash?`stroke-dasharray="${zDash}"`:''}/><line x1="${left}" y1="${top+h}" x2="${left+width}" y2="${top+h}" class="zone-edge-bot" stroke="${col}" stroke-width="${Math.max(1,zLineW-0.5)}" stroke-opacity=".55" ${zDash?`stroke-dasharray="${zDash}"`:''}/>${lbl}</g>`;
  }
  const multiDay=(Date.parse(bars.at(-1).time)-Date.parse(bars[0].time))>86400000;
@@ -210,9 +214,31 @@ function renderChart(){
  const last=bars.at(-1),py=y(last.c);html+=`<line x1="${left}" y1="${py}" x2="${left+width}" y2="${py}" class="last-price-line"/><rect x="${left+width-2}" y="${py-11}" width="70" height="22" rx="5" class="last-price-tag"/><text x="${left+width+33}" y="${py+4}" text-anchor="middle" class="last-price-text">${fmt(last.c)}</text>`;
  chart.setAttribute('viewBox',`0 0 ${svgWidth} 390`);chart.style.width=svgWidth+'px';chart.innerHTML=html;
  chart.classList.toggle('zone-hovering',!!hoveredZone);
+ liveChartState={count:bars.length,min,max,lastIndex:bars.length-1};
  renderDeltaPane(scale);
  updateChartZoomControls();
  if(live&&!hasAutoScrolled){chartViewport.scrollLeft=chartViewport.scrollWidth;hasAutoScrolled=true;}
+}
+// Fast-path live candle patch: updates only the forming candle + price line/tag in ~0.2 ms
+// without rebuilding thousands of SVG nodes on every tick.
+let liveChartState=null;
+function patchLiveChart(){
+ const s=liveChartState;
+ if(!s||!bars.length||bars.length!==s.count)return false;
+ const b=bars[s.lastIndex];
+ if(!b||b.h>s.max||b.l<s.min||!(s.max>s.min))return false;
+ const g=chart.querySelector(`.candle[data-index="${s.lastIndex}"]`);
+ if(!g)return false;
+ const y=p=>34+(s.max-p)/(s.max-s.min)*315;
+ const up=b.c>=b.o,top=Math.min(y(b.o),y(b.c)),h=Math.max(1.5,Math.abs(y(b.o)-y(b.c))),py=y(b.c);
+ const wick=g.querySelector('.wick'),body=g.querySelector('rect:not(.hit-area)');
+ if(wick){wick.setAttribute('y1',y(b.h));wick.setAttribute('y2',y(b.l));wick.setAttribute('class','wick '+(up?'wick-up':'wick-down'));}
+ if(body){body.setAttribute('y',top);body.setAttribute('height',h);body.setAttribute('class',up?'candle-up':'candle-down');}
+ const line=chart.querySelector('.last-price-line'),tag=chart.querySelector('.last-price-tag'),txt=chart.querySelector('.last-price-text');
+ if(line){line.setAttribute('y1',py);line.setAttribute('y2',py);}
+ if(tag)tag.setAttribute('y',py-11);
+ if(txt){txt.setAttribute('y',py+4);txt.textContent=fmt(b.c);}
+ return true;
 }
 let hoveredZone=null;
 function setHoveredZone(id){
@@ -606,11 +632,11 @@ const FOOTPRINT_REFRESH_MS=10000;
 let liveFrame=0,liveRenderedAt=0,lastFootprintAutoAt=0,lastLiveTick=null,liveRuleBid=null,liveRuleAsk=null,liveRuleSide=null;
 function scheduleLiveRender(){
  if(liveFrame)return;
- const wait=Math.max(0,350-(performance.now()-liveRenderedAt));
+ const wait=Math.max(0,180-(performance.now()-liveRenderedAt));
  liveFrame=setTimeout(()=>{
   liveFrame=0;
   liveRenderedAt=performance.now();
-  renderChart();
+  if(!patchLiveChart())renderChart();
   if(selected===bars.length-1)renderInspector();
   // Refresh the footprint at most once every 10 seconds in the background (or instantly via #footRefresh),
   // eliminating DOM/layout stutter during active gold sessions.

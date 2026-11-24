@@ -11,7 +11,7 @@ const ZONE_STYLE_PRESETS = {
   minimal:  { buyColor: '#EF4444', sellColor: '#22C55E', lineStyle: 'dot',   lineWidth: 1, fill: false, fillStyle: 'outline',  fillOpacity: 0.10, glow: false, showLabels: false, showStrength: false }
 };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
-const TF_LABEL = { 5: '5m', 15: '15m', 30: '30m', 60: '1h', 240: '4h' };
+const TF_LABEL = { 5: '5м', 15: '15м', 30: '30м', 60: '1ч', 240: '4ч' };
 const DASH = { solid: '', dash: '10 6', dot: '2 5', dashdot: '10 5 2 5' };
 
 let settings = structuredClone(DEFAULTS);
@@ -88,7 +88,7 @@ function render() {
   const stepSel = $('footClusterStep');
   if (stepSel) stepSel.value = f.autoStep ? 'auto' : String(f.ticksPerRow ?? 1);
   setSeg('setTheme', settings.ui.theme);
-  document.querySelectorAll('.timeframe-label').forEach(el => { el.textContent = `${TF_LABEL[z.timeframeMinutes] || z.timeframeMinutes + 'm'} · BROKER TICKS`; });
+  document.querySelectorAll('.timeframe-label').forEach(el => { const cap = TF_LABEL[z.timeframeMinutes] || (z.timeframeMinutes + 'м'); el.textContent = el.classList.contains('footprint-timeframe') ? `${cap} · ЕДИНЫЙ ТФ` : `${cap} · ТИКИ БРОКЕРА`; });
   preview();
 }
 
