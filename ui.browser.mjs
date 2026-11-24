@@ -198,7 +198,7 @@ try {
   assert.ok(await formingVolume() >= beforeTick + 9, 'the forming bar must absorb the tick volume immediately');
   assert.ok(await page.locator('.foot-cell.foot-forming').count() > 0, 'the forming column survives the tick');
 
-  const firstCell = page.locator('.foot-cell').first();
+  const firstCell = page.locator('.foot-cell:not(.empty-level)').first();
   const firstIndex = Number(await firstCell.getAttribute('data-index'));
   await firstCell.click();
   assert.match(await page.locator('#selectedBar').innerText(), new RegExp('#'+String(firstIndex+1).padStart(3,'0')));

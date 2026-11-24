@@ -349,6 +349,7 @@ html[data-theme="glass-light"]{--v-accent:#d9a273;--v-cta-ink:#1a1611}
 
 /* Stage 1 cluster renderer: independent Bid/Ask heat, explicit unknown flow and clean empty ladder cells. */
 .foot-cell.bidask{
+ background-image:none!important;
  display:grid;
  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
  gap:1px;
