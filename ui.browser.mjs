@@ -144,8 +144,24 @@ try {
   assert.ok(buyTexts.includes('9') && buyTexts.includes('2') && sellTexts.includes('3') && sellTexts.includes('7'), 'buy shows the ask side and sell the bid side: ' + buyTexts.join(' ') + ' / ' + sellTexts.join(' '));
   assert.notDeepEqual(buyTexts, sellTexts, 'buy and sell modes show different sides of the rows');
   await page.locator('#footprintModes [data-mode="bidask"]').click();
+  const clusterRender = await page.evaluate(() => {
+    const cells = [...document.querySelectorAll('.foot-cell.bidask:not(.empty-level)')];
+    const values = side => cells.flatMap(cell => [...cell.querySelectorAll('.foot-side[data-side="' + side + '"]')])
+      .filter(node => Number(node.textContent.trim()) > 0);
+    const bid = values('bid'), ask = values('ask');
+    return {
+      cells: cells.length,
+      bid: bid.length,
+      ask: ask.length,
+      bidHeat: bid.some(node => Number(node.style.getPropertyValue('--side-intensity')) > 0),
+      askHeat: ask.some(node => Number(node.style.getPropertyValue('--side-intensity')) > 0)
+    };
+  });
+  assert.ok(clusterRender.cells > 0, 'traded price rows render as footprint clusters');
+  assert.ok(clusterRender.bid > 0 && clusterRender.ask > 0, 'each cluster keeps separate Bid and Ask values');
+  assert.ok(clusterRender.bidHeat && clusterRender.askHeat, 'Bid and Ask heatmaps use independent volume intensity');
   await page.locator('#numbersToggle').click();
-  assert.ok(await page.locator('.foot-cell').first().innerText().then(v => v.trim()).then(v => v === ''), 'number toggle should hide cell values');
+  assert.ok(await page.locator('.foot-cell:not(.empty-level)').first().innerText().then(v => v.trim()).then(v => v === ''), 'number toggle should hide cell values');
   await page.locator('#numbersToggle').click();
 
   // Footprint math: POC, value area, session profile, delta row and the markers are on screen.
