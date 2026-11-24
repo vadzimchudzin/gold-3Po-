@@ -256,18 +256,17 @@ def choose_gold_symbol(api, requested=None):
         match = next((name for name, _ in candidates if name.casefold() == requested.casefold()), None)
         if match:
             return match
-    # Prefer the broker's exact XAUUSD when present. Otherwise use one visible gold
-    # symbol only; never silently choose an arbitrary suffix if several are listed.
-    exact = next((name for name, _ in candidates if name.casefold() == "xauusd"), None)
-    if exact:
-        return exact
+    # The active chart symbol is not exposed by the terminal discovery flow.
+    # Choose only when Market Watch has exactly one visible gold instrument;
+    # an exact-name preference can still silently select a different chart symbol.
     visible = [name for name, is_visible in candidates if is_visible]
-    pool = visible or [name for name, _ in candidates]
-    if len(pool) == 1:
-        return pool[0]
-    if len(pool) > 1:
+    if len(visible) == 1:
+        return visible[0]
+    if len(visible) > 1 or len(candidates) > 1:
         raise WorkerError("ambiguous_gold_symbol",
-                          "В MT5 найдено несколько инструментов золота. Оставьте видимым только нужный XAUUSD в «Обзоре рынка» и повторите подключение.")
+                          "В MT5 найдено несколько инструментов золота. Оставьте видимым только нужный символ в «Обзоре рынка» и повторите подключение.")
+    if len(candidates) == 1:
+        return candidates[0][0]
     # Some older terminals only expose a symbol through symbol_info before it is in symbols_get().
     fallbacks = [requested] if requested else []
     fallbacks.extend(["XAUUSD", "GOLD"])

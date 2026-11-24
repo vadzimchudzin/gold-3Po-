@@ -108,13 +108,17 @@ class ConnectorTests(unittest.TestCase):
         self.assertNotIn("login", [call[0] for call in self.api.calls])
 
     def test_ambiguous_visible_gold_symbols_are_not_silently_guessed(self):
-        self.api.symbols_get = lambda: [
-            SimpleNamespace(name="XAUUSDm", visible=True),
-            SimpleNamespace(name="XAUUSD.pro", visible=True),
+        cases = [
+            [SimpleNamespace(name="XAUUSDm", visible=True),
+             SimpleNamespace(name="XAUUSD.pro", visible=True)],
+            [SimpleNamespace(name="XAUUSD", visible=True),
+             SimpleNamespace(name="XAUUSDm", visible=True)],
         ]
-        result = self.connect()
-        self.assertEqual(result["error"], "ambiguous_gold_symbol")
-        self.assertEqual(self.command("poll")["error"], "not_connected")
+        for symbols in cases:
+            self.api.symbols_get = lambda symbols=symbols: symbols
+            result = self.connect()
+            self.assertEqual(result["error"], "ambiguous_gold_symbol")
+            self.assertEqual(self.command("poll")["error"], "not_connected")
 
     def test_auto_discovery_requires_one_running_terminal(self):
         worker = connector.Worker(lambda: self.api, lambda: [])
