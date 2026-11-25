@@ -534,9 +534,14 @@ try {
   const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId: browserFeedId, spec: { tickSize: 0.01 }, ticks: [specTick] }) });
   assert.equal(specResponse.status, 202, 'a live batch with the broker tick size is accepted');
   await page.waitForFunction(() => document.querySelectorAll('#footprintGrid .price-level').length && [...document.querySelectorAll('#footprintGrid .price-level')].some(node => /2[\s\u00a0]?700,41/.test(node.textContent)), null, { timeout: 8000 });
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2700.43, aggressorSide: 'buy', tickVolume: 2, realVolume: 0 } })));
-  await page.waitForTimeout(600);
-  const liveRows = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .price-level')].map(node => node.textContent.replace(/[\s\u00a0]/g, '')));
+  // A background analysis refetch replaces the forming bar with the server's, which has never seen this
+  // client-side tick: re-send it until it survives a render.
+  let liveRows = [];
+  for (let attempt = 0; attempt < 6 && !liveRows.includes('2700,43'); attempt++) {
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2700.43, aggressorSide: 'buy', tickVolume: 2, realVolume: 0 } })));
+    await page.waitForTimeout(600);
+    liveRows = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .price-level')].map(node => node.textContent.replace(/[\s\u00a0]/g, '')));
+  }
   assert.ok(liveRows.includes('2700,43'), 'the forming bar must keep 2700.43 on the broker 0.01 grid, rows: ' + liveRows.join(' '));
   assert.ok(!liveRows.includes('2700,40'), 'the live tick must not be rounded onto the 0.1 grid');
 
