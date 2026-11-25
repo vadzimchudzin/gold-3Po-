@@ -539,3 +539,20 @@ input,select{transition:border-color var(--dur) var(--ease),background-color var
 .refresh-btn.spin{animation:gold-refresh-spin .7s linear}
 @keyframes gold-refresh-spin{to{transform:rotate(360deg)}}
 .panel-tools{flex-wrap:wrap;justify-content:flex-end}
+
+/* Canvas chart and footprint (TradingView-style navigation). */
+.price-chart-wrap{overflow:hidden;cursor:default;touch-action:none;padding:0}
+#priceChart{display:block;width:100%;height:clamp(380px,56vh,640px);touch-action:none;cursor:crosshair;user-select:none;-webkit-user-select:none}
+#priceChart.is-dragging{cursor:grabbing}
+#priceChart.is-scaling-price,.footprint-canvas.is-scaling-price{cursor:ns-resize}
+#priceChart.is-scaling-time{cursor:ew-resize}
+.footprint-wrap{position:relative;overflow:hidden;max-height:none;padding:0 6px 4px}
+.trading-layout .footprint-wrap{max-height:none}
+.footprint-canvas{display:block;width:100%;height:clamp(360px,58vh,700px);touch-action:none;cursor:crosshair;user-select:none;-webkit-user-select:none}
+.footprint-canvas.is-dragging{cursor:grabbing}
+.footprint-source-status{display:block;margin:6px 4px;padding:5px 8px;border:1px solid var(--line);border-radius:8px;font:8px var(--mono);letter-spacing:.06em;color:var(--muted)}
+.footprint-tip{position:absolute;z-index:3;max-width:260px;padding:6px 8px;border-radius:8px;background:rgba(16,16,16,.94);border:1px solid var(--line-strong);color:var(--text);font:10px var(--mono);pointer-events:none;white-space:normal}
+html[data-theme="glass-light"] .footprint-tip{background:rgba(255,255,255,.96)}
+.chart-hint{color:var(--muted-2)}
+.refresh-btn:disabled{opacity:.6;cursor:progress}
+.price-chart-wrap .chart-empty:not([hidden]){position:absolute;inset:0;background:var(--chart-bg)}

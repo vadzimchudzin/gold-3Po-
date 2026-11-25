@@ -55,7 +55,7 @@ function startWorker(command, args) {
 
 export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, makeWorker = startWorker, request = fetch, publish = publishSnapshot,
   now = () => Date.now(), pollMs = 1800, maxFailures = 5, maxBackoffMs = 30_000, staleAfterMs = 120_000, maxUnsent = 20_000,
-  reconnectMs = 0, licenseCheckMs = 0 }) {
+  reconnectMs = 0, licenseCheckMs = 0, historyHours = 24, backfillWindowSec = 30 * 60 }) {
   let session = null;
   // `wanted` is the operator's intent: set by connect(), cleared only by disconnect(). While it is set
   // and the bridge is down for any other reason (terminal restarted, MT5 not open yet, a slow read
@@ -168,13 +168,20 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       }
       await refreshLevels(owner, owner.dirty);
       owner.failures = 0;
+      // History is loaded beside the live feed: one bounded window per cycle, after the live ticks,
+      // so the chart is live from the first second and the archive fills in behind it.
+      await backfillStep(owner);
       const stale = owner.lastTickAt !== undefined && now() - owner.lastTickAt > staleAfterMs;
       const online = stale ? `Нет новых тиков более ${Math.round(staleAfterMs / 1000)} с: рынок закрыт или терминал не получает котировки.`
-        : !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'Вход подтверждён. Уровни обновляются по таймфрейму из настроек.';
+        : !owner.lastTick ? 'Вход подтверждён. Ожидаем котировки.' : 'Вход подтверждён. Поток живой, уровни обновляются по таймфрейму из настроек.';
+      const history = owner.backfill?.pending.length
+        ? ` История: загружено ${owner.backfill.done} из ${owner.backfill.total} окон, поток не ждёт.` : '';
       // The loss is reported once, for the outage that just ended; droppedTicks keeps the session total.
       const lost = owner.droppedThisOutage ? ` Потеряно тиков за время сбоя: ${owner.droppedThisOutage}.` : '';
       if (!owner.unsent?.length) owner.droppedThisOutage = 0;
-      set(owner, { state: 'online', feed: stale ? 'stale' : 'live', retries: 0, droppedTicks: owner.droppedTicks || 0, lastTick: owner.lastTick ?? null, message: (owner.historyNote ? `${online} ${owner.historyNote}` : online) + lost });
+      set(owner, { state: 'online', feed: stale ? 'stale' : 'live', retries: 0, droppedTicks: owner.droppedTicks || 0, lastTick: owner.lastTick ?? null,
+        history: owner.backfill ? { done: owner.backfill.done, total: owner.backfill.total, ticks: owner.backfill.ticks } : null,
+        message: (owner.historyNote ? `${online} ${owner.historyNote}` : online) + history + lost });
     } catch (error) {
       if (session !== owner) return;
       owner.failures = (owner.failures || 0) + 1;
@@ -186,14 +193,39 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     }
   }
 
-  async function seed(owner) {
+  // The history buffer: windows of `backfillWindowSec` over the last `historyHours`, newest first, in
+  // terminal seconds. Each poll cycle reads at most one, so a slow or failed read costs one window,
+  // never the live feed. A window MT5 could not read is retried twice, then skipped and reported.
+  function planBackfill(owner, boundary) {
+    const end = Number.isSafeInteger(boundary) ? boundary : null;
+    if (!end || !historyHours) { owner.backfill = null; return; }
+    const pending = [];
+    const start = Math.floor((end - historyHours * 3600) / 3600) * 3600;
+    for (let to = end + 1; to > start; to -= backfillWindowSec) pending.push({ from: Math.max(start, to - backfillWindowSec), to, tries: 0 });
+    owner.backfill = { pending, total: pending.length, done: 0, ticks: 0, skipped: 0 };
+  }
+
+  async function backfillStep(owner) {
+    const plan = owner.backfill;
+    if (!plan?.pending.length || session !== owner) return;
+    const window = plan.pending[0];
     try {
-      const history = await owner.worker.request('history', {}, 60_000);
+      const result = await owner.worker.request('backfill', { from: window.from, to: window.to }, 20_000);
       if (session !== owner) return;
-      await ingest(owner, history.ticks, true);
-      if (history.truncated) owner.historyNote = 'История MT5 неполная: терминал отдал не весь поток тиков за 8 часов.';
-    } catch (error) { set(owner, { message: `История MT5 недоступна: ${error.message}` }); }
-    if (session === owner) void poll(owner);
+      plan.pending.shift();
+      // A window denser than one read: keep its older part for the next cycle.
+      if (result.truncated && result.ticks?.length) {
+        const first = Math.floor(Date.parse(result.ticks[0].timestamp) / 1000) + Math.round((owner.clockOffsetMs || 0) / 1000);
+        if (first > window.from) plan.pending.unshift({ from: window.from, to: first, tries: 0 });
+      }
+      if (result.ticks?.length) plan.ticks += await ingest(owner, result.ticks, true);
+      plan.done += 1;
+    } catch (error) {
+      if (owner.worker.stopped?.()) throw error;
+      window.tries += 1;
+      if (window.tries >= 3) { plan.pending.shift(); plan.skipped += 1; plan.done += 1; owner.historyNote = `История MT5: пропущено окон — ${plan.skipped} (${error.message}).`; }
+    }
+    if (!plan.pending.length && plan.skipped === 0) owner.historyNote = '';
   }
 
   // Turning zones off must be visible in the terminal right away, not on the next four-second poll:
@@ -325,8 +357,10 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
         zoneCount: 0, ...(owner.spec ? { tickSize: owner.spec.tickSize } : specNote)
       };
       retryCount = 0;
-      if (resumed) void poll(owner);
-      else void seed(owner);
+      owner.clockOffsetMs = Number(result.clockOffsetMs) || 0;
+      planBackfill(owner, Number.isSafeInteger(result.boundary) ? result.boundary
+        : (result.lastTickAt ? Math.floor((Date.parse(result.lastTickAt) + owner.clockOffsetMs) / 1000) : null));
+      void poll(owner);
       return state();
     } catch (error) {
       if (session === owner) {
@@ -337,13 +371,31 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     }
   }
 
+  // The refresh button: a live session polls and redraws the MT5 zones now; a lost or closed bridge is
+  // reopened at once instead of waiting for the back-off timer.
+  async function refresh() {
+    const owner = session;
+    if (owner && status.state === 'online') {
+      clearTimeout(owner.timer);
+      owner.levelAt = 0;
+      owner.dirty = true;
+      await poll(owner);
+      return state();
+    }
+    if (owner) return state();
+    stopRetry();
+    retryCount = 0;
+    wanted = true;
+    return open(null);
+  }
+
   function setIntegrationMessage(message) {
     status = { ...status, integrationMessage: typeof message === 'string' ? message.slice(0, 600) : '' };
     return state();
   }
 
   return {
-    connect, disconnect, state, setIntegrationMessage, setZonesVisible,
+    connect, disconnect, refresh, state, setIntegrationMessage, setZonesVisible,
     terminalPath: () => session?.terminalPath,
     terminalDataPath: () => session?.dataPath,
     commonDataPath: () => session?.commonDataPath

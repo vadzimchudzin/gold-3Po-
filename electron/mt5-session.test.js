@@ -106,8 +106,8 @@ test('session connects, ingests, publishes zones and clears them on disconnect',
   const session = createMt5Session({
     workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
     makeWorker: fakeWorker({
-      connect: { ok: true, symbol: 'XAUUSDm', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
-      history: { ok: true, ticks: [tick] },
+      connect: { ok: true, symbol: 'XAUUSDm', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data', boundary: Math.floor(Date.now() / 1000) },
+      backfill: { ok: true, ticks: [tick] },
       poll: { ok: true, ticks: [tick] }
     }),
     request: api.request,
@@ -234,23 +234,77 @@ test('session disconnects when the licence becomes invalid', async () => {
   assert.match(state.message, /лиценз/i);
 });
 
-test('a truncated MT5 history is reported instead of passed off as complete', async () => {
+test('history loads in bounded windows beside the live feed, newest first, and never holds it up', async () => {
+  const api = fakeApi();
+  const boundary = Math.floor(Date.now() / 1000);
+  const asked = [];
+  let polls = 0;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, historyHours: 2, backfillWindowSec: 1800,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data', boundary },
+      backfill: ({ from, to }) => { asked.push({ from, to, afterPolls: polls }); return { ok: true, ticks: [tick] }; },
+      poll: () => { polls += 1; return { ok: true, ticks: [tick] }; }
+    }),
+    request: api.request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.ok(asked.length >= 4, 'every window of the history is read');
+  assert.ok(asked[0].afterPolls >= 1, 'the first live poll runs before any history');
+  assert.ok(asked.every((w, i) => i === 0 || w.to <= asked[i - 1].to), 'newest window first');
+  assert.ok(asked.every(w => w.to - w.from <= 1800), 'each read is one bounded window');
+  assert.ok(asked.every((w, i) => i === 0 || w.afterPolls > asked[i - 1].afterPolls), 'one window per live poll, never a burst');
+  const firstLive = api.calls.findIndex(c => c.path === '/v1/ingest/mt5/live-batch');
+  const firstHistory = api.calls.findIndex(c => c.path === '/v1/ingest/mt5/history');
+  assert.ok(firstLive >= 0 && firstLive < firstHistory, 'live ticks reach the chart before the archive');
+  assert.match(session.state().message, /Поток живой/);
+  await session.disconnect();
+});
+
+test('a history window MT5 cannot read is skipped after retries and reported, while live keeps flowing', async () => {
   const api = fakeApi();
   const session = createMt5Session({
-    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't',
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, historyHours: 1, backfillWindowSec: 3600,
     makeWorker: fakeWorker({
-      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' },
-      history: { ok: true, ticks: [tick], truncated: true },
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data', boundary: Math.floor(Date.now() / 1000) },
+      backfill: () => { throw new Error('MT5 could not read broker ticks for the history window.'); },
       poll: { ok: true, ticks: [tick] }
     }),
     request: api.request,
     publish: async () => {}
   });
   await session.connect();
-  await new Promise(resolve => setTimeout(resolve, 2600));
+  await new Promise(resolve => setTimeout(resolve, 500));
   const state = session.state();
-  assert.match(state.message, /неполная/, 'a partial history must be labelled as partial');
+  assert.equal(state.state, 'online', 'a broken history window never takes the session down');
+  assert.match(state.message, /пропущено окон/);
   assert.doesNotMatch(state.message, /M15|M30|H1/, 'the status line must not hard-code a timeframe the settings can change');
+  await session.disconnect();
+});
+
+test('refresh polls the live feed at once and reopens a closed bridge', async () => {
+  const api = fakeApi();
+  let polls = 0, connects = 0;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 60_000, historyHours: 0,
+    makeWorker: fakeWorker({
+      connect: () => { connects += 1; return { ok: true, symbol: 'XAUUSD', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data', terminalPath: 'C:\\MT5\\terminal64.exe', accountLogin: '1', server: 'S' }; },
+      poll: () => { polls += 1; return { ok: true, ticks: [tick] }; }
+    }),
+    request: api.request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const before = polls;
+  await session.refresh();
+  assert.equal(polls, before + 1, 'the refresh button reads MT5 now, not after the poll interval');
+  await session.disconnect();
+  const reopened = await session.refresh();
+  assert.equal(connects, 2, 'a closed bridge is reopened by refresh');
+  assert.equal(reopened.state, 'online');
   await session.disconnect();
 });
 

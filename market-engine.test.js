@@ -260,9 +260,17 @@ test('a print at the ask counts as buying when the broker ships no aggressor fla
   const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2650.1,tickVolume:2,source:'mt5',symbol:'XAUUSD'});
   assert.equal(t.direction,'buy');
 });
-test('a print at the bid counts as selling when the broker ships no aggressor flag',()=>{
+test('a Bid-chart print alone proves no side: the tick rule over the sequence decides it',()=>{
+  // On an OTC Bid chart every print sits on the Bid, so "at the bid = sell" made every tick a sale.
   const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2649.9,tickVolume:2,source:'mt5',symbol:'XAUUSD'});
-  assert.equal(t.direction,'sell');
+  assert.equal(t.direction,'unknown');
+  const bidTick=(minute,bid)=>({timestamp:`2026-11-17T10:0${minute}:00.000Z`,bid,ask:bid+0.2,last:bid,tickVolume:0,realVolume:0,source:'mt5',symbol:'XAUUSD'});
+  // up, up, down, unchanged (keeps the last side): first tick has no reference.
+  const out=buildMarketAnalysis([bidTick(1,2650),bidTick(2,2650.5),bidTick(3,2651),bidTick(4,2650.2),bidTick(5,2650.2)],{intervalMs:15*60_000});
+  assert.equal(out.bars[0].unknown,1);
+  assert.equal(out.bars[0].ask,2);
+  assert.equal(out.bars[0].bid,2);
+  assert.deepEqual(out.tickRule,{prevPrice:2650.2,prevSide:'sell'});
 });
 test('a print inside the spread stays unclassified instead of being guessed',()=>{
   const t=normalizeTick({timestamp:'2026-11-17T10:01:00.000Z',bid:2649.9,ask:2650.1,last:2650,tickVolume:2,source:'mt5',symbol:'XAUUSD'});
@@ -293,50 +301,5 @@ test('a limited build ignores ticks that could only feed bars the limit drops', 
   const trimmed = buildMarketAnalysis(events.slice(-240), { intervalMs: 60_000, priceStep: 0.1, limit: 12 });
   assert.deepEqual(trimmed.bars, full.bars);
   assert.deepEqual(trimmed.zones, full.zones);
-});
-
-test('strongOnly locks zones to closed bars so intra-bar ticks never reshuffle levels', () => {
-  const bars = [];
-  const base = Date.parse('2026-11-20T00:00:00Z');
-  for (let i = 0; i < 60; i++) {
-    const wave = Math.sin(i / 4) * 6;
-    const o = 3600 + wave, c = o + (i % 2 ? 1.2 : -1.1);
-    bars.push({ time: new Date(base + i * 900_000).toISOString(), timeMs: base + i * 900_000, o, h: Math.max(o, c) + 2.5, l: Math.min(o, c) - 2.5, c, volume: 40 + (i % 5) * 10 });
-  }
-  const atOpen = detectLiquidityZones(bars, 0.1, { strongOnly: true });
-  // Move the forming bar's live close sharply without closing the candle: strongOnly must keep the exact same zones.
-  const moved = bars.map((b, idx) => idx === bars.length - 1 ? { ...b, c: b.c + 12, h: b.h + 12 } : b);
-  const afterTick = detectLiquidityZones(moved, 0.1, { strongOnly: true });
-  assert.deepEqual(afterTick.map(z => z.id), atOpen.map(z => z.id));
-  assert.ok(afterTick.every(z => z.strength >= 0.42), 'every kept zone must meet the strong floor');
-});
-
-test('bid-mode MT5 ticks without aggressor flags split into buy and sell via Tick Rule', () => {
-  const base = Date.parse('2026-11-20T10:00:00Z');
-  const bids = [3555.00, 3555.05, 3555.12, 3555.08, 3555.02, 3555.15, 3555.20, 3555.10];
-  const events = bids.map((bid, i) => ({
-    source: 'mt5', symbol: 'XAUUSD',
-    timestamp: new Date(base + i * 1000).toISOString(),
-    bid, ask: +(bid + 0.18).toFixed(2), last: bid, tickVolume: 5, realVolume: 0, flags: 2
-  }));
-  const out = buildMarketAnalysis(events, { intervalMs: 60_000, footprintStep: 0.01 });
-  assert.ok(out.bars[0].ask > 0, 'upticks in Bid-mode must register buying volume');
-  assert.ok(out.bars[0].bid > 0, 'downticks in Bid-mode must register selling volume');
-});
-
-test('autoStep aggregates wide gold ranges into a compact cluster ladder instead of thousands of rows', () => {
-  const base = Date.parse('2026-11-20T10:00:00Z');
-  const events = [];
-  for (let i = 0; i < 200; i++) {
-    const bid = +(3550 + (i / 200) * 28).toFixed(2);
-    events.push({
-      source: 'mt5', symbol: 'XAUUSD',
-      timestamp: new Date(base + i * 15_000).toISOString(),
-      bid, ask: +(bid + 0.2).toFixed(2), last: bid, tickVolume: 3, realVolume: 0, flags: 2
-    });
-  }
-  const out = buildMarketAnalysis(events, { intervalMs: 3_600_000, footprintStep: 0.01, footprintOptions: { autoStep: true } });
-  assert.ok(out.effectiveTicksPerRow >= 50, `expected >= 50x aggregation for $28 range, got ${out.effectiveTicksPerRow}`);
-  assert.ok(out.bars[0].levels.length <= 45, `expected <= 45 aggregated clusters, got ${out.bars[0].levels.length}`);
 });
 

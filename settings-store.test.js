@@ -15,6 +15,17 @@ test('defaults draw red solid zone lines and look for 3..7 zones', () => {
   assert.deepEqual(s, JSON.parse(JSON.stringify(DEFAULT_SETTINGS)));
 });
 
+test('a settings file from a build with strong-only zones and auto footprint rows still loads', () => {
+  const s = validateSettings({ zones: { strongOnly: true, maxZones: 5 }, footprint: { autoStep: true, ticksPerRow: 1, imbalanceRatio: 4 } });
+  assert.equal(s.zones.maxZones, 5, 'the other zone settings survive');
+  assert.equal('strongOnly' in s.zones, false);
+  assert.equal('autoStep' in s.footprint, false);
+  assert.equal(s.footprint.ticksPerRow, DEFAULT_SETTINGS.footprint.ticksPerRow, 'auto becomes the fixed default row');
+  assert.equal(s.footprint.imbalanceRatio, 4);
+  const manual = validateSettings({ footprint: { autoStep: false, ticksPerRow: 5 } });
+  assert.equal(manual.footprint.ticksPerRow, 5, 'a manual row size is kept');
+});
+
 test('settings persist across restarts and a broken file falls back to defaults', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'g3p-settings-'));
   try {

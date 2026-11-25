@@ -16,48 +16,48 @@ export const DEFAULT_FOOTPRINT_OPTIONS = Object.freeze({
   minLevelVolume: 3,      // a row thinner than this is noise, never an imbalance
   valueAreaShare: 0.7,    // share of the bar's volume the value area must cover
   absorptionMultiple: 2,  // an edge row carrying this many median rows was absorbed
-  ticksPerRow: 1,         // price steps grouped into one footprint row (1 = the source precision)
-  autoStep: false         // when true, aggregate price steps automatically so whole candles fit cleanly on screen
+  ticksPerRow: 1          // price steps grouped into one footprint row (1 = the source precision)
 });
 
-const AUTO_STEP_MULTIPLIERS = Object.freeze([1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500]);
-
-export function autoTicksPerRow(bars, sourceStep, targetRows = 28) {
-  if (!Array.isArray(bars) || !bars.length || !positive(sourceStep)) return 1;
-  let lo = Infinity, hi = -Infinity;
-  const uniquePrices = new Set();
-  for (const b of bars) {
-    const h = Number(b?.h), l = Number(b?.l);
-    if (finite(h) && h > hi) hi = h;
-    if (finite(l) && l < lo) lo = l;
-    if (b?.levels instanceof Map) {
-      for (const row of b.levels.values()) { if (finite(row?.price)) uniquePrices.add(Number(row.price).toFixed(6)); }
-    } else if (Array.isArray(b?.levels)) {
-      for (const row of b.levels) { if (finite(row?.price)) uniquePrices.add(Number(row.price).toFixed(6)); }
-    }
-  }
-  const target = Math.max(8, Number(targetRows) || 28);
-  if (uniquePrices.size > 0 && uniquePrices.size <= target + 8) return 1;
-  const span = hi > lo ? hi - lo : 0;
-  if (!(span > 0)) return 1;
-  const rawSteps = span / sourceStep;
-  if (rawSteps <= target + 8) return 1;
-  const desired = rawSteps / target;
-  for (const mult of AUTO_STEP_MULTIPLIERS) {
-    if (mult >= desired) return mult;
-  }
-  return AUTO_STEP_MULTIPLIERS.at(-1);
+// Which side a quote-only print belongs to. Explicit MT5 BUY/SELL flags (or a vendor aggressor) win.
+// A Last-mode print through the quote is classified by the quote. A print on the Bid, which is every tick
+// of an OTC Bid chart such as RoboForex XAUUSD, follows the tick rule on the chart price: an uptick is a
+// buy, a downtick a sell, an unchanged price keeps the previous side. The server aggregation and the
+// live browser bar use this one function, seeded with the same state, so both split volume alike.
+export function createTickClassifier(state = {}) {
+  let prevPrice = finite(state.prevPrice) ? state.prevPrice : null;
+  let prevSide = state.prevSide === 'buy' || state.prevSide === 'sell' ? state.prevSide : null;
+  return {
+    classify(tick = {}) {
+      const price = Number(tick.last);
+      const flags = Number.isInteger(tick.flags) ? tick.flags : 0;
+      let side = tick.aggressorSide === 'buy' || tick.aggressorSide === 'sell' ? tick.aggressorSide
+        : (flags & 32) ? 'buy' : (flags & 64) ? 'sell' : null;
+      const bid = Number(tick.bid), ask = Number(tick.ask);
+      if (!side && finite(bid) && finite(ask) && ask > bid && finite(price)) {
+        if (price >= ask) side = 'buy';
+        else if (price < bid) side = 'sell';
+      }
+      // The tick rule only for prints that carry no quote information: a Bid-chart print sits on the
+      // Bid by construction. A Last print between the quotes stays unknown instead of being guessed.
+      const onBid = !finite(bid) || price <= bid;
+      if (!side && onBid && finite(price) && prevPrice !== null) {
+        side = price > prevPrice ? 'buy' : price < prevPrice ? 'sell' : prevSide;
+      }
+      if (finite(price) && price > 0) prevPrice = price;
+      if (side === 'buy' || side === 'sell') prevSide = side;
+      return side || 'unknown';
+    },
+    state: () => ({ prevPrice, prevSide })
+  };
 }
 
 export function validateFootprintOptions(input = {}) {
   const o = { ...DEFAULT_FOOTPRINT_OPTIONS };
-  const explicitTicks = input && input.ticksPerRow !== undefined && input.ticksPerRow !== null;
-  const explicitAuto = input && input.autoStep !== undefined && input.autoStep !== null;
   for (const [key, value] of Object.entries(input || {})) {
     if (!(key in o) || value === undefined || value === null) continue;
-    o[key] = key === 'autoStep' ? Boolean(value) : Number(value);
+    o[key] = Number(value);
   }
-  if (explicitTicks && !explicitAuto) o.autoStep = false;
   const num = (key, lo, hi) => {
     if (!finite(o[key]) || o[key] < lo || o[key] > hi) throw new TypeError(`${key} must be between ${lo} and ${hi}`);
   };

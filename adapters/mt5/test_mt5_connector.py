@@ -101,7 +101,8 @@ class ConnectorTests(unittest.TestCase):
                           "commonDataPath": "common data", "dataPath": "terminal data",
                           "terminalPath": self.terminal_path,
                           "accountLogin": "1234", "server": "Broker-Demo",
-                          "specUnavailable": "tick_size_unusable"})
+                          "specUnavailable": "tick_size_unusable",
+                          "clockOffsetMs": 0, "boundary": SECOND})
         # The whole session (history window and live cursor) is anchored to this tick, so connect
         # reports when it happened and how old it already was.
         self.assertEqual(result["lastTickAt"], "2023-11-14T22:13:20Z")
@@ -223,6 +224,33 @@ class ConnectorTests(unittest.TestCase):
         reads = [call for call in self.api.calls if call[0] == "copy_ticks_from"][:-1]
         self.assertLessEqual(len(reads), connector.HISTORY_MAX_READS)
         self.assertTrue(all(call[3] <= 5 for call in reads))
+
+    def test_backfill_reads_one_bounded_window_beside_the_live_cursor(self):
+        self.api.rows = [tick(SECOND + offset) for offset in (-30, -20, -10, -1, 0, 1)]
+        ranges = []
+        self.api.copy_ticks_range = lambda symbol, start, end, flags: ranges.append((start, end)) or [
+            row for row in self.api.rows if int(start.timestamp()) <= row["time"] < int(end.timestamp())]
+        self.connect()
+        window = self.command("backfill", **{"from": SECOND - 25, "to": SECOND})
+        self.assertTrue(window["ok"])
+        self.assertEqual([item["timestamp"] for item in window["ticks"]],
+                         ["2023-11-14T22:13:00.000Z", "2023-11-14T22:13:10.000Z", "2023-11-14T22:13:19.000Z"])
+        self.assertEqual(len(ranges), 1, "one bounded read per window")
+        self.assertEqual(self.worker.cursor, (SECOND, 0), "the live cursor is untouched")
+        self.assertEqual(self.command("backfill", **{"from": SECOND - 7 * 3600, "to": SECOND})["error"], "invalid_command")
+        self.assertEqual(self.command("backfill", **{"from": SECOND, "to": SECOND - 5})["error"], "invalid_command")
+
+    def test_a_terminal_clock_ahead_of_utc_is_taken_out_of_every_timestamp(self):
+        now = int(connector.datetime.now(timezone.utc).timestamp())
+        server = now + 2 * 3600  # a broker server on UTC+2 stamping ticks in its own time
+        self.api.latest = SimpleNamespace(time=server, time_msc=server * 1000)
+        self.api.rows = [tick(server, 0), tick(server + 1, 0)]
+        connected = self.connect()
+        self.assertEqual(connected["clockOffsetMs"], 2 * 3600 * 1000)
+        self.assertLess(connected["tickAgeMs"], 60_000, "the anchor tick is current, not two hours ahead")
+        polled = self.command("poll")["ticks"]
+        stamp = connector.datetime.fromisoformat(polled[-1]["timestamp"].replace("Z", "+00:00")).timestamp()
+        self.assertLess(abs(stamp - (now + 1)), 5, "ticks are stamped in UTC")
 
     def test_ndjson_recovers_after_malformed_and_oversized_records(self):
         source = io.BytesIO(b'{invalid}\r\n' + b'x' * (connector.MAX_LINE * 2) + b'\n'

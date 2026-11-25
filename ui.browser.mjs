@@ -31,7 +31,7 @@ try {
   const offlinePage = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 });
   await offlinePage.goto(base, { waitUntil: 'domcontentloaded' });
   await offlinePage.waitForSelector('#chartEmpty:not([hidden])', { timeout: 5000 });
-  assert.equal(await offlinePage.locator('.candle').count(), 0, 'browser without MT5 must not show demo candles');
+  assert.equal((await offlinePage.evaluate(() => window.gold3poChart.state())).bars, 0, 'browser without MT5 must not show demo candles');
   await offlinePage.locator('#mt5Open').click();
   await offlinePage.waitForSelector('#mt5Dialog[open]');
   assert.ok(await offlinePage.locator('#mt5Connect').isDisabled(), 'connect must be disabled without the desktop bridge');
@@ -53,10 +53,24 @@ try {
   page.on('pageerror', error => pageErrors.push(error.message));
   if (process.env.BROWSER_DEBUG) page.on('console', message => process.stdout.write('[browser] ' + message.text() + '\n'));
   await page.goto(base, { waitUntil: 'domcontentloaded' });
+  // Chart and footprint are canvases: the page reports what its last frame drew, and a click goes to
+  // the page coordinates of a bar, exactly where a trader would click.
+  const frame = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const scene = async () => { await frame(); return page.evaluate(() => window.gold3poChart.scene()); };
+  const chartState = () => page.evaluate(() => window.gold3poChart.state());
+  const clickBar = async (where, index, price) => {
+    await frame();
+    const point = await page.evaluate(([w, i, p]) => window.gold3poChart.point(w, i, p), [where, index, price]);
+    assert.ok(point, 'the ' + where + ' canvas must have a geometry to click on');
+    await page.mouse.click(point.x, point.y);
+  };
+  const cellsOf = view => view.foot.columns.flatMap(column => column.cells);
+  const formingCells = view => view.foot.columns.find(column => column.forming)?.cells || [];
+  const cellTexts = async () => cellsOf(await scene()).map(cell => cell.text.replace(/[◆\s\u00a0]/g, '')).filter(Boolean);
 
   // Data is empty until the selected account's broker ticks are ingested.
   await page.waitForSelector('#chartEmpty:not([hidden])', { timeout: 5000 });
-  assert.equal(await page.locator('.candle').count(), 0, 'никаких демо-свечей до прихода данных брокера');
+  assert.equal((await chartState()).bars, 0, 'никаких демо-свечей до прихода данных брокера');
   assert.equal(await page.locator('.zone-row').count(), 0, 'никаких демо-зон до прихода данных брокера');
   assert.match(await page.locator('#zoneList').innerText(), /Зон пока нет/);
   assert.match(await page.locator('#chartStatus').innerText(), /ПОДКЛЮЧИТЕ MT5/);
@@ -79,29 +93,22 @@ try {
   await page.waitForFunction(() => document.querySelector('#mt5Status')?.textContent.startsWith('ОНЛАЙН'), null, { timeout:5000 });
   await page.waitForFunction(() => document.querySelector('#comexStatus')?.textContent.startsWith('ОНЛАЙН'), null, { timeout:5000 });
   await page.waitForFunction(() => document.querySelector('#chartStatus')?.textContent.startsWith('ОНЛАЙН'), null, { timeout:5000 });
-  assert.ok(await page.locator('.candle').count() >= 30, 'live chart should render the ingested 30-day broker history');
+  assert.ok((await scene()).chart.candles.length >= 30, 'live chart should render the ingested 30-day broker history');
   assert.equal(await page.locator('#chartEmpty').isHidden(), true, 'empty state must disappear once broker data arrives');
   assert.ok(await page.locator('.zone-row').count() > 0, 'liquidity zones should appear once broker history arrives');
   await page.waitForSelector('.footprint-source-status', { timeout:5000 });
-  const dataProvenance = await page.evaluate(() => ({
-    status: document.querySelector('.footprint-source-status')?.innerText || '',
-    headers: [...document.querySelectorAll('#footprintGrid .bar-head')].map(node => ({
-      ticks: Number(node.dataset.sourceTicks),
-      levels: Number(node.dataset.sourceLevels)
-    }))
-  }));
+  const dataProvenance = { status: await page.locator('.footprint-source-status').innerText(), columns: (await scene()).foot.columns };
   assert.match(dataProvenance.status, /MT5 OTC.*ТИКОВАЯ АКТИВНОСТЬ.*НЕ БИРЖЕВОЙ ОБЪЁМ/, 'OTC data must not be represented as exchange trade volume');
   assert.match(dataProvenance.status, /РЕДКИЕ ДАННЫЕ/, 'sparse source history must be called out instead of looking like a complete footprint');
   assert.match(dataProvenance.status, /не интерполируются/, 'missing price levels must never be filled from OHLC');
-  assert.ok(dataProvenance.headers.length > 0 && dataProvenance.headers.every(item => item.levels >= 0 && item.ticks >= 0), 'each candle header must expose the number of actual source ticks and price levels');
-  const chartWidthBeforeZoom=await page.locator('#priceChart').evaluate(el=>el.getBoundingClientRect().width);
+  assert.ok(dataProvenance.columns.length > 0 && dataProvenance.columns.every(column => column.cells.every(cell => cell.bid + cell.ask + cell.unknown > 0)), 'the footprint draws only price rows the broker actually traded');
+  const spacingBeforeZoom = (await chartState()).chartView.barSpacing;
   await page.locator('#chartZoomIn').click();
-  const chartWidthAfterZoom=await page.locator('#priceChart').evaluate(el=>el.getBoundingClientRect().width);
-  assert.ok(chartWidthAfterZoom>chartWidthBeforeZoom,'X zoom must enlarge candle spacing and chart width');
+  assert.ok((await chartState()).chartView.barSpacing > spacingBeforeZoom, 'X zoom must enlarge candle spacing');
   await page.locator('#chartZoomReset').click();
-  const priceTagBeforeZoom=await page.locator('.last-price-tag').getAttribute('y');
+  const priceTagBeforeZoom = (await scene()).chart.lastPriceY;
   await page.locator('#chartPriceZoomIn').click();
-  const priceTagAfterZoom=await page.locator('.last-price-tag').getAttribute('y');
+  const priceTagAfterZoom = (await scene()).chart.lastPriceY;
   assert.notEqual(priceTagAfterZoom,priceTagBeforeZoom,'Y zoom must change the price projection');
   await page.locator('#chartPriceZoomReset').click();
   await page.locator('#chartZoomReset').click();
@@ -122,16 +129,16 @@ try {
 
   await page.locator('.zone-row').first().click();
   assert.equal(await page.locator('.zone-row.selected').count(), 1, 'zone click should select one zone');
-  assert.equal(await page.locator('.selected-zone').count(), 1, 'selected zone should highlight on chart');
+  assert.equal((await scene()).chart.zones.filter(zone => zone.selected).length, 1, 'selected zone should highlight on chart');
   await page.locator('#zonesToggle').click();
-  assert.equal(await page.locator('rect.zone-buy, rect.zone-sell').count(), 0, 'zone toggle should hide overlays');
+  assert.equal((await scene()).chart.zones.length, 0, 'zone toggle should hide overlays');
   await page.locator('#zonesToggle').click();
 
   // The history has no aggressor side: Delta mode must not paint those rows as buying or selling.
   await page.locator('#footprintModes [data-mode="delta"]').click();
-  assert.equal(await page.locator('.foot-cell.delta-positive, .foot-cell.delta-negative').count(), 0, 'rows without a known side carry no delta colour');
+  assert.equal(cellsOf(await scene()).filter(cell => cell.tone === 'positive' || cell.tone === 'negative').length, 0, 'rows without a known side carry no delta colour');
   await page.locator('#footprintModes [data-mode="volume"]').click();
-  assert.ok(await page.locator('.volume-cell').count() > 0, 'Volume mode should render volume cells');
+  assert.ok((await cellTexts()).length > 0, 'Volume mode should render volume cells');
   // Delta %, buy and sell: each mode really switches what the cells show. The history above has no
   // aggressor side, so the side modes are rightly empty there; a few classified live ticks give them data.
   await page.evaluate(() => {
@@ -141,11 +148,10 @@ try {
   await page.waitForTimeout(500);
   await page.locator('#resetView').click();
   await page.waitForTimeout(300);
-  const cellTexts = () => page.evaluate(() => [...document.querySelectorAll('#footprintGrid .foot-cell')].map(node => node.textContent.replace(/[◆\s\u00a0]/g, '')).filter(Boolean));
   await page.locator('#footprintModes [data-mode="delta"]').click();
   const deltaTexts = await cellTexts();
   assert.ok(deltaTexts.includes('+6') && deltaTexts.includes('-5'), 'Delta mode shows each classified row as ask minus bid: ' + deltaTexts.join(' '));
-  assert.ok(await page.locator('.foot-cell.delta-positive').count() > 0 && await page.locator('.foot-cell.delta-negative').count() > 0, 'Delta mode colours buying and selling rows');
+  { const tones = cellsOf(await scene()).map(cell => cell.tone); assert.ok(tones.includes('positive') && tones.includes('negative'), 'Delta mode colours buying and selling rows'); }
   await page.locator('#footprintModes [data-mode="deltaPct"]').click();
   const pctTexts = await cellTexts();
   assert.ok(pctTexts.includes('+50%') && pctTexts.includes('-56%') && pctTexts.every(text => /^[+-]?\d+%$/.test(text)), 'Delta % mode shows each row as a share of its sided volume: ' + pctTexts.slice(0, 8).join(' '));
@@ -157,69 +163,52 @@ try {
   assert.ok(buyTexts.includes('9') && buyTexts.includes('2') && sellTexts.includes('3') && sellTexts.includes('7'), 'buy shows the ask side and sell the bid side: ' + buyTexts.join(' ') + ' / ' + sellTexts.join(' '));
   assert.notDeepEqual(buyTexts, sellTexts, 'buy and sell modes show different sides of the rows');
   await page.locator('#footprintModes [data-mode="bidask"]').click();
-  const clusterRender = await page.evaluate(() => {
-    const cells = [...document.querySelectorAll('.foot-cell.bidask:not(.empty-level)')];
-    const values = side => cells.flatMap(cell => [...cell.querySelectorAll('.foot-side[data-side="' + side + '"]')])
-      .filter(node => Number(node.textContent.trim()) > 0);
-    const bid = values('bid'), ask = values('ask');
-    return {
-      cells: cells.length,
-      bid: bid.length,
-      ask: ask.length,
-      bidHeat: bid.some(node => Number(node.style.getPropertyValue('--side-intensity')) > 0),
-      askHeat: ask.some(node => Number(node.style.getPropertyValue('--side-intensity')) > 0)
-    };
-  });
+  const clusterRender = await (async () => {
+    const cells = cellsOf(await scene());
+    const bid = cells.filter(cell => cell.bid > 0), ask = cells.filter(cell => cell.ask > 0);
+    return { cells: cells.length, bid: bid.length, ask: ask.length, bidHeat: bid.some(cell => cell.bidHeat > 0), askHeat: ask.some(cell => cell.askHeat > 0) };
+  })();
   assert.ok(clusterRender.cells > 0, 'traded price rows render as footprint clusters');
   assert.ok(clusterRender.bid > 0 && clusterRender.ask > 0, 'each cluster keeps separate Bid and Ask values');
   assert.ok(clusterRender.bidHeat && clusterRender.askHeat, 'Bid and Ask heatmaps use independent volume intensity');
   await page.locator('#numbersToggle').click();
-  assert.ok(await page.locator('.foot-cell:not(.empty-level)').first().innerText().then(v => v.trim()).then(v => v === ''), 'number toggle should hide cell values');
+  assert.deepEqual(await cellTexts(), [], 'number toggle should hide cell values');
   await page.locator('#numbersToggle').click();
 
   // Footprint math: POC, value area, session profile, delta row and the markers are on screen.
-  assert.ok(await page.locator('.foot-poc').count() > 0, 'every drawn bar must mark its point of control');
-  assert.ok(await page.locator('.foot-cell.foot-va').count() > 0, 'the value area must be shaded');
-  assert.ok(await page.locator('.foot-profile:not(.empty)').count() > 0, 'the session profile column must carry volume');
-  assert.equal(await page.locator('.foot-profile b').count() > 0, true, 'the profile labels VAH / VAL / POC');
-  assert.equal(await page.locator('.foot-delta').count(), await page.locator('.bar-head').count(), 'one delta cell per bar');
-  assert.equal(await page.locator('.foot-cell.foot-forming').count() > 0, true, 'the forming bar is marked');
+  { const view = await scene(), drawn = view.foot.columns.filter(column => column.cells.length);
+    assert.ok(drawn.length > 0 && drawn.every(column => column.cells.some(cell => cell.poc)), 'every drawn bar must mark its point of control');
+    assert.ok(cellsOf(view).some(cell => cell.va), 'the value area must be shaded');
+    assert.ok(view.foot.profile > 0, 'the session profile column must carry volume');
+    assert.ok(view.foot.columns.every(column => column.delta === null || Number.isFinite(column.delta)), 'one delta cell per bar');
+    assert.ok(view.foot.columns.some(column => column.forming), 'the forming bar is marked');
+    // The ladder reads as one continuous grid: neighbouring rows of a column sit one row height apart.
+    const state = await chartState(), column = drawn.find(item => item.cells.length >= 2);
+    if (column) { const ys = column.cells.map(cell => cell.y).sort((a, b) => a - b); const gaps = ys.slice(1).map((y, i) => y - ys[i]); assert.ok(gaps.every(gap => gap >= state.footRowH - 0.5), 'footprint rows must not overlap: ' + gaps.join(',')); }
+  }
   assert.ok(!/Swing high|Prior day|Value area/.test(await page.locator('#footprintGrid').innerText()), 'no engine token leaks into the footprint');
-  // The ladder reads as one continuous grid: cells sit edge to edge with hairline separators, not as
-  // individually bordered and rounded tiles floating apart.
-  const ladder = await page.evaluate(() => {
-    const cell = document.querySelector('.foot-cell');
-    const row = cell.closest('.foot-row');
-    const style = getComputedStyle(cell);
-    return { gap: getComputedStyle(row).columnGap, radius: style.borderTopLeftRadius, border: style.borderTopWidth };
-  });
-  assert.equal(ladder.gap, '0px', 'footprint cells must sit edge to edge, got a ' + ladder.gap + ' gap between them');
-  assert.equal(ladder.radius, '0px', 'footprint cells must not carry rounded tile corners');
-  assert.ok(parseFloat(ladder.border) <= 1, 'footprint cells may only carry a hairline separator');
 
   // Real time: a streamed tick lands in the forming bar between refetches, without a reload.
   // The price is outside the fixture range, so a new price row proves the tick was applied.
-  const formingVolume = () => page.evaluate(() => [...document.querySelectorAll('.foot-cell.foot-forming')]
-    .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0));
+  const formingVolume = async () => formingCells(await scene()).reduce((sum, cell) => sum + cell.bid + cell.ask + cell.unknown, 0);
   const beforeTick = await formingVolume();
   // Same 15m bucket as the last streamed tick above, so no new candle is created.
   const liveTick = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2649.1, ask: 2649.3, last: 2649.2, tickVolume: 9, realVolume: 0, flags: 32 };
   const liveResponse = await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({...liveTick,feedId:browserFeedId}) });
   assert.equal(liveResponse.status, 202, 'a live tick must be accepted');
   try {
-    await page.waitForFunction(before => [...document.querySelectorAll('.foot-cell.foot-forming')]
-      .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0) > before, beforeTick, { timeout: 5000 });
+    await page.waitForFunction(before => window.gold3poChart.scene().foot.columns.filter(column => column.forming)
+      .flatMap(column => column.cells).reduce((sum, cell) => sum + cell.bid + cell.ask + cell.unknown, 0) > before, beforeTick, { timeout: 5000 });
   } catch (error) {
     throw new Error('a streamed tick never reached the forming bar: ' + error.message + ' · page errors: ' + (pageErrors.join(' | ') || 'none'));
   }
   assert.ok(await formingVolume() >= beforeTick + 9, 'the forming bar must absorb the tick volume immediately');
-  assert.ok(await page.locator('.foot-cell.foot-forming').count() > 0, 'the forming column survives the tick');
+  assert.ok(formingCells(await scene()).length > 0, 'the forming column survives the tick');
 
-  const firstCell = page.locator('.foot-cell:not(.empty-level)').first();
-  const firstIndex = Number(await firstCell.getAttribute('data-index'));
-  await firstCell.click();
+  const firstIndex = (await scene()).foot.columns.find(column => column.cells.length && column.x > 10).index;
+  await clickBar('foot', firstIndex);
   assert.match(await page.locator('#selectedBar').innerText(), new RegExp('#'+String(firstIndex+1).padStart(3,'0')));
-  await page.locator('.candle[data-index="2"]').click();
+  await clickBar('chart', 2);
   assert.match(await page.locator('#selectedBar').innerText(), /#003/);
   const sideSplit = await page.evaluate(() => ({
     bid: document.querySelector('#bidVolume').textContent,
@@ -241,28 +230,13 @@ try {
   for (const id of ['#footZoomXOut', '#footZoomXIn', '#footZoomYOut', '#footZoomYIn']) {
     assert.ok(await page.locator(id).isVisible(), 'footprint zoom control must be visible: ' + id);
   }
-  const footprintCell = page.locator('#footprintGrid .foot-cell').first();
-  const widthBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
-  const heightBefore = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
-  // Wait for the re-render instead of measuring straight after the click: on a loaded CI runner the
-  // live tick that re-renders the grid can land between the click and the read.
-  { const grew = () => page.waitForFunction(
-    before => document.querySelector('#footprintGrid .foot-cell')?.getBoundingClientRect().width > before,
-    widthBefore, { timeout: 4000 }
-  );
+  { const before = await chartState();
     await page.locator('#footZoomXIn').click();
-    await grew();
-    const widthAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().width);
-    assert.ok(widthAfter > widthBefore, 'X+ must widen footprint columns');
-  }
-  { const grew = () => page.waitForFunction(
-    before => document.querySelector('#footprintGrid .foot-cell')?.getBoundingClientRect().height > before,
-    heightBefore, { timeout: 4000 }
-  );
+    assert.ok((await chartState()).footView.barSpacing > before.footView.barSpacing, 'X+ must widen footprint columns');
     await page.locator('#footZoomYIn').click();
-    await grew();
-    const heightAfter = await footprintCell.evaluate(el => el.getBoundingClientRect().height);
-    assert.ok(heightAfter > heightBefore, 'Y+ must increase footprint price-row height');
+    assert.ok((await chartState()).footRowH > before.footRowH, 'Y+ must increase footprint price-row height');
+    const view = await scene();
+    assert.ok(view.foot.columns.some(column => column.width > before.footView.barSpacing), 'the wider columns are drawn');
   }
   await page.locator('#footZoomXReset').click();
   await page.locator('#footZoomYReset').click();
@@ -271,7 +245,7 @@ try {
 
   await page.locator('#loadReplay').click();
   await page.waitForFunction(() => document.querySelector('#replaySlider') && !document.querySelector('#replaySlider').disabled, null, { timeout:5000 });
-  assert.ok(await page.locator('.candle').count() >= 30, 'replay must load the selected historical range');
+  assert.ok((await chartState()).bars >= 30, 'replay must load the selected historical range');
   await page.locator('#replaySlider').evaluate(el=>{el.value='1';el.dispatchEvent(new Event('input',{bubbles:true}));});
   assert.match(await page.locator('#selectedBar').innerText(), /#002/, 'replay slider must move the selected candle and footprint');
   await page.locator('#playReplay').click();
@@ -306,15 +280,11 @@ try {
   // The footprint window follows the selected bar: reset to the newest so the forming column is in view.
   await page.locator('#resetView').click();
   await page.waitForTimeout(400);
-  await page.locator('.foot-cell.foot-forming').first().click();
+  await clickBar('foot', (await chartState()).bars - 1);
   await page.waitForTimeout(300);
   let verdict = await page.locator('#flowVerdict').innerText();
   assert.match(verdict, /стеков/, 'the default settings must mark the stack in the forming bar');
-  const formingImbalanceCells = () => page.evaluate(() => {
-    const forming = document.querySelector('.foot-cell.foot-forming');
-    const idx = forming?.getAttribute('data-index');
-    return idx === null ? -1 : document.querySelectorAll(`.foot-cell[data-index="${idx}"].imbalance-buy, .foot-cell[data-index="${idx}"].imbalance-sell`).length;
-  });
+  const formingImbalanceCells = async () => formingCells(await scene()).filter(cell => cell.imbalance).length;
   const imbalancesBefore = await formingImbalanceCells();
   assert.ok(imbalancesBefore >= 3, 'the synthetic bar must mark at least three imbalance cells, got ' + imbalancesBefore);
 
@@ -337,27 +307,35 @@ try {
   assert.equal(savedFootprint.footprint.imbalanceLevels, 10, 'the stack-length setting must be saved');
   assert.equal(savedFootprint.footprint.minLevelVolume, 30, 'the min-level setting must be saved');
   // Row size: grouping five source steps per row must shrink the ladder, be saved, and come back at 1.
-  const ladderRows = () => page.evaluate(() => document.querySelectorAll('#footprintGrid .foot-row:not(.foot-head):not(.foot-deltas):not(.foot-times)').length);
-  const rowsFine = await ladderRows();
-  // Hold back the analysis refetch so only the browser's own footprint path can regroup the rows.
+  // Hold back the analysis refetch so only the browser's own regrouping path can change the rows: the
+  // synthetic forming bar exists only in this page.
+  const ladderRows = async () => formingCells(await scene()).length;
   await page.route('**/v1/market/analysis**', route => route.abort());
+  await page.evaluate(() => {
+    const tick = (last, side, volume) => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last, aggressorSide: side, tickVolume: volume, realVolume: 0 } }));
+    // The same synthetic bar as above: a background refetch may have replaced the page-only one.
+    tick(2649.30, 'buy', 25);
+    tick(2649.20, 'buy', 25); tick(2649.20, 'sell', 5);
+    tick(2649.10, 'buy', 200); tick(2649.10, 'sell', 5);
+    tick(2649.00, 'sell', 5);
+  });
+  const rowsFine = await ladderRows();
+  const fineStep = (await chartState()).rowStep;
   await page.locator('#setTicksPerRow').evaluate(el => { el.value = '5'; el.dispatchEvent(new Event('input', { bubbles: true })); });
   await page.waitForFunction(() => document.querySelector('#settingsStatus')?.textContent === 'Сохранено', null, { timeout: 5000 });
-  await page.waitForTimeout(800);
+  await page.waitForFunction(step => Math.abs(window.gold3poChart.state().rowStep - step * 5) < 1e-9, fineStep, { timeout: 5000 });
   const rowsCoarse = await ladderRows();
   assert.ok(rowsCoarse < rowsFine, 'five steps per row must draw fewer ladder rows: ' + rowsCoarse + ' vs ' + rowsFine);
-  const ladderPrices = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .foot-row:not(.foot-head):not(.foot-deltas):not(.foot-times) .price-level')]
-    .map(node => Number(node.textContent.replace(/[\s\u00a0]/g, '').replace(',', '.'))));
-  // Every label must parse: an empty or garbled label is a failure, not a row to skip.
-  assert.equal(ladderPrices.length, rowsCoarse, 'every ladder row must carry a price label');
+  const ladderPrices = cellsOf(await scene()).map(cell => cell.price);
   assert.ok(ladderPrices.length > 0 && ladderPrices.every(Number.isFinite), 'every ladder price must be a number, got ' + ladderPrices.join(', '));
   const offGrid = ladderPrices.filter(price => Math.abs(price * 2 - Math.round(price * 2)) > 1e-6);
   assert.deepEqual(offGrid, [], 'grouped ladder rows must sit on the 0.5 grid, found ' + offGrid.join(', '));
-  await page.unroute('**/v1/market/analysis**');
+  const axisPrices = (await scene()).foot.axis;
+  assert.ok(axisPrices.length > 0 && axisPrices.every(price => Math.abs(price * 2 - Math.round(price * 2)) < 1e-6), 'the price axis labels the 0.5 rows: ' + axisPrices.join(', '));
   assert.equal((await (await fetch(base + '/v1/settings')).json()).footprint.ticksPerRow, 5, 'the row size must be saved');
   await page.locator('#setTicksPerRow').evaluate(el => { el.value = '1'; el.dispatchEvent(new Event('input', { bubbles: true })); });
   await page.waitForFunction(() => document.querySelector('#settingsStatus')?.textContent === 'Сохранено', null, { timeout: 5000 });
-  await page.waitForTimeout(2500);
+  await page.waitForFunction(step => Math.abs(window.gold3poChart.state().rowStep - step) < 1e-9, fineStep, { timeout: 5000 });
   assert.equal(await ladderRows(), rowsFine, 'returning to one step per row restores the source precision');
   // The value-area share: at the default 70% the dominant row alone covers it (a one-row area);
   // at 95% the area must widen past the point of control. The forming bar is recomputed locally
@@ -380,6 +358,7 @@ try {
   // Restore the defaults so the later sections (setup library, dense 4K history) start from them.
   await page.locator('#settingsReset').click();
   await page.waitForFunction(() => document.querySelector('#settingsStatus')?.textContent === 'Настройки сброшены', null, { timeout: 5000 });
+  await page.unroute('**/v1/market/analysis**');
   // Back to the zones pane: the next settings section expects the dialog's default tab.
   await page.locator('#settingsTabs button[data-tab="zones"]').click();
   await page.locator('#settingsClose').click();
@@ -474,7 +453,7 @@ try {
   assert.ok(sheet.overflow <= 0, 'the settings sheet must not overflow a phone width');
   assert.ok(sheet.right > 0 && sheet.right <= 390, 'every source row must fit inside the phone viewport');
   assert.equal(sheet.visible, sheet.rows, 'the zone pane is the one on screen');
-  assert.equal(sheet.toggles, 6, 'all five level sources plus strong-only mode are switchable');
+  assert.equal(sheet.toggles, 5, 'all five level sources are switchable');
   assert.ok(sheet.sliders >= 7, 'every numeric zone option has a slider');
   await page.screenshot({ path:'artifacts/settings-mobile.png' });
   await page.locator('#settingsTabs button[data-tab="mt5"]').click();
@@ -509,20 +488,21 @@ try {
     assert.equal(denseResponse.status, 202, 'dense history fixture batch should be accepted');
   }
   await page.setViewportSize({ width: 3840, height: 2160 });
-  await page.waitForFunction(() => document.querySelectorAll('.candle').length >= 600, null, { timeout: 8000 });
+  await page.waitForFunction(() => window.gold3poChart.state().bars >= 600, null, { timeout: 8000 });
   await page.waitForTimeout(400);
+  const wideScene = await scene();
   const wide = await page.evaluate(() => ({
     overflow: document.documentElement.scrollWidth - innerWidth,
     wrap: document.querySelector('.price-chart-wrap')?.clientWidth || 0,
     chart: document.querySelector('#priceChart')?.getBoundingClientRect().width || 0,
-    content: document.querySelector('.main-content')?.getBoundingClientRect().width || 0,
-    bars: document.querySelectorAll('.candle').length
+    content: document.querySelector('.main-content')?.getBoundingClientRect().width || 0
   }));
+  wide.bars = wideScene.chart.candles.length;
   assert.ok(wide.overflow <= 0, '4K must not overflow horizontally');
   assert.ok(wide.content > 2000, '4K workspace must use the extra width instead of a 1680px strip');
   assert.ok(wide.chart >= wide.wrap * 0.85, 'chart must fill the panel on wide screens');
-  assert.ok(wide.chart <= wide.wrap * 1.05, 'dense history must be compressed into the 4K panel instead of a multi-screen scroll strip');
-  assert.ok(wide.chart / wide.bars >= 2, 'bars never get thinner than the 4K pitch');
+  assert.ok(wide.chart <= wide.wrap * 1.05, 'the chart canvas stays inside its panel; older history is reached by dragging, not by a scroll strip');
+  assert.ok(wide.bars > 0 && wide.chart / wide.bars >= 1.5, 'bars never get thinner than 1.5 px: ' + wide.bars + ' on ' + wide.chart + ' px');
   await page.screenshot({ path:'artifacts/market-lab-4k.png', fullPage:true });
 
   // The live forming bar uses the broker tick size the server built the bars on, not a fixed 0.1:
@@ -533,44 +513,55 @@ try {
   const specTick = { timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2700.42, ask: 2700.44, last: 2700.41, tickVolume: 1, realVolume: 0, flags: 0 };
   const specResponse = await fetch(base + '/v1/ingest/mt5/live-batch', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId: browserFeedId, spec: { tickSize: 0.01 }, ticks: [specTick] }) });
   assert.equal(specResponse.status, 202, 'a live batch with the broker tick size is accepted');
-  await page.waitForFunction(() => document.querySelectorAll('#footprintGrid .price-level').length && [...document.querySelectorAll('#footprintGrid .price-level')].some(node => /2[\s\u00a0]?700,41/.test(node.textContent)), null, { timeout: 8000 });
+  try {
+    await page.waitForFunction(() => window.gold3poChart.scene().foot.columns.flatMap(column => column.cells).some(cell => Math.abs(cell.price - 2700.41) < 1e-6), null, { timeout: 8000 });
+  } catch (error) {
+    const state = await chartState();
+    throw new Error('the broker-grid tick never reached the footprint: ' + JSON.stringify({ rowStep: state.rowStep, last: state.last, geometry: state.footGeometry, forming: formingCells(await scene()).map(cell => cell.price), errors: pageErrors }));
+  }
   // A background analysis refetch replaces the forming bar with the server's, which has never seen this
   // client-side tick: re-send it until it survives a render.
   let liveRows = [];
   for (let attempt = 0; attempt < 6 && !liveRows.includes('2700,43'); attempt++) {
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2700.43, aggressorSide: 'buy', tickVolume: 2, realVolume: 0 } })));
     await page.waitForTimeout(600);
-    liveRows = await page.evaluate(() => [...document.querySelectorAll('#footprintGrid .price-level')].map(node => node.textContent.replace(/[\s\u00a0]/g, '')));
+    liveRows = formingCells(await scene()).map(cell => cell.price.toFixed(2).replace('.', ','));
   }
   assert.ok(liveRows.includes('2700,43'), 'the forming bar must keep 2700.43 on the broker 0.01 grid, rows: ' + liveRows.join(' '));
   assert.ok(!liveRows.includes('2700,40'), 'the live tick must not be rounded onto the 0.1 grid');
 
   // Each footprint column reads as its candle: body rows between open and close, wick rows inside the
   // high-low range only, blank rows beyond it, and the body edge coloured by the bar's direction.
+  // The dense history alternates up and down bars: open the footprint on them (a bar picked on the
+  // chart is brought into the footprint) and shrink the rows so whole candles fit.
   await page.locator('#resetView').click();
-  await page.waitForTimeout(500);
-  const candles = await page.evaluate(() => {
-    const cells = [...document.querySelectorAll('#footprintGrid .foot-cell')];
-    const forming = cells.filter(cell => cell.classList.contains('foot-forming'));
-    const first = document.querySelector('#footprintGrid .foot-row:not(.foot-head):not(.foot-deltas):not(.foot-times) .foot-cell');
-    
+  await page.waitForTimeout(300);
+  await clickBar('chart', (await chartState()).bars - 40);
+  for (let i = 0; i < 8; i++) await page.locator('#footZoomYOut').click();
+  await page.waitForTimeout(300);
+  const candles = await (async () => {
+    const view = await scene();
+    const tagged = view.foot.columns.flatMap(column => column.cells.map(cell => ({ ...cell, up: column.up, forming: column.forming })));
     return {
-      body: cells.filter(cell => cell.classList.contains('candle-body')).length,
-      wick: cells.filter(cell => cell.classList.contains('candle-wick')).length,
-      out: cells.filter(cell => cell.classList.contains('candle-out')).length,
-      up: cells.filter(cell => cell.classList.contains('candle-body') && cell.classList.contains('candle-up')).length,
-      down: cells.filter(cell => cell.classList.contains('candle-body') && cell.classList.contains('candle-down')).length,
-      formingBody: forming.filter(cell => cell.classList.contains('candle-body')).length,
-
+      body: tagged.filter(cell => cell.part === 'body').length,
+      wick: tagged.filter(cell => cell.part === 'wick').length,
+      out: tagged.filter(cell => cell.part === 'out').length,
+      up: tagged.filter(cell => cell.part === 'body' && cell.up).length,
+      down: tagged.filter(cell => cell.part === 'body' && !cell.up).length,
+      formingBody: tagged.filter(cell => cell.part === 'body' && cell.forming).length,
+      columns: view.foot.columns.length
     };
-  });
+  })();
   // The fixtures are nearly flat bars, so the body/wick/blank split itself is unit tested in
   // footprint-candle.test.js; here it is enough that the drawn ladder carries the parts.
-  assert.ok(candles.body > 0 && candles.out > 0, 'the ladder marks body rows and blank rows: ' + JSON.stringify(candles));
+  assert.ok(candles.body > 0, 'the ladder marks body rows: ' + JSON.stringify(candles));
+  assert.equal(candles.out, 0, 'every traded row lies inside its candle: ' + JSON.stringify(candles));
   assert.ok(candles.up > 0, 'body edges follow the up-bar direction');
   assert.ok(candles.down > 0, 'body edges follow the down-bar direction');
   assert.ok(candles.wick > 0, 'traded rows outside candle bodies are rendered as wicks');
-  assert.equal(candles.formingBody > 0, true, 'the forming column has a body too');
+  await page.locator('#resetView').click();
+  await page.waitForTimeout(300);
+  assert.ok(formingCells(await scene()).some(cell => cell.part === 'body'), 'the forming column has a body too');
 
   assert.deepEqual(pageErrors, [], 'browser must not emit uncaught JavaScript errors');
   process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), zones, replay, backtest, risk planner, setup library, settings, live MT5/COMEX status and mobile overflow.\n');

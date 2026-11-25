@@ -1,6 +1,6 @@
 import { measureZoneReactions } from './zone-reaction.js';
 import { collectSourceLevels } from './zone-sources.js';
-import { applyTickToBar, footprintOf, sessionProfile, cumulativeDivergence, tickVolume, emptyBar, autoTicksPerRow, validateFootprintOptions } from './footprint-engine.js';
+import { applyTickToBar, footprintOf, sessionProfile, cumulativeDivergence, tickVolume, emptyBar, validateFootprintOptions, createTickClassifier } from './footprint-engine.js';
 const finite = n => Number.isFinite(n);
 const floorTime = (ms, interval) => Math.floor(ms / interval) * interval;
 // One place for the strength formula: shape (touches, pivot reaction), measured reaction, confluence, recency, volume, freshness, distance.
@@ -17,11 +17,13 @@ export function normalizeTick(input) {
   }
   if (!finite(input.bid) || !finite(input.ask) || input.bid <= 0 || input.ask < input.bid) throw new TypeError('Invalid tick quote');
   const last = finite(input.last) && input.last > 0 ? input.last : (input.bid + input.ask) / 2;
-  // Brokers routinely ship FX/metals ticks with no aggressor flag. Counting those as "no side" throws
-  // away half the footprint, so classify the print against the quote it hit — the standard tick rule.
+  // Only what the tick itself proves: a vendor aggressor, MT5 BUY/SELL flags, or a Last print through
+  // the quote. A print at the Bid of a Bid chart proves nothing; the tick rule in addTicks decides it.
+  const flags = Number.isInteger(input.flags) ? input.flags : 0;
   const direction = ['buy','sell'].includes(input.aggressorSide) ? input.aggressorSide
+    : (flags & 32) ? 'buy' : (flags & 64) ? 'sell'
     : input.ask > input.bid && last >= input.ask ? 'buy'
-    : input.ask > input.bid && last <= input.bid ? 'sell'
+    : input.ask > input.bid && last < input.bid ? 'sell'
     : 'unknown';
   return { timestamp:new Date(time).toISOString(), time, bid:input.bid, ask:input.ask, last, volume:tickVolume({ ...input, direction }), direction, source, symbol:String(input.symbol||'XAUUSD').toUpperCase(), type:'quote' };
 }
@@ -40,78 +42,54 @@ export function buildMarketAnalysis(events, options = {}) {
 }
 
 // Ticks into bars, and nothing else. Kept separate so a caller holding a long tick buffer can
-// aggregate once and only re-run the cheap derived part per request: aggregating is what costs
-// (470 ms for 300k ticks), while the footprint and zones over the resulting bars cost milliseconds.
+// aggregate once and only re-run the cheap derived part per request.
 export function aggregateTicks(events, { intervalMs = 15 * 60_000, footprintStep = 0.1, limit = 10000 } = {}) {
   if (!Array.isArray(events) || !finite(intervalMs) || intervalMs <= 0 || !finite(footprintStep) || footprintStep <= 0) throw new TypeError('Invalid analysis input');
-  // Newest tick first: the buffer is appended in arrival order but is not guaranteed sorted.
+  const stamped = events.map(event => ({ at: Date.parse(event.timestamp), event })).filter(item => finite(item.at));
   let lastMs = -Infinity;
-  for (const event of events) { const ms = Date.parse(event.timestamp); if (ms > lastMs) lastMs = ms; }
-  // Only the last `limit` bars survive the slice below, so a tick older than that window cannot
-  // change the answer. Two bars of margin keep the oldest kept bar complete instead of partial,
-  // which is what makes this cut identical to aggregating the whole archive.
-  const fromMs = Number.isFinite(lastMs) ? lastMs - (Math.max(1, limit) + 2) * intervalMs : -Infinity;
-  const windowed = events.filter(event => fromMs === -Infinity || Date.parse(event.timestamp) >= fromMs);
-  const ticks = windowed
-    .map(event => ({ at: Date.parse(event.timestamp), event }))
-    .sort((a, b) => a.at - b.at)
-    .map(item => item.event);
+  for (const item of stamped) if (item.at > lastMs) lastMs = item.at;
+  // Only the last `limit` bars are kept, so older ticks cannot change the answer. Two bars of margin
+  // keep the oldest kept bar complete instead of partial.
+  const fromMs = finite(lastMs) ? lastMs - (Math.max(1, limit) + 2) * intervalMs : -Infinity;
+  const ticks = stamped.filter(item => item.at >= fromMs).sort((a, b) => a.at - b.at).map(item => item.event);
   const bars = new Map();
   addTicks(bars, ticks, intervalMs, footprintStep);
   return { bars, ticks };
 }
 
-// Applies ticks in the order they are given. A buffer that only grew can be extended with the new
-// tail instead of being aggregated again from the start.
-export function addTicks(bars, events, intervalMs, footprintStep) {
-  const rule = bars._tickRule || (bars._tickRule = { prevBid: null, prevAsk: null, prevSide: null });
+// Applies time-ordered ticks. The tick-rule state travels with the bar map, so a buffer that only grew
+// is extended with its new tail and classifies exactly as a full rebuild would.
+export function addTicks(bars, events, intervalMs, footprintStep, classifier = bars._classifier || (bars._classifier = createTickClassifier())) {
   for (const event of events) {
     const t = normalizeTick(event);
-    const hasExplicitSide = ['buy', 'sell'].includes(event?.aggressorSide);
-    if (!hasExplicitSide && t.type === 'quote' && finite(t.bid)) {
-      // Bid-mode MT5 quotes carry last === bid. Without Tick Rule every quote would land on sell.
-      if (t.last <= t.bid && rule.prevBid !== null) {
-        if (t.bid > rule.prevBid) t.direction = 'buy';
-        else if (t.bid < rule.prevBid) t.direction = 'sell';
-        else if (finite(t.ask) && rule.prevAsk !== null && t.ask !== rule.prevAsk) t.direction = t.ask > rule.prevAsk ? 'buy' : 'sell';
-        else if (rule.prevSide) t.direction = rule.prevSide;
-        t.volume = tickVolume({ ...event, direction: t.direction });
-      }
-      if (t.last <= t.bid) {
-        rule.prevBid = t.bid;
-        rule.prevAsk = finite(t.ask) ? t.ask : rule.prevAsk;
-        if (t.direction === 'buy' || t.direction === 'sell') rule.prevSide = t.direction;
-      }
+    if (t.type === 'quote') {
+      const side = classifier.classify({ ...event, last: t.last });
+      if (side !== t.direction) { t.direction = side; t.volume = tickVolume({ ...event, direction: side, aggressorSide: undefined }); }
     }
     const start = floorTime(t.time, intervalMs);
     let bar = bars.get(start);
-    // The same builder the browser uses for the forming bar, so live and historical bars agree.
     if (!bar) { bar = { ...emptyBar(start, t.last), time: new Date(start).toISOString() }; bars.set(start, bar); }
     applyTickToBar(bar, t, footprintStep);
   }
   return bars;
 }
 
-// Everything derived from the bars: footprint columns, sweeps, zones, profile. Reading only.
+// Everything derived from the bars: footprint columns, sweeps, zones, profile. Reading only. A closed
+// bar's footprint is cached on the bar and reused until it receives another tick or the options change.
 export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1, footprintStep = priceStep, limit = 10000, maxZones, zoneOptions = {}, footprintOptions = {}, tickCount = 0, hasComex = false, comexOnly = false } = {}) {
   if (!(bars instanceof Map) || !finite(priceStep) || priceStep <= 0) throw new TypeError('Invalid analysis input');
-  const rawBars = [...bars.values()].slice(-Math.max(1, limit));
-  const validatedFoot = validateFootprintOptions(footprintOptions);
-  const effectiveTicksPerRow = validatedFoot.autoStep
-    ? autoTicksPerRow(rawBars.slice(-16), footprintStep, 28)
-    : validatedFoot.ticksPerRow;
-  const resolvedFootprint = { ...validatedFoot, ticksPerRow: effectiveTicksPerRow, autoStep: false };
+  const keys = [...bars.keys()].sort((a, b) => a - b).slice(-Math.max(1, limit));
+  const rawBars = keys.map(key => bars.get(key));
+  const foot = validateFootprintOptions(footprintOptions);
+  const footKey = JSON.stringify([foot, footprintStep]);
   let cumulativeDelta = 0;
   const result = rawBars.map((bar, barIndex, allBars) => {
     const total=bar.bid+bar.ask+bar.unknown;
     const delta=bar.ask-bar.bid;
     cumulativeDelta += delta;
-    // POC, value area, diagonal imbalance, stacked imbalance, absorption and the unfinished
-    // auction all come from one module, shared with the live browser path.
-    const foot = footprintOf(bar.levels, { ...resolvedFootprint, priceStep: footprintStep, h: bar.h, l: bar.l, c: bar.c });
-    const levels = foot.levels;
-    const imbalances = foot.imbalances;
-    const stacked = foot.stackedImbalances;
+    const cacheKey = footKey + '|' + bar.tickCount;
+    if (bar._footKey !== cacheKey) { bar._foot = footprintOf(bar.levels, { ...foot, priceStep: footprintStep, h: bar.h, l: bar.l, c: bar.c }); bar._footKey = cacheKey; }
+    const fp = bar._foot;
     const prior=allBars.slice(Math.max(0,barIndex-20),barIndex);
     const priorHigh=prior.length?Math.max(...prior.map(x=>x.h)):null,priorLow=prior.length?Math.min(...prior.map(x=>x.l)):null;
     const sweeps=[];
@@ -120,13 +98,13 @@ export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1
     const range=Math.max(0,bar.h-bar.l),body=Math.abs(bar.c-bar.o),directionalKnown=bar.unknown===0&&total>0;
     const absorption=directionalKnown&&total>=3&&range>0&&body/range<=0.25&&Math.abs(delta)/total<=0.2;
     const exhaustion=directionalKnown&&total>=3&&Math.abs(delta)/total>=0.7&&range<=priceStep*5;
-    return {time:bar.time,timeMs:bar.timeMs,o:bar.o,h:bar.h,l:bar.l,c:bar.c,tickCount:bar.tickCount,volume:total,bid:bar.bid,ask:bar.ask,unknown:bar.unknown,delta,cumulativeDelta,levels,imbalances,stackedImbalances:stacked,
-      poc:foot.poc,valueArea:foot.valueArea,deltaRatio:foot.deltaRatio,absorbedLevels:foot.absorbedLevels,
-      unfinishedHigh:foot.unfinishedHigh,unfinishedLow:foot.unfinishedLow,maxLevelVolume:foot.maxLevelVolume,
+    return {time:bar.time,timeMs:bar.timeMs,o:bar.o,h:bar.h,l:bar.l,c:bar.c,tickCount:bar.tickCount,volume:total,bid:bar.bid,ask:bar.ask,unknown:bar.unknown,delta,cumulativeDelta,levels:fp.levels,imbalances:fp.imbalances,stackedImbalances:fp.stackedImbalances,
+      poc:fp.poc,valueArea:fp.valueArea,deltaRatio:fp.deltaRatio,absorbedLevels:fp.absorbedLevels,
+      unfinishedHigh:fp.unfinishedHigh,unfinishedLow:fp.unfinishedLow,maxLevelVolume:fp.maxLevelVolume,
       sweeps,absorption,exhaustion};
   });
   const zones = detectLiquidityZones(result, priceStep, { ...zoneOptions, ...(maxZones === undefined ? {} : { maxZones }) });
-  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, effectiveTicksPerRow, rowStep: Number((footprintStep * effectiveTicksPerRow).toFixed(8)), profile:sessionProfile(result, { priceStep: footprintStep, options: resolvedFootprint }), divergence:cumulativeDivergence(result), tickCount, volumeKind:hasComex?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:comexOnly?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
+  return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, ticksPerRow: foot.ticksPerRow, rowStep: Number((footprintStep * foot.ticksPerRow).toFixed(8)), tickRule: bars._classifier ? bars._classifier.state() : null, profile:sessionProfile(result, { priceStep: footprintStep, options: foot }), divergence:cumulativeDivergence(result), tickCount, volumeKind:hasComex?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:comexOnly?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };
 }
 
 export const DEFAULT_ZONE_OPTIONS = Object.freeze({
@@ -142,8 +120,7 @@ export const DEFAULT_ZONE_OPTIONS = Object.freeze({
   useSessions: true,    // include Asia / London / New York session extremes
   useWeek: true,        // include the weekly open and the previous week's extremes
   useHigherTf: true,    // include H1/H4 swings aggregated from the same candles
-  useVolume: true,      // include the volume profile (POC, value-area edges)
-  strongOnly: false     // true: lock levels to closed bars & keep only strong structural zones (no intra-bar jitter)
+  useVolume: true       // include the volume profile (POC, value-area edges)
 });
 
 export function validateZoneOptions(input = {}) {
@@ -156,7 +133,7 @@ export function validateZoneOptions(input = {}) {
   const num = (k, lo, hi) => { if (!finite(o[k]) || o[k] < lo || o[k] > hi) throw new TypeError(`${k} must be between ${lo} and ${hi}`); };
   int('minZones', 1, 20); int('maxZones', 1, 20); int('pivotWidth', 1, 6); int('atrPeriod', 2, 200); int('reactionBars', 1, 50);
   num('clusterAtr', 0.05, 3); num('zoneWidthAtr', 0.02, 2); num('maxDistanceAtr', 1, 100);
-  for (const flag of ['usePriorDay', 'useSessions', 'useWeek', 'useHigherTf', 'useVolume', 'strongOnly']) {
+  for (const flag of ['usePriorDay', 'useSessions', 'useWeek', 'useHigherTf', 'useVolume']) {
     if (typeof o[flag] !== 'boolean') throw new TypeError(`${flag} must be a boolean`);
   }
   if (o.minZones > o.maxZones) o.minZones = o.maxZones;
@@ -192,13 +169,10 @@ export function detectLiquidityZones(bars, priceStep = 0.1, options = {}) {
   if (bars.length < 6) return [];
   // The newest bar may still be forming: swings are confirmed only by closed bars.
   const closed = bars.slice(0, -1);
-  const liveLast = bars.at(-1).c;
-  // In strongOnly mode anchor every distance/score calculation to the last closed bar so zones
-  // never re-rank or flicker on intra-bar ticks; they only reconsider when a full candle closes.
-  const last = o.strongOnly ? closed.at(-1).c : liveLast;
+  const last = bars.at(-1).c;
   const atr = averageTrueRange(closed, o.atrPeriod);
   if (!(atr > 0) || !finite(last)) return [];
-  const w = o.strongOnly ? Math.max(o.pivotWidth, 3) : o.pivotWidth;
+  const w = o.pivotWidth;
   const vol = b => finite(b.volume) && b.volume > 0 ? b.volume : finite(b.tickCount) && b.tickCount > 0 ? b.tickCount : 0;
   const medVol = median(closed.map(vol));
 
@@ -289,27 +263,16 @@ export function detectLiquidityZones(bars, priceStep = 0.1, options = {}) {
   }
 
   // Keep the strongest of levels that sit on top of each other; a crowded chart hides the useful ones.
-  const minGap = Math.max(2 * tolerance, (o.strongOnly ? 0.85 : 0.5) * atr) + 2 * pad;
+  const minGap = Math.max(2 * tolerance, 0.5 * atr) + 2 * pad;
   candidates.sort((a, b) => b.score - a.score || a.distanceAtr - b.distanceAtr);
   for (let i = candidates.length - 1; i >= 0; i--) {
     const z = candidates[i];
     if (candidates.slice(0, i).some(k => Math.abs(k.mid - z.mid) < minGap)) candidates.splice(i, 1);
   }
 
-  // Strong-only filter: drop weak single-touch swings and never pad the chart with synthetic
-  // 10-bar/round-number fillers. Only multi-touch swings, confluences, or major structural levels survive.
-  if (o.strongOnly) {
-    const MAJOR_SOURCES = new Set(['priorDay', 'week', 'higherTf', 'volume', 'sessions']);
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const z = candidates[i];
-      const structural = z.reference ? MAJOR_SOURCES.has(z.source) : (z.touches >= 2 || (z.sources && z.sources.length >= 1) || z.score >= 0.52);
-      if (!structural || z.score < 0.42) candidates.splice(i, 1);
-    }
-  }
-
   // Too few swing levels (trend or short history): fill with weaker, well-known reference levels.
   const sideEmpty = above => !candidates.some(z => (z.mid > last) === above);
-  if (!o.strongOnly && (candidates.length < o.minZones || sideEmpty(true) || sideEmpty(false))) {
+  if (candidates.length < o.minZones || sideEmpty(true) || sideEmpty(false)) {
     const covered = price => candidates.some(z => price >= z.low - tolerance && price <= z.high + tolerance);
     const extra = [];
     for (const span of [10, 50, closed.length]) {

@@ -35,5 +35,5 @@ test('the browser loads the candle module and the build ships it', async () => {
   const main = await readFile(new URL('./electron/main.js', import.meta.url), 'utf8');
   assert.match(main.match(/for \(const asset of \[([^\]]*)\]\)/) [1], /'\/footprint-candle\.js'/, 'the packaged-app smoke test fetches it');
   const app = await readFile(new URL('./app.js', import.meta.url), 'utf8');
-  assert.match(app, /cls\+=' candle-'\+part/, 'the footprint cells carry the candle part');
+  assert.match(app, /candlePart\(f, r\.price, /, 'the canvas footprint shades each row by its candle part');
 });

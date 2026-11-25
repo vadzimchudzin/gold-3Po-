@@ -1,29 +1,24 @@
 import { marketSymbol, marketFeedId, hasMt5Bridge } from './mt5-client.js';
 import { priceDigits, priceText, createQuoteGate } from './quote-display.js';
+
+// The page's link to the local market service.
+//  - Live ticks arrive on the SSE stream and move the forming candle in the browser at once.
+//  - The authoritative window (candles, footprint, zones) is reloaded when a candle closes, when history
+//    lands, on a timeframe change, on the refresh button, and every ANALYSIS_EVERY_MS as a safety net —
+//    never once per tick: a multi-megabyte reload per tick is what made the interface lag.
+//  - A silent stream is reopened, and while it is silent the newest quote is read directly.
 const api=document.querySelector('#apiStatus'),mt5=document.querySelector('#mt5Status'),comex=document.querySelector('#comexStatus');
-const labels={mt5,comex};let source;let analysisTimer=null;let lastAnalysisAt=0;let reconnectTimer=null;
-const STALE_MS=45000,STREAM_SILENCE_MS=15000;
-// Any frame from the stream, ping included. A stream that stays silent is a dead socket (sleep, proxy,
-// a restarted service): it is reopened instead of waiting for an error that never comes.
-let lastFrameAt=Date.now();
+const labels={mt5,comex};
+const ANALYSIS_EVERY_MS=10000,STREAM_SILENCE_MS=15000,QUOTE_POLL_MS=1000,QUOTE_POLL_SILENCE_MS=2500,STALE_MS=45000;
 const pill=document.querySelector('.demo-pill'),link=document.querySelector('.connection');
-let clearedWithoutFeed=false;
-// One gate and one formatter for every quote on the page: a tick that arrives late cannot move the
-// strip back, and every field prints the same price with the same decimals.
 const quotes=createQuoteGate();
-// The feed currently drawn on the chart: the bridge's own feed when it reports one, otherwise the
-// live feed the server resolved for us.
-let displayedFeedId=null;
-// Set when the account the bridge names went quiet and another feed is streaming: the chart then
-// follows the live feed instead of a remembered one. Cleared when the bridge switches account.
-let feedOverride=null;
-// Consecutive answers that name a different feed than the one asked for: a switched MT5 account,
-// not a glitch. Two in a row and the page follows the server instead of freezing on the old feed.
-let feedMismatch=0;
-let quoteDigits=2;
-let lastSseTickAt=0,lastTickSeq=0,quotePolling=false,feedOnline=false,lastPolledAt=0;
+let source=null,reconnectTimer=null,lastFrameAt=Date.now();
+let analysisTimer=null,analysisInFlight=null,analysisQueued=false,lastAnalysisAt=0,requestSerial=0;
+let clearedWithoutFeed=false,quoteDigits=2,lastSseTickAt=0,lastTickSeq=0,quotePolling=false,feedOnline=false;
+let displayedFeedId=null,feedOverride=null,feedMismatch=0,lastBucket=null,forceFresh=false;
 const feedStates={online:'ОНЛАЙН',stale:'УСТАРЕЛ',offline:'ОФФЛАЙН',waiting:'ОЖИДАНИЕ'};
 const feedText=status=>feedStates[String(status||'').toLowerCase()]||String(status||'ОЖИДАНИЕ').toUpperCase();
+const intervalMs=()=>Number(window.gold3poIntervalMs?.())||900000;
 function topStatus(label,state){
  if(pill)pill.lastChild.textContent=' ROBOFOREX MT5 · '+label;
  if(link){link.lastChild.textContent=state==='online'?' ЖИВЫЕ ДАННЫЕ':state==='error'?' НЕТ СВЯЗИ':' ОЖИДАНИЕ ДАННЫХ';link.classList.toggle('is-live',state==='online');}
@@ -40,22 +35,16 @@ function paintQuote(quote,{strip=true}={}){
  if(askNode)askNode.textContent=priceText(quote.ask,quoteDigits);
  if(spreadNode)spreadNode.textContent=priceText(quote.spread,quoteDigits);
 }
-// Two MT5 accounts can quote XAUUSD at different levels. Say which one is on screen instead of
-// leaving the trader to guess why the app and the terminal disagree.
-function renderFeedConflict(conflict,feedId){
+// Two MT5 accounts can quote XAUUSD at different levels: say which one is on screen.
+function renderFeedConflict(conflict){
  const node=document.querySelector('#feedConflict');
  if(!node)return;
  if(!conflict){node.hidden=true;node.textContent='';return;}
- const entries=conflict.feeds.map(item=>{
-  const label=String(item.feedId||'legacy').slice(0,6);
-  return priceText(item.price,quoteDigits)+' — счёт '+label+(item.active?' (на графике)':'');
- }).join(' · ');
+ const entries=conflict.feeds.map(item=>priceText(item.price,quoteDigits)+' — счёт '+String(item.feedId||'legacy').slice(0,6)+(item.active?' (на графике)':'')).join(' · ');
  node.textContent='⚠ По XAUUSD подключено несколько счетов с разной ценой: '+entries+'. В терминале может быть другой счёт.';
  node.hidden=false;
 }
-// The one feed the page is showing: the bridge's account when it is streaming, otherwise the live
-// feed the server resolved. Analysis, the stream filter and the quote strip all use it, so a tick
-// can never be judged against a different account than the chart is drawn from.
+// The one feed the page shows: analysis, the stream filter and the quote strip all use it.
 function activeFeedId(){return feedOverride||displayedFeedId||marketFeedId()||null;}
 function updateReferencePrice(price,timestamp){
  const value=Number(price);
@@ -63,9 +52,7 @@ function updateReferencePrice(price,timestamp){
  paintQuote(quotes.accept({bid:value,ask:value,last:value,timestamp}),{strip:false});
 }
 function clearFeedDisplay(){
- quotes.reset();
- displayedFeedId=null;
- feedOverride=null;
+ quotes.reset();displayedFeedId=null;feedOverride=null;lastBucket=null;
  const price=document.querySelector('#referencePrice');if(price){price.textContent='—';price.removeAttribute('title');delete price.dataset.archive;}
  const range=document.querySelector('#sessionRange');if(range)range.textContent='Ожидание истории';
  const mode=document.querySelector('#dataMode');if(mode)mode.textContent='ОЖИДАНИЕ ROBOFOREX MT5';
@@ -73,124 +60,143 @@ function clearFeedDisplay(){
  const status=document.querySelector('#chartStatus');if(status){status.textContent='ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5';status.className='warning';}
  window.dispatchEvent(new CustomEvent('market-feed-clear'));
 }
-// An archive is not a price. When the account has no live feed the strip says where the numbers end
-// instead of presenting the last stored tick as the current quote.
 function archiveStamp(iso){const d=new Date(iso);return Number.isNaN(d.getTime())?'':d.toLocaleString([],{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function markArchive(at){
  const price=document.querySelector('#referencePrice');if(!price)return;
  if(at){price.dataset.archive='1';price.title='АРХИВ · последняя сохранённая котировка '+new Date(at).toLocaleString()+' — живых данных от MT5 нет';}
  else delete price.dataset.archive;
 }
-async function refreshAnalysis(){
+// One request at a time; a request made while one is running is queued once. An answer for a timeframe
+// or feed the page has since left is dropped instead of being drawn.
+function refreshAnalysis(){
+ if(analysisInFlight){analysisQueued=true;return analysisInFlight;}
+ analysisInFlight=loadAnalysis().finally(()=>{analysisInFlight=null;if(analysisQueued){analysisQueued=false;scheduleAnalysis(0);}});
+ return analysisInFlight;
+}
+async function loadAnalysis(){
  const feedId=marketFeedId();
  if(!feedId&&hasMt5Bridge()){if(!clearedWithoutFeed){clearFeedDisplay();clearedWithoutFeed=true;}lastAnalysisAt=Date.now();return;}
  clearedWithoutFeed=false;
- // Never fall back to the "legacy" bucket: it is data with no account attached, and it can be a
- // different market than the terminal. Without a known feed the server resolves the live one.
  const requestedFeedId=feedOverride||feedId||null;
+ const wantedInterval=intervalMs();
+ const serial=++requestSerial;
  try{
-  const params=new URLSearchParams({symbol:marketSymbol(),priceStep:'0.1',limit:'1200'});
+  const params=new URLSearchParams({symbol:marketSymbol(),priceStep:'0.1',limit:'800',intervalMs:String(wantedInterval)});
   if(requestedFeedId)params.set('feedId',requestedFeedId);
+  const levelsFrom=Number(window.gold3poLevelsFrom?.());
+  if(Number.isFinite(levelsFrom)&&levelsFrom>0)params.set('levelsFrom',String(levelsFrom));
+  if(forceFresh){params.set('fresh','1');forceFresh=false;}
   const response=await fetch('/v1/market/analysis?'+params,{cache:'no-store'});
   if(!response.ok)throw new Error('HTTP '+response.status);
   const data=await response.json();
+  if(serial!==requestSerial||wantedInterval!==intervalMs())return;
   if(requestedFeedId&&(data.feedId||null)!==requestedFeedId){
-   // The account was switched in MT5 and the server now resolves a different feed. Discarding these
-   // answers forever left the chart frozen on an untradeable price; after two, follow the server.
+   // The account was switched in MT5: after two answers naming another feed, follow the server.
    feedMismatch+=1;
    if(feedMismatch<2)return;
-   feedMismatch=0;feedOverride=data.feedId||null;lastAnalysisAt=0;scheduleAnalysis(0);return;
+   feedMismatch=0;feedOverride=data.feedId||null;scheduleAnalysis(0);return;
   } else feedMismatch=0;
-  // A pinned account that stopped streaming while another feed is live is the "app says 4100, the
-  // terminal says 3600" case: follow the live feed and re-ask straight away.
-  if(requestedFeedId&&data.liveFeedId&&(data.liveFeedId||null)!==(requestedFeedId||null)){
+  // A pinned account that went quiet while another one streams: follow the live one.
+  if(requestedFeedId&&data.liveFeedId&&data.liveFeedId!==requestedFeedId){
    const prices=data.feedPrices||[];
-   const pinned=prices.find(item=>item.feedId===requestedFeedId);
-   const live=prices.find(item=>item.feedId===(data.liveFeedId||null));
-   if(pinned&&live&&pinned.ageMs>20000&&live.ageMs<10000){
-    feedOverride=data.liveFeedId;lastAnalysisAt=0;scheduleAnalysis(0);return;
-   }
+   const pinned=prices.find(item=>item.feedId===requestedFeedId),live=prices.find(item=>item.feedId===data.liveFeedId);
+   if(pinned&&live&&pinned.ageMs>20000&&live.ageMs<10000){feedOverride=data.liveFeedId;scheduleAnalysis(0);return;}
   }
   displayedFeedId=data.feedId||null;
   if(data.bars?.length){
+   lastBucket=data.bars.at(-1).timeMs;
    window.dispatchEvent(new CustomEvent('market-analysis',{detail:data}));
-   // The broker's tick size decides the decimals every quote on the page prints with.
    quoteDigits=priceDigits(data.footprintStep);
-   const online=data.feed?.status==='online';
-   feedOnline=online;
-   const archiveAt=online?null:(data.archive?.lastTickAt||null);
-   const mode=document.querySelector('#dataMode');if(mode)mode.textContent=(online?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · АРХИВ'+(archiveAt?' до '+archiveStamp(archiveAt):''))+(data.feedId?' · '+String(data.feedId).slice(0,6):'');
-   renderFeedConflict(data.priceConflict,data.feedId);
+   feedOnline=data.feed?.status==='online';
+   const archiveAt=feedOnline?null:(data.archive?.lastTickAt||null);
+   const mode=document.querySelector('#dataMode');if(mode)mode.textContent=(feedOnline?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · АРХИВ'+(archiveAt?' до '+archiveStamp(archiveAt):''))+(data.feedId?' · '+String(data.feedId).slice(0,6):'');
+   renderFeedConflict(data.priceConflict);
    if(Number.isFinite(data.lastQuote?.sequence))lastTickSeq=Math.max(lastTickSeq,data.lastQuote.sequence);
    if(data.lastQuote)updateReferencePrice(data.lastQuote.last,data.lastQuote.timestamp);
    else updateReferencePrice(data.bars.at(-1).c,data.bars.at(-1).time);
-   // Same number, honest label: without a live feed the value is an archive close, not a quote.
    markArchive(archiveAt);
-   const range=document.querySelector('#sessionRange');if(range){const lo=Math.min(...data.bars.map(b=>b.l)),hi=Math.max(...data.bars.map(b=>b.h));range.textContent=priceText(lo,quoteDigits)+' — '+priceText(hi,quoteDigits);}
-   const count=document.querySelector('#barCount');if(count)count.textContent=data.bars.length+' СВЕЧЕЙ';
+   let lo=Infinity,hi=-Infinity;for(const b of data.bars){if(b.l<lo)lo=b.l;if(b.h>hi)hi=b.h;}
+   const range=document.querySelector('#sessionRange');if(range)range.textContent=priceText(lo,quoteDigits)+' — '+priceText(hi,quoteDigits);
   }
   lastAnalysisAt=Date.now();
- }catch{ /* The chart remains on the last verified feed; health and SSE keep retrying. */ }
+ }catch{ /* the chart stays on the last verified window; the next timer or tick retries */ }
 }
-function scheduleAnalysis(){if(analysisTimer)return;analysisTimer=window.setTimeout(()=>{analysisTimer=null;refreshAnalysis();},500);}
+function scheduleAnalysis(delay=400){
+ if(analysisTimer)return;
+ analysisTimer=window.setTimeout(()=>{analysisTimer=null;refreshAnalysis();},delay);
+}
 async function refreshHealth(){
  try{
   const response=await fetch('/health',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);
   const health=await response.json();paint(api,health.ingestConfigured?'API ОНЛАЙН':'НЕТ ТОКЕНА',health.ingestConfigured?'online':'warning');
-  const currentFeed=marketFeedId();
-  const mt5Feed=health.feeds.find(item=>item.source==='mt5'&&item.symbol===marketSymbol()&&item.feedId===currentFeed);
+  const shown=activeFeedId();
+  const mt5Feed=health.feeds.find(item=>item.source==='mt5'&&item.symbol===marketSymbol()&&(item.feedId||null)===(shown||null));
   if(!mt5Feed)paint(mt5,'ОЖИДАНИЕ','warning');else paint(mt5,feedText(mt5Feed.status)+' · '+ageLabel(mt5Feed.ageMs),mt5Feed.status);
   const comexFeed=health.feeds.find(item=>item.source==='comex');
   if(!comexFeed)paint(comex,'ОЖИДАНИЕ','warning');else paint(comex,feedText(comexFeed.status)+' · '+ageLabel(comexFeed.ageMs),comexFeed.status);
-  if(Date.now()-lastAnalysisAt>10000)scheduleAnalysis();
  }catch{paint(api,'API НЕДОСТУПЕН','error');paint(mt5,'НЕДОСТУПНО','error');paint(comex,'НЕДОСТУПНО','error');}
+}
+// A tick in a newer candle than the window's last one: the previous candle just closed, so the window
+// (footprint marks, zones) is reloaded once.
+function noteTickBucket(timestamp){
+ const at=Date.parse(timestamp);if(!Number.isFinite(at))return;
+ const bucket=Math.floor(at/intervalMs())*intervalMs();
+ if(lastBucket!==null&&bucket>lastBucket){lastBucket=bucket;scheduleAnalysis(600);}
 }
 function connectStream(){
  if(!('EventSource'in window)){paint(api,'SSE НЕ ПОДДЕРЖИВАЕТСЯ','error');return;}
- lastFrameAt=Date.now();source=new EventSource('/v1/stream');source.onopen=()=>{lastFrameAt=Date.now();refreshHealth();scheduleAnalysis();};source.addEventListener('ping',()=>{lastFrameAt=Date.now();});source.addEventListener('ready',()=>{lastFrameAt=Date.now();});source.onerror=()=>{paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');reconnect();};
+ lastFrameAt=Date.now();
+ source=new EventSource('/v1/stream');
+ source.onopen=()=>{lastFrameAt=Date.now();refreshHealth();scheduleAnalysis(0);};
+ source.addEventListener('ping',()=>{lastFrameAt=Date.now();});
+ source.addEventListener('ready',()=>{lastFrameAt=Date.now();});
+ source.onerror=()=>{paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');reconnect();};
+ source.addEventListener('history',event=>{
+  lastFrameAt=Date.now();
+  try{const notice=JSON.parse(event.data);if((notice.feedId||null)===(activeFeedId()||null)||!activeFeedId())scheduleAnalysis(1500);}catch{}
+ });
+ source.addEventListener('spec',event=>{
+  lastFrameAt=Date.now();
+  try{const notice=JSON.parse(event.data);if(notice.symbol===marketSymbol()&&((notice.feedId||null)===(activeFeedId()||null)||!activeFeedId()))scheduleAnalysis(0);}catch{}
+ });
  source.addEventListener('market',event=>{try{
-   lastFrameAt=Date.now();
-   const message=JSON.parse(event.data),target=labels[message.source];
-   if(message.source==='mt5'&&message.symbol===marketSymbol()&&(message.feedId||null)===(activeFeedId()||null)){
-    if(!message.historical){lastSseTickAt=Date.now();if(Number.isFinite(message.sequence))lastTickSeq=Math.max(lastTickSeq,message.sequence);}
-    if(!message.historical)paint(mt5,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
-    if(!message.historical)updateReferencePrice(message.last,message.timestamp);
-    scheduleAnalysis();
-    if(!message.historical)window.dispatchEvent(new CustomEvent('market-tick',{detail:message}));
-   }else if(message.source==='comex'&&target&&!message.historical){
-    paint(target,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
-   }
-  }catch{/* malformed stream frames are ignored; /health remains authoritative */}});
+  lastFrameAt=Date.now();
+  const message=JSON.parse(event.data),target=labels[message.source];
+  if(message.source==='mt5'&&message.symbol===marketSymbol()&&(message.feedId||null)===(activeFeedId()||null)){
+   if(message.historical){scheduleAnalysis(1500);return;}
+   lastSseTickAt=Date.now();
+   if(Number.isFinite(message.sequence))lastTickSeq=Math.max(lastTickSeq,message.sequence);
+   paint(mt5,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
+   window.dispatchEvent(new CustomEvent('market-tick',{detail:message}));
+   noteTickBucket(message.timestamp);
+  }else if(message.source==='mt5'&&message.symbol===marketSymbol()&&!message.historical&&!activeFeedId()){
+   scheduleAnalysis(0);
+  }else if(message.source==='comex'&&target&&!message.historical){
+   paint(target,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
+  }
+ }catch{/* malformed frames are ignored; /health stays authoritative */}});
 }
 function reconnect(){
  if(reconnectTimer)return;
- reconnectTimer=window.setTimeout(()=>{reconnectTimer=null;try{source?.close();}catch{}connectStream();},5000);
+ reconnectTimer=window.setTimeout(()=>{reconnectTimer=null;try{source?.close();}catch{}connectStream();},3000);
 }
 function streamWatch(){
- if(Date.now()-lastFrameAt<STREAM_SILENCE_MS){return;}
+ if(Date.now()-lastFrameAt<STREAM_SILENCE_MS)return;
  paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');
  try{source?.close();}catch{}
- lastFrameAt=Date.now();
  connectStream();
- lastAnalysisAt=0;scheduleAnalysis(0);
+ scheduleAnalysis(0);
 }
 function watchdog(){
+ if(document.hidden)return;
  const age=Date.now()-lastAnalysisAt;
- if(!lastAnalysisAt){scheduleAnalysis();return;}
- if(age>STALE_MS){
-  paint(mt5,'АНАЛИТИКА НЕ ОБНОВЛЯЕТСЯ · '+Math.round(age/1000)+' с','warning');
-  lastAnalysisAt=0;scheduleAnalysis();
-  if(!source||source.readyState===EventSource.CLOSED)reconnect();
- }
+ if(age>=ANALYSIS_EVERY_MS)scheduleAnalysis(0);
+ if(lastAnalysisAt&&age>STALE_MS)paint(mt5,'АНАЛИТИКА НЕ ОБНОВЛЯЕТСЯ · '+Math.round(age/1000)+' с','warning');
 }
-window.addEventListener('mt5-symbol-change',()=>{lastAnalysisAt=0;quotes.reset();refreshAnalysis();refreshHealth();});
-window.addEventListener('mt5-feed-change',()=>{lastAnalysisAt=0;quotes.reset();feedOverride=null;clearedWithoutFeed=false;refreshAnalysis();refreshHealth();});
-window.addEventListener('gold3po-settings',e=>{if(e.detail?.zonesChanged){lastAnalysisAt=0;refreshAnalysis();}});
-// Safety net under the SSE stream: when no tick has arrived for a moment (a proxy that buffers the
-// stream, a stalled socket, a feed id the page filtered out) the newest quote is read directly, so
-// the price never freezes while MT5 is quoting. Ticks seen on the stream are not repeated.
+// Safety net under the stream: while it is silent the newest quote is read directly, so the price
+// never freezes while MT5 is quoting. Ticks already seen on the stream are not repeated.
 async function pollQuote(){
- if(quotePolling||document.hidden||Date.now()-lastSseTickAt<700)return;
+ if(quotePolling||document.hidden||Date.now()-lastSseTickAt<QUOTE_POLL_SILENCE_MS)return;
  quotePolling=true;
  try{
   const params=new URLSearchParams({symbol:marketSymbol()});
@@ -199,26 +205,41 @@ async function pollQuote(){
   if(!response.ok)return;
   const quote=await response.json();
   if(quote.ageMs>20000||!(quote.sequence>lastTickSeq))return;
-  lastTickSeq=quote.sequence;lastPolledAt=Date.now();
-  if(!wanted&&quote.feedId&&quote.feedId!==displayedFeedId){lastAnalysisAt=0;scheduleAnalysis();}
+  lastTickSeq=quote.sequence;
+  if(!wanted&&quote.feedId&&quote.feedId!==displayedFeedId){scheduleAnalysis(0);return;}
   window.dispatchEvent(new CustomEvent('market-tick',{detail:{...quote,polled:true}}));
-  updateReferencePrice(quote.last,quote.timestamp);
+  noteTickBucket(quote.timestamp);
  }catch{ /* the stream or the next poll recovers */ }
  finally{quotePolling=false;}
 }
-window.setInterval(pollQuote,400);
-// While the stream is silent and only the poll delivers quotes, the chart and footprint are rebuilt
-// from the server every few seconds so they keep following the market.
-window.setInterval(()=>{if(!document.hidden&&feedOnline&&Date.now()-lastPolledAt<3000&&Date.now()-lastAnalysisAt>2500)scheduleAnalysis();},1000);
-// The manual refresh button: drop every cached piece of state and reload from the server.
-window.gold3poRefresh=()=>{quotes.reset();lastTickSeq=0;lastAnalysisAt=0;feedMismatch=0;try{source?.close();}catch{}lastFrameAt=Date.now();connectStream();refreshHealth();return refreshAnalysis();};
-refreshHealth();refreshAnalysis();connectStream();window.setInterval(refreshHealth,5000);window.setInterval(watchdog,10000);window.setInterval(streamWatch,5000);
-
-// Keep the quote strip in sync with the active account's live MT5 quote stream.
-// The same gate orders the strip, so a replayed or overlapping frame never rewinds bid/ask.
+window.addEventListener('mt5-symbol-change',()=>{quotes.reset();lastBucket=null;scheduleAnalysis(0);refreshHealth();});
+window.addEventListener('mt5-feed-change',()=>{quotes.reset();feedOverride=null;clearedWithoutFeed=false;lastBucket=null;scheduleAnalysis(0);refreshHealth();});
+window.addEventListener('gold3po-settings',e=>{if(e.detail?.zonesChanged)scheduleAnalysis(0);});
+// A timeframe click is answered at once in the new timeframe; the settings save follows on its own.
+window.addEventListener('gold3po-timeframe',()=>{lastBucket=null;requestSerial+=1;scheduleAnalysis(0);});
+// The refresh buttons: the MT5 bridge polls now (or reopens if it was lost), the service rebuilds the
+// window from its buffer, and the stream is reopened.
+window.gold3poRefresh=async()=>{
+ quotes.reset();lastTickSeq=0;feedMismatch=0;lastBucket=null;forceFresh=true;
+ try{source?.close();}catch{}
+ connectStream();
+ try{await window.goldMt5?.refresh?.();}catch{}
+ refreshHealth();
+ requestSerial+=1;
+ if(analysisInFlight){analysisQueued=true;await analysisInFlight;}
+ return refreshAnalysis();
+};
+// The strip follows every tick of the feed on screen; the gate keeps a late frame from rewinding it.
 window.addEventListener('market-tick',event=>{
  const tick=event.detail;
  const shownFeedId=activeFeedId();
  if(!tick||tick.source!=='mt5'||tick.symbol!==marketSymbol()||(tick.feedId||null)!==(shownFeedId||null))return;
  paintQuote(quotes.accept(tick));
 });
+// The footprint asks for the window again when it is scrolled onto candles whose ladders were not sent.
+window.gold3poRequestAnalysis=()=>scheduleAnalysis(300);
+refreshHealth();refreshAnalysis();connectStream();
+window.setInterval(refreshHealth,5000);
+window.setInterval(watchdog,2000);
+window.setInterval(streamWatch,5000);
+window.setInterval(pollQuote,QUOTE_POLL_MS);

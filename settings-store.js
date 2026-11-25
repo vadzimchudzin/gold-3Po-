@@ -11,7 +11,8 @@ export const TIMEFRAMES = [1, 5, 15, 30, 60, 240];
 
 export const DEFAULT_SETTINGS = Object.freeze({
   zones: { ...DEFAULT_ZONE_OPTIONS, timeframeMinutes: 15 },
-  footprint: { ...DEFAULT_FOOTPRINT_OPTIONS, autoStep: true },
+  // One broker step per footprint row, as in the pre-auto builds; the row size never changes by itself.
+  footprint: { ...DEFAULT_FOOTPRINT_OPTIONS },
   mt5: {
     buyColor: '#FF0000',   // zones above price (resistance / buy-side liquidity)
     sellColor: '#FF0000',  // zones below price (support / sell-side liquidity)
@@ -35,8 +36,24 @@ function section(name, input, defaults) {
   return { ...defaults, ...input };
 }
 
-export function validateSettings(input = {}, base = DEFAULT_SETTINGS) {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new TypeError('Settings must be an object');
+// Keys earlier builds stored that no longer exist: a settings file written by them must still load
+// (an unknown key would otherwise reset every setting to its default).
+function withoutLegacyKeys(input) {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const out = { ...input };
+  if (out.zones && typeof out.zones === 'object') { const { strongOnly, ...zones } = out.zones; out.zones = zones; }
+  if (out.footprint && typeof out.footprint === 'object') {
+    const { autoStep, ...footprint } = out.footprint;
+    // "Auto" re-chose the row size on every request; it becomes the fixed default row.
+    if (autoStep === true) footprint.ticksPerRow = DEFAULT_SETTINGS.footprint.ticksPerRow;
+    out.footprint = footprint;
+  }
+  return out;
+}
+
+export function validateSettings(rawInput = {}, base = DEFAULT_SETTINGS) {
+  if (typeof rawInput !== 'object' || rawInput === null || Array.isArray(rawInput)) throw new TypeError('Settings must be an object');
+  const input = withoutLegacyKeys(rawInput);
   for (const key of Object.keys(input)) if (!['zones', 'footprint', 'mt5', 'ui'].includes(key)) throw new TypeError(`Unknown settings section: ${key}`);
 
   const f = section('footprint', input.footprint, base.footprint);

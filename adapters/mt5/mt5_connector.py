@@ -33,6 +33,14 @@ HISTORY_LIMIT = 100_000
 HISTORY_LOOKBACK = 24 * 60 * 60
 HISTORY_WINDOW = 30 * 60
 HISTORY_MAX_READS = 64
+# One backfill read: a bounded time window, so a read can never take long enough to trip the watchdog
+# and kill the live poll that shares this worker.
+BACKFILL_MAX_WINDOW = 6 * 60 * 60
+BACKFILL_LIMIT = 50_000
+# Some terminals stamp ticks in the broker's server time. A tick cannot come from the future, so a
+# terminal clock this far ahead of UTC is a time-zone shift that is taken out of every timestamp.
+CLOCK_SHIFT_MIN_MS = 10 * 60 * 1000
+CLOCK_SHIFT_UNIT_MS = 15 * 60 * 1000
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -188,7 +196,7 @@ def milliseconds(row):
         return int(row["time"]) * 1000
 
 
-def encode_tick(row, stamp, chart_mode=None):
+def encode_tick(row, stamp, chart_mode=None, offset_ms=0):
     bid, ask, last = (float(row[name]) for name in ("bid", "ask", "last"))
     volume = int(row["volume"])
     real_volume = float(row["volume_real"])
@@ -210,7 +218,7 @@ def encode_tick(row, stamp, chart_mode=None):
         # tick has no Last, retain the established quote-midpoint fallback.
         last = bid + (ask - bid) / 2
     return {
-        "timestamp": (EPOCH + timedelta(milliseconds=stamp)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "timestamp": (EPOCH + timedelta(milliseconds=stamp - offset_ms)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "bid": bid,
         "ask": ask,
         "last": last,
@@ -301,10 +309,12 @@ class Worker:
         self.api = None
         self.session = None
         self.chart_mode = None
+        self.clock_offset_ms = 0
 
     def close(self):
         self.session = None
         self.chart_mode = None
+        self.clock_offset_ms = 0
         if self.api is not None:
             try:
                 self.api.shutdown()
@@ -390,7 +400,10 @@ class Worker:
             # is made, no account password is requested and the active account is not changed.
             latest = self.api.symbol_info_tick(symbol)
             latest_ms = (latest.time_msc or latest.time * 1000) if latest is not None else 0
-            boundary = latest_ms // 1000 if latest_ms > 0 else int(datetime.now(timezone.utc).timestamp())
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            boundary = latest_ms // 1000 if latest_ms > 0 else now_ms // 1000
+            ahead = latest_ms - now_ms if latest_ms else 0
+            self.clock_offset_ms = round(ahead / CLOCK_SHIFT_UNIT_MS) * CLOCK_SHIFT_UNIT_MS if ahead > CLOCK_SHIFT_MIN_MS else 0
             self.verify(login, server)
             self.session = (login, server, symbol, boundary)
             self.cursor = (boundary, 0)
@@ -405,8 +418,10 @@ class Worker:
                 "accountLogin": str(login), "server": server,
                 # Everything downstream (history window, live cursor) is anchored to the terminal's last
                 # tick, so the caller must be able to say how old that anchor is.
-                "lastTickAt": (EPOCH + timedelta(milliseconds=latest_ms)).isoformat(timespec="seconds").replace("+00:00", "Z") if latest_ms else None,
-                "tickAgeMs": max(0, int(datetime.now(timezone.utc).timestamp() * 1000) - latest_ms) if latest_ms else None
+                "lastTickAt": (EPOCH + timedelta(milliseconds=latest_ms - self.clock_offset_ms)).isoformat(timespec="seconds").replace("+00:00", "Z") if latest_ms else None,
+                "tickAgeMs": max(0, now_ms - (latest_ms - self.clock_offset_ms)) if latest_ms else None,
+                "clockOffsetMs": self.clock_offset_ms,
+                "boundary": boundary
             }
             spec, missing = symbol_spec(self.api, symbol, symbol_info)
             if spec:
@@ -455,7 +470,7 @@ class Worker:
             seen += 1
             if second == start and seen <= offset:
                 continue
-            tick = encode_tick(row, stamp, self.chart_mode)
+            tick = encode_tick(row, stamp, self.chart_mode, self.clock_offset_ms)
             if tick is not None:
                 ticks.append(tick)
             if len(ticks) == POLL_LIMIT:
@@ -478,7 +493,7 @@ class Worker:
                     if row_second != r_second:
                         r_second, r_seen = row_second, 0
                     r_seen += 1
-                    tick = encode_tick(row, stamp, self.chart_mode)
+                    tick = encode_tick(row, stamp, self.chart_mode, self.clock_offset_ms)
                     if tick is not None:
                         ticks.append(tick)
                     if len(ticks) == POLL_LIMIT:
@@ -526,7 +541,7 @@ class Worker:
                 continue
             batch = []
             for stamp, row in items:
-                tick = encode_tick(row, stamp, self.chart_mode)
+                tick = encode_tick(row, stamp, self.chart_mode, self.clock_offset_ms)
                 if tick is not None:
                     batch.append(tick)
             if len(items) > remaining:
@@ -540,15 +555,45 @@ class Worker:
         self.require_session()
         return {"connected": True, "truncated": bool(windows), "ticks": [tick for batch in reversed(batches) for tick in batch]}
 
+    def backfill(self, command):
+        """One bounded window of history, [from, to) in terminal seconds, oldest first.
+
+        The parent asks for these one at a time between live polls, newest window first, so the live
+        feed never waits behind a whole day of history and a slow read cannot stall it."""
+        _, _, symbol, _ = self.require_session()
+        start, end = command.get("from"), command.get("to")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end or end - start > BACKFILL_MAX_WINDOW:
+            raise WorkerError("invalid_command", "Provide a backfill window: integer from < to, at most 6 hours.")
+        if hasattr(self.api, "copy_ticks_range"):
+            rows = self.api.copy_ticks_range(symbol, EPOCH + timedelta(seconds=start), EPOCH + timedelta(seconds=end), self.api.COPY_TICKS_ALL)
+            if rows is None:
+                raise mt5_error(self.api, "tick_read_failed", "MT5 could not read broker ticks for the history window.")
+        else:
+            rows = self.read_ticks(symbol, start, BACKFILL_LIMIT + 1)
+        items = [(milliseconds(row), row) for row in rows]
+        items = [(stamp, row) for stamp, row in items if start * 1000 <= stamp < end * 1000]
+        truncated = len(items) > BACKFILL_LIMIT
+        if truncated:
+            items = items[-BACKFILL_LIMIT:]
+        ticks = []
+        for stamp, row in items:
+            tick = encode_tick(row, stamp, self.chart_mode, self.clock_offset_ms)
+            if tick is not None:
+                ticks.append(tick)
+        self.require_session()
+        return {"connected": True, "from": start, "to": end, "truncated": truncated, "ticks": ticks}
+
     def dispatch(self, command):
         op = command.get("op")
+        if op == "backfill":
+            return self.backfill(command)
         if op == "connect":
             return self.connect(command)
         if op == "poll":
             return self.poll()
         if op == "history":
             return self.history()
-        raise WorkerError("unknown_operation", "Supported MT5 operations are connect, poll and history.")
+        raise WorkerError("unknown_operation", "Supported MT5 operations are connect, poll, history and backfill.")
 
 
 def reject_constant(_):

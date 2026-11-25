@@ -116,6 +116,7 @@ function registerMt5Ipc() {
   handle('state', () => { const current = mt5.state(); logStatus(current); return current; });
   handle('connect', () => connectAndRepairMt5());
   handle('disconnect', () => mt5.disconnect());
+  handle('refresh', () => mt5.refresh());
   handle('install-integration', () => repairMt5Integration());
   handle('zones-visible', visible => mt5.setZonesVisible(visible === true));
   const handleUpdate = (name, callback) => ipcMain.handle(`updates:${name}`, (event, value) => {
@@ -416,7 +417,7 @@ async function runSmokeTest() {
     throw new Error('The packaged application HTML is missing required workspace elements.');
   }
 
-  for (const asset of ['/app.js', '/market-client.js', '/research-client.js', '/license-client.js', '/setups-client.js', '/mt5-client.js', '/mt5-status.js', '/footprint-candle.js', '/styles.css']) {
+  for (const asset of ['/app.js', '/market-client.js', '/research-client.js', '/license-client.js', '/setups-client.js', '/mt5-client.js', '/mt5-status.js', '/footprint-candle.js', '/chart-view.js', '/delta-pane.js', '/styles.css']) {
     const response = await fetch(localOrigin + asset, { signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error(`Application asset ${asset} returned HTTP ${response.status}.`);
   }

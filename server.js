@@ -6,7 +6,9 @@ import { generateSignals, attachWalkForwardCalibration } from './strategy-engine
 import { calculateRiskPlan } from './risk-engine.js';
 import { pathToFileURL } from 'node:url';
 import { dirname } from 'node:path';
-import { aggregateTicks, addTicks, finishAnalysis, buildMarketAnalysis } from './market-engine.js';
+import { buildMarketAnalysis } from './market-engine.js';
+import { createTickStore, createSeenSet } from './tick-store.js';
+import { TIMEFRAMES } from './settings-store.js';
 import { createLicenseManager } from './license.js';
 import { createSetupStore } from './setup-store.js';
 import { createSettingsStore } from './settings-store.js';
@@ -14,11 +16,21 @@ import { createPatternStore } from './pattern-store.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const STREAM_PING_MS = 5000;
+const LIVE_FRAMES_PER_BATCH = 50;
 const MAX_EVENTS = 1000000;
+// Candles the chart, the zones and the MT5 indicator are computed over.
+const ANALYSIS_BARS = 800;
 // Only the newest MAX_EVENTS lines are ever read back, so the archive is trimmed on startup once it
 // grows past this size: an append-only file that history backfills had pushed to 4.9 GB.
 const MAX_STORAGE_BYTES = 256 * 1024 * 1024;
-const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/zone-labels.js': ['zone-labels.js', 'text/javascript; charset=utf-8'], '/chart-scale.js': ['chart-scale.js', 'text/javascript; charset=utf-8'], '/quote-display.js': ['quote-display.js', 'text/javascript; charset=utf-8'], '/footprint-engine.js': ['footprint-engine.js', 'text/javascript; charset=utf-8'], '/market-data.js': ['market-data.js', 'text/javascript; charset=utf-8'], '/market-client.js': ['market-client.js', 'text/javascript; charset=utf-8'], '/research-client.js': ['research-client.js', 'text/javascript; charset=utf-8'], '/market-engine.js': ['market-engine.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/c3po.png': ['c3po.png', 'image/png'], '/license-client.js': ['license-client.js', 'text/javascript; charset=utf-8'], '/setups-client.js': ['setups-client.js', 'text/javascript; charset=utf-8'], '/settings-client.js': ['settings-client.js', 'text/javascript; charset=utf-8'], '/assets/atmosphere.jpg': ['assets/atmosphere.jpg', 'image/jpeg'], '/mt5-client.js': ['mt5-client.js', 'text/javascript; charset=utf-8'], '/mt5-status.js': ['mt5-status.js', 'text/javascript; charset=utf-8'], '/footprint-candle.js': ['footprint-candle.js', 'text/javascript; charset=utf-8'], '/delta-pane.js': ['delta-pane.js', 'text/javascript; charset=utf-8'], '/updates-client.js': ['updates-client.js', 'text/javascript; charset=utf-8'] };
+const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'], '/index.html': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/zone-labels.js': ['zone-labels.js', 'text/javascript; charset=utf-8'], '/chart-view.js': ['chart-view.js', 'text/javascript; charset=utf-8'], '/quote-display.js': ['quote-display.js', 'text/javascript; charset=utf-8'], '/footprint-engine.js': ['footprint-engine.js', 'text/javascript; charset=utf-8'], '/market-data.js': ['market-data.js', 'text/javascript; charset=utf-8'], '/market-client.js': ['market-client.js', 'text/javascript; charset=utf-8'], '/research-client.js': ['research-client.js', 'text/javascript; charset=utf-8'], '/market-engine.js': ['market-engine.js', 'text/javascript; charset=utf-8'], '/styles.css': ['styles.css', 'text/css; charset=utf-8'], '/c3po.png': ['c3po.png', 'image/png'], '/license-client.js': ['license-client.js', 'text/javascript; charset=utf-8'], '/setups-client.js': ['setups-client.js', 'text/javascript; charset=utf-8'], '/settings-client.js': ['settings-client.js', 'text/javascript; charset=utf-8'], '/assets/atmosphere.jpg': ['assets/atmosphere.jpg', 'image/jpeg'], '/mt5-client.js': ['mt5-client.js', 'text/javascript; charset=utf-8'], '/mt5-status.js': ['mt5-status.js', 'text/javascript; charset=utf-8'], '/footprint-candle.js': ['footprint-candle.js', 'text/javascript; charset=utf-8'], '/delta-pane.js': ['delta-pane.js', 'text/javascript; charset=utf-8'], '/updates-client.js': ['updates-client.js', 'text/javascript; charset=utf-8'] };
+// The candles carry their price ladders only from `fromMs` on: the chart needs OHLC and delta for every
+// candle, the footprint needs ladders only for the columns it shows. Sending every ladder made each
+// refresh a multi-megabyte answer.
+function withLevelsFrom(bars, fromMs) {
+  if (!Number.isFinite(fromMs) || fromMs <= 0) return bars;
+  return bars.map(bar => bar.timeMs >= fromMs ? bar : { ...bar, levels: undefined, imbalances: undefined, stackedImbalances: undefined, absorbedLevels: undefined, trimmed: true });
+}
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
 const positive = n => Number.isFinite(n) && n > 0;
 const validTimestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
@@ -112,7 +124,7 @@ function normalizeComex(input) {
 }
 
 export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, now = () => Date.now(), staleAfterMs = 15000, storageFile = process.env.MARKET_DATA_FILE || './data/market-events.jsonl', license = null, setupStore = null, settingsStore = null, patternStore = null, maxEvents = MAX_EVENTS, maxStorageBytes = MAX_STORAGE_BYTES, streamPingMs = STREAM_PING_MS } = {}) {
-  const events = []; const lastSequence = new Map(); const feeds = new Map(); const activeFeeds = new Map(); const clients = new Set(); const seenEventIds = new Set();
+  const lastSequence = new Map(); const feeds = new Map(); const activeFeeds = new Map(); const clients = new Set();
   const feedScopeKey = (source, symbol) => source + ':' + symbol;
   const feedSequenceKey = (source, symbol, feedId) => source + ':' + symbol + ':' + (feedId || 'legacy');
   // Keep MT5 bridge batches on the same account-scoped feed as the desktop Python connector.
@@ -150,52 +162,18 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       : newest !== undefined ? newest
       : accountFeedId ?? activeFeeds.get(feedScopeKey(source, symbol))?.feedId ?? null;
     if (feedId) activeFeeds.set(feedScopeKey(source, symbol), { feedId, receivedAt: now() });
-    return { feedId, events: events.filter(event =>
-      event.source === source && event.symbol === symbol && (event.feedId || null) === feedId
-    ) };
+    return { feedId, events: store.select(source, symbol, feedId) };
   }
-  const eventBufferCap = Number.isInteger(maxEvents) && maxEvents > 0 ? maxEvents : MAX_EVENTS;
-  // Bars are aggregated once, as ticks arrive. The browser asks for the analysis while a feed is
-  // live, and rebuilding every bar from the whole buffer per request (470 ms at 300k ticks, on the
-  // same thread that owns the window) is what made the chart freeze; only the newest ticks are new
-  // work now, and the derived part below costs milliseconds over the resulting bars.
-  const barCache = new Map();
-  const barsAnalysis = (key, selected, options) => {
-    let entry = barCache.get(key);
-    const fresh = () => {
-      const { bars, ticks } = aggregateTicks(selected, options);
-      if (barCache.size > 8) barCache.clear();
-      const created = {
-        bars, consumed: selected.length, tickCount: ticks.length,
-        hasComex: ticks.some(event => event.source === 'comex'),
-        comexOnly: ticks.length > 0 && ticks.every(event => event.source === 'comex')
-      };
-      barCache.set(key, created);
-      return created;
-    };
-    // A smaller buffer means the archive was trimmed or the feed was reset: the cache is stale.
-    if (!entry || entry.consumed > selected.length || entry.bars.size > Math.max(1, options.limit) * 4) entry = fresh();
-    if (entry.consumed < selected.length) {
-      const added = selected.slice(entry.consumed);
-      addTicks(entry.bars, added, options.intervalMs, options.footprintStep);
-      entry.tickCount += added.length;
-      for (const event of added) { if (event.source === 'comex') entry.hasComex = true; else entry.comexOnly = false; }
-      entry.consumed = selected.length;
-    }
-    return finishAnalysis(entry.bars, {
-      ...options,
-      tickCount: entry.tickCount,
-      hasComex: entry.hasComex,
-      comexOnly: entry.comexOnly && entry.tickCount > 0
-    });
-  };
   const licenseManager = license || createLicenseManager({ now, required: process.env.LICENSE_REQUIRED !== '0' });
   const setups = setupStore || createSetupStore({ file: process.env.SETUPS_FILE || './data/setups.json', now });
   const settings = settingsStore || createSettingsStore({ file: process.env.SETTINGS_FILE || './data/settings.json' });
   const patterns = patternStore || createPatternStore({ file: process.env.PATTERNS_FILE || './data/patterns.json', now });
   let activateAttempts = [];
+  const eventBufferCap = Number.isInteger(maxEvents) && maxEvents > 0 ? maxEvents : MAX_EVENTS;
+  const store = createTickStore({ cap: eventBufferCap });
+  const seenEventIds = createSeenSet(Math.max(1000, eventBufferCap * 2));
   // External clock reference: newest ingested market event timestamp (broker/exchange time).
-  const feedNowMs = () => events.length ? (Date.parse(events.at(-1).timestamp) || 0) : 0;
+  const feedNowMs = () => store.newestTimeMs();
   const dataFile = storageFile;
   // Dedup identities are scoped per feed: brokers reuse sequence numbers across symbols.
   const dedupeKey = (event, id) => `${event.source}:${event.symbol}:${event.feedId || 'legacy'}:${id}`;
@@ -203,15 +181,17 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     try {
       await trimStorage(dataFile, eventBufferCap, maxStorageBytes);
       const recentLines = await readRecentLines(dataFile, eventBufferCap);
+      const restored = [];
       for (const rawLine of recentLines) {
         const line = rawLine.toString('utf8');
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          storeEvent(event);
+          restored.push(event);
           const eventId = event.eventId || eventFingerprint(event);
           seenEventIds.add(dedupeKey(event, eventId));
           seenEventIds.add(dedupeKey(event, eventFingerprint(event)));
+          indexQuote(event);
           const scope = feedScopeKey(event.source, event.symbol);
           const scopedKey = feedSequenceKey(event.source, event.symbol, event.feedId);
           const receivedAt = Date.parse(event.receivedAt) || Date.now();
@@ -226,6 +206,8 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
           }
         } catch {}
       }
+      // One sorted insert for the whole archive instead of one per line.
+      store.add(restored);
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   })() : Promise.resolve();
   async function persistMany(storedEvents) { if (!dataFile || !storedEvents.length) return; await mkdir(dirname(dataFile), { recursive:true }); await appendFile(dataFile, storedEvents.map(event => JSON.stringify(event)).join('\n')+'\n'); }
@@ -259,10 +241,16 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     // Only an explicit null clears: the MT5 session sends it when the broker gave no tick size. A batch
     // without the field (an older connector) leaves a size another batch reported alone.
     if (spec === undefined) return;
-    if (spec === null) { symbolSpecs.delete(key); return; }
-    if (!Number.isFinite(tickSize) || tickSize <= 0 || tickSize > 100) return;
-    if (!symbolSpecs.has(key) && symbolSpecs.size >= SYMBOL_SPECS_MAX) symbolSpecs.delete(symbolSpecs.keys().next().value);
-    symbolSpecs.set(key, { tickSize });
+    const before = symbolSpecs.get(key)?.tickSize ?? null;
+    if (spec === null) symbolSpecs.delete(key);
+    else {
+      if (!Number.isFinite(tickSize) || tickSize <= 0 || tickSize > 100) return;
+      if (!symbolSpecs.has(key) && symbolSpecs.size >= SYMBOL_SPECS_MAX) symbolSpecs.delete(symbolSpecs.keys().next().value);
+      symbolSpecs.set(key, { tickSize });
+    }
+    // The footprint grid changed: pages reload the window instead of drawing new ticks on the old grid.
+    const after = symbolSpecs.get(key)?.tickSize ?? null;
+    if (after !== before) broadcast('spec', { source, symbol: name, feedId: feedId || null, tickSize: after });
   }
   // The footprint's source precision: the broker's tick size when MT5 reported it, otherwise the
   // analysis step. The user's row grouping is applied on top of this, never instead.
@@ -289,7 +277,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     const key = quoteKey(event), entry = quoteIndex.get(key);
     if (!entry || timeMs >= entry.timeMs) quoteIndex.set(key, { feedId: event.feedId || null, price, timeMs, timestamp: event.timestamp, bid: event.bid, ask: event.ask, last: event.last, sequence: event.sequence, receivedAt: event.receivedAt, receivedMs: Date.parse(event.receivedAt) || 0 });
   };
-  const storeEvent = event => { events.push(event); if (events.length > eventBufferCap) events.shift(); indexQuote(event); };
+  const storeEvents = list => { for (const event of list) indexQuote(event); return store.add(list); };
   // Two accounts quoting the same instrument more than 1.5% apart are not the same market: the
   // app is showing one of them, the terminal may be showing the other.
   const PRICE_CONFLICT_RATIO = 1.015;
@@ -311,9 +299,13 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     const asked = Number(requested);
     return Number.isFinite(asked) && asked > 0 ? Math.min(100, Math.max(0.001, asked)) : 0.1;
   }
+  function broadcast(type, payload) {
+    const packet = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+    for (const client of clients) { try { client.write(packet); } catch {} }
+  }
   function health() {
     const at = now();
-    return { status: 'ok', ingestConfigured: Boolean(token), durableStorage: Boolean(dataFile), eventCount: events.length, memoryLimit: eventBufferCap, connectedStreams: clients.size, feeds: [...feeds.values()].map(feed => ({ ...feed, ageMs: Math.max(0, at - feed.receivedAt), status: at - feed.receivedAt <= staleAfterMs ? 'online' : 'stale' })) };
+    return { status: 'ok', ingestConfigured: Boolean(token), durableStorage: Boolean(dataFile), eventCount: store.count(), memoryLimit: eventBufferCap, connectedStreams: clients.size, feeds: [...feeds.values()].map(feed => ({ ...feed, ageMs: Math.max(0, at - feed.receivedAt), status: at - feed.receivedAt <= staleAfterMs ? 'online' : 'stale' })) };
   }
   const server = createServer(async (req, res) => {
    try {
@@ -363,15 +355,12 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       if (!Number.isInteger(intervalMs) || intervalMs < 60000 || intervalMs > 86400000) return json(res,400,{error:'invalid_interval',message:'intervalMs must be an integer between 60000 and 86400000.'});
       const selection = selectFeedEvents(source, symbol, url);
       if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
-      const { feedId, events: selected } = selection;
-      // Same incremental bar cache as the chart: re-aggregating every stored tick for each poll of the
-      // MT5 bridge froze the service for a second at a time on a full archive.
+      const { feedId } = selection;
+      // The same incremental window as the chart, and the same bar count, so MT5 draws the zones the
+      // app shows.
       const zoneStep = footprintStepFor(source, symbol, feedId, 0.1);
-      const analysis = barsAnalysis(
-        ['zones', source, symbol, feedId, intervalMs, zoneStep].join('|'),
-        selected,
-        { intervalMs, priceStep: 0.1, footprintStep: zoneStep, limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint }
-      );
+      const analysis = store.analysis(source, symbol, feedId,
+        { intervalMs, priceStep: 0.1, footprintStep: zoneStep, limit: ANALYSIS_BARS, zoneOptions: current.zones, footprintOptions: current.footprint });
       const zones = analysis.zones.map(zone => ({
         id: zone.id, side: zone.side, low: zone.low, high: zone.high,
         strength: zone.strength, label: zone.label, distance: zone.distance, state: zone.state
@@ -418,7 +407,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/snapshot') {
       const symbol = url.searchParams.get('symbol')?.toUpperCase(); const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 100)));
-      const selected = events.filter(e => !symbol || e.symbol === symbol).slice(-limit);
+      const selected = store.recent(symbol, limit);
       return json(res, 200, { count: selected.length, events: selected });
     }
     if (req.method === 'GET' && url.pathname === '/v1/market/analysis') {
@@ -433,11 +422,15 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const priceStep = analysisStep(url.searchParams.get('priceStep'));
       const footprintStep = footprintStepFor(source, symbol, feedId, priceStep);
       const current = await settings.get();
-      const intervalMs = Math.min(86400000, Math.max(60000, Number(current.zones.timeframeMinutes || 15) * 60000));
+      // The page names the timeframe it draws, so a click on 5m is answered in 5m at once instead of
+      // after the settings save; without it the saved timeframe is used.
+      const askedMinutes = Number(url.searchParams.get('intervalMs')) / 60000;
+      const minutes = TIMEFRAMES.includes(askedMinutes) ? askedMinutes : Number(current.zones.timeframeMinutes || 15);
+      const intervalMs = minutes * 60000;
       // How much history the caller draws. The chart shows a window of it, so asking for the whole
       // archive costs a rebuild over every tick and a JSON of thousands of bars for a view of a few
       // hundred. The default stays generous for other callers.
-      const limit = Math.min(20000, Math.max(20, Number(url.searchParams.get('limit') || 10000)));
+      const limit = Math.min(20000, Math.max(20, Number(url.searchParams.get('limit') || ANALYSIS_BARS)));
       // The newest tick is the one the rest of the page prints. Scanning the tail keeps this O(1) on
       // a 100k-event buffer instead of timestamping every event on every request.
       const tail = selected.slice(-200);
@@ -449,14 +442,12 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
             .sort((a, b) => b.timeMs - a.timeMs)
             .map(item => ({ feedId: item.feedId, price: item.price, timestamp: item.timestamp, ageMs: Math.max(0, now() - item.timeMs), active: (item.feedId || null) === (feedId || null) }))
         : [];
-      const analysis = barsAnalysis(
-        [source, symbol, feedId, intervalMs, priceStep, footprintStep, limit].join('|'),
-        selected,
-        { intervalMs, priceStep, footprintStep, limit, zoneOptions: current.zones, footprintOptions: current.footprint }
-      );
+      const analysis = store.analysis(source, symbol, feedId,
+        { intervalMs, priceStep, footprintStep, limit, fresh: url.searchParams.get('fresh') === '1', zoneOptions: current.zones, footprintOptions: current.footprint });
       return json(res, 200, {
         symbol, source, feedId, intervalMs, timeframeMinutes: intervalMs / 60000,
         ...analysis,
+        bars: withLevelsFrom(analysis.bars, Number(url.searchParams.get('levelsFrom'))),
         lastQuote: lastQuote && source === 'mt5' ? { sequence: lastQuote.sequence, bid: lastQuote.bid, ask: lastQuote.ask, last: lastQuote.last, timestamp: lastQuote.timestamp, receivedAt: lastQuote.receivedAt } : null,
         feed,
         // No live feed for this account: the chart is drawn from stored ticks. Say when they end, so
@@ -620,12 +611,18 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         for (const stored of additions) {
           seenEventIds.add(dedupeKey(stored, stored.eventId));
           seenEventIds.add(dedupeKey(stored, eventFingerprint(stored)));
-          storeEvent(stored);
           ingestWatermark += 1;
-          const existing = feeds.get(key);
-          feeds.set(key,{source:'mt5',symbol:stored.symbol,feedId:stored.feedId,lastSequence:stored.sequence,receivedAt:Date.parse(stored.receivedAt),accepted:(existing?.accepted||0)+1});
-          const packet = `event: market\ndata: ${JSON.stringify(stored)}\n\n`;
-          for (const client of clients) client.write(packet);
+        }
+        storeEvents(additions);
+        if (additions.length) {
+          const existing = feeds.get(key), newest = additions.at(-1);
+          feeds.set(key,{source:'mt5',symbol:newest.symbol,feedId:newest.feedId,lastSequence:newest.sequence,receivedAt:Date.parse(newest.receivedAt),accepted:(existing?.accepted||0)+additions.length});
+          // A normal poll carries a handful of ticks and each one moves the live candle. A resend of a
+          // queue built up during an outage would be thousands of frames: the page gets the newest tick
+          // and one notice to reload the window instead.
+          const streamed = additions.length > LIVE_FRAMES_PER_BATCH ? [newest] : additions;
+          if (streamed.length < additions.length) broadcast('history', { source: 'mt5', symbol, feedId, accepted: additions.length, live: true });
+          for (const stored of streamed) broadcast('market', stored);
         }
         if (additions.length) lastSequence.set(key, sequenceCursor);
         return json(res, 202, { accepted:additions.length, duplicates, total:body.ticks.length, lastAcceptedSequence:lastSequence.get(key)||0 });
@@ -673,12 +670,12 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
         for (const stored of additions) {
           seenEventIds.add(dedupeKey(stored, stored.eventId));
           seenEventIds.add(dedupeKey(stored, eventFingerprint(stored)));
-          storeEvent(stored);
           ingestWatermark += 1;
-          const packet = `event: market\ndata: ${JSON.stringify(stored)}\n\n`;
-          for (const client of clients) client.write(packet);
           accepted++;
         }
+        storeEvents(additions);
+        // History is a window loaded beside the live feed: one notice per batch, never a frame per tick.
+        if (additions.length) broadcast('history', { source: 'mt5', symbol, feedId, accepted: additions.length, from: additions[0].timestamp, to: additions.at(-1).timestamp });
         return json(res,202,{accepted,duplicates,rejected,total:body.ticks.length});
       } catch(error) { return json(res,error.status||400,{error:'invalid_request',message:error.message}); }
     }
@@ -706,13 +703,12 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       seenEventIds.add(dedupeKey(event, eventId));
       seenEventIds.add(dedupeKey(event, legacyId));
       lastSequence.set(key, event.sequence);
-      storeEvent(stored);
+      storeEvents([stored]);
       ingestWatermark += 1;
       const existing = feeds.get(key);
       feeds.set(key, { source:event.source, symbol:event.symbol, feedId:event.feedId || null, lastSequence:event.sequence, receivedAt, accepted:(existing?.accepted||0)+1 });
       if (event.source === 'mt5' && event.feedId) activeFeeds.set(feedScopeKey(event.source, event.symbol), { feedId:event.feedId, receivedAt });
-      const packet = 'event: market\ndata: ' + JSON.stringify(stored) + '\n\n';
-      for (const client of clients) client.write(packet);
+      broadcast('market', stored);
       return json(res, 202, { accepted: true, event: stored });
     } catch (error) { return json(res, error.status || 400, { error: error.status === 422 ? 'invalid_event' : 'invalid_request', message: error.message }); }
    } catch (error) {
