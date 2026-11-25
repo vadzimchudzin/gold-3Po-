@@ -287,7 +287,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     if (!(price > 0)) return;
     const timeMs = Date.parse(event.timestamp) || 0;
     const key = quoteKey(event), entry = quoteIndex.get(key);
-    if (!entry || timeMs >= entry.timeMs) quoteIndex.set(key, { feedId: event.feedId || null, price, timeMs, timestamp: event.timestamp });
+    if (!entry || timeMs >= entry.timeMs) quoteIndex.set(key, { feedId: event.feedId || null, price, timeMs, timestamp: event.timestamp, bid: event.bid, ask: event.ask, last: event.last, sequence: event.sequence, receivedAt: event.receivedAt, receivedMs: Date.parse(event.receivedAt) || 0 });
   };
   const storeEvent = event => { events.push(event); if (events.length > eventBufferCap) events.shift(); indexQuote(event); };
   // Two accounts quoting the same instrument more than 1.5% apart are not the same market: the
@@ -339,6 +339,18 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     if (!url.pathname.startsWith('/v1/ingest/')) {
       const licenceStatus = await licenseManager.status(feedNowMs());
       if (!licenceStatus.valid) return json(res, 402, { error: 'license_required', reason: licenceStatus.reason, machineId: licenceStatus.machineId, activate: '/v1/license/activate' });
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/quote') {
+      const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
+      if (!isGoldSymbol('mt5', symbol)) return json(res, 400, { error: 'symbol_not_gold' });
+      const wanted = url.searchParams.get('feedId');
+      if (wanted && !/^[a-f0-9]{32}$/i.test(wanted)) return json(res, 400, { error: 'invalid_feed_id' });
+      const entries = [...feedQuoteIndex('mt5', symbol).values()];
+      const quote = wanted
+        ? entries.find(item => item.feedId === wanted)
+        : entries.sort((a, b) => b.receivedMs - a.receivedMs)[0];
+      if (!quote) return json(res, 404, { error: 'no_quote' });
+      return json(res, 200, { source: 'mt5', symbol, feedId: quote.feedId, bid: quote.bid, ask: quote.ask, last: quote.last, timestamp: quote.timestamp, sequence: quote.sequence, receivedAt: quote.receivedAt, ageMs: Math.max(0, now() - quote.receivedMs) });
     }
     if (req.method === 'GET' && url.pathname === '/v1/chart/zones') {
       const symbol = (url.searchParams.get('symbol') || 'XAUUSD').toUpperCase();
@@ -445,7 +457,7 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       return json(res, 200, {
         symbol, source, feedId, intervalMs, timeframeMinutes: intervalMs / 60000,
         ...analysis,
-        lastQuote: lastQuote && source === 'mt5' ? { bid: lastQuote.bid, ask: lastQuote.ask, last: lastQuote.last, timestamp: lastQuote.timestamp, receivedAt: lastQuote.receivedAt } : null,
+        lastQuote: lastQuote && source === 'mt5' ? { sequence: lastQuote.sequence, bid: lastQuote.bid, ask: lastQuote.ask, last: lastQuote.last, timestamp: lastQuote.timestamp, receivedAt: lastQuote.receivedAt } : null,
         feed,
         // No live feed for this account: the chart is drawn from stored ticks. Say when they end, so
         // the client can label the strip as an archive instead of presenting an old price as live.

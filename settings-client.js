@@ -5,7 +5,7 @@ const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 
   footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1, autoStep: true },
   mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark' } };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
-const TF_LABEL = { 5: '5m', 15: '15m', 30: '30m', 60: '1h', 240: '4h' };
+const TF_LABEL = { 1: '1m', 5: '5m', 15: '15m', 30: '30m', 60: '1h', 240: '4h' };
 const DASH = { solid: '', dash: '10 6', dot: '2 5', dashdot: '10 5 2 5' };
 
 let settings = structuredClone(DEFAULTS);
@@ -56,6 +56,7 @@ function render() {
   $('imbalanceLevelsValue') && ($('imbalanceLevelsValue').textContent = `${f.imbalanceLevels} подряд`);
   $('minLevelVolumeValue') && ($('minLevelVolumeValue').textContent = `${f.minLevelVolume} ед. объёма`);
   setSeg('setTimeframe', z.timeframeMinutes);
+  document.querySelectorAll('.chart-tf button').forEach(b => { const on = Number(b.dataset.tf) === z.timeframeMinutes; b.classList.toggle('selected', on); b.setAttribute('aria-pressed', String(on)); });
   set('setBuyColor', m.buyColor.toLowerCase()); set('setSellColor', m.sellColor.toLowerCase());
   setSeg('setLineStyle', m.lineStyle);
   set('setLineWidth', m.lineWidth);
@@ -149,6 +150,7 @@ function bind() {
   });
   const zoneToggles = { setSrcDay: 'usePriorDay', setSrcSessions: 'useSessions', setSrcWeek: 'useWeek', setSrcTf: 'useHigherTf', setSrcVolume: 'useVolume', setStrongOnly: 'strongOnly' };
   for (const [id, key] of Object.entries(zoneToggles)) $(id)?.addEventListener('click', () => change('zones', key, !settings.zones[key]));
+  document.querySelectorAll('.chart-tf').forEach(box => box.addEventListener('click', e => { const b = e.target.closest('button[data-tf]'); if (b) change('zones', 'timeframeMinutes', Number(b.dataset.tf)); }));
   $('strongZonesToggle')?.addEventListener('click', () => change('zones', 'strongOnly', !settings.zones.strongOnly));
   $('footClusterStep')?.addEventListener('change', e => {
     if (e.target.value === 'auto') {

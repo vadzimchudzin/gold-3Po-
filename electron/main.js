@@ -350,6 +350,7 @@ function createMainWindow(splashStartedAt) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
       preload: fileURLToPath(new URL('./preload.cjs', import.meta.url))
     }
   });

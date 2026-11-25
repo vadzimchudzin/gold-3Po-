@@ -640,3 +640,4 @@ if(typeof ResizeObserver!=='undefined'){
  workspaceResizeObserver.observe(grid);
 }
 renderZones();renderInspector();renderChart();renderFootprint();
+for(const id of ['chartRefresh','footRefresh'])$('#'+id)?.addEventListener('click',async e=>{const btn=e.currentTarget;btn.classList.remove('spin');void btn.offsetWidth;btn.classList.add('spin');try{await window.gold3poRefresh?.();}finally{window.setTimeout(()=>btn.classList.remove('spin'),800);}});

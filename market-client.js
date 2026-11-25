@@ -21,6 +21,7 @@ let feedOverride=null;
 // not a glitch. Two in a row and the page follows the server instead of freezing on the old feed.
 let feedMismatch=0;
 let quoteDigits=2;
+let lastSseTickAt=0,lastTickSeq=0,quotePolling=false,feedOnline=false,lastPolledAt=0;
 const feedStates={online:'ОНЛАЙН',stale:'УСТАРЕЛ',offline:'ОФФЛАЙН',waiting:'ОЖИДАНИЕ'};
 const feedText=status=>feedStates[String(status||'').toLowerCase()]||String(status||'ОЖИДАНИЕ').toUpperCase();
 function topStatus(label,state){
@@ -116,9 +117,11 @@ async function refreshAnalysis(){
    // The broker's tick size decides the decimals every quote on the page prints with.
    quoteDigits=priceDigits(data.footprintStep);
    const online=data.feed?.status==='online';
+   feedOnline=online;
    const archiveAt=online?null:(data.archive?.lastTickAt||null);
    const mode=document.querySelector('#dataMode');if(mode)mode.textContent=(online?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · АРХИВ'+(archiveAt?' до '+archiveStamp(archiveAt):''))+(data.feedId?' · '+String(data.feedId).slice(0,6):'');
    renderFeedConflict(data.priceConflict,data.feedId);
+   if(Number.isFinite(data.lastQuote?.sequence))lastTickSeq=Math.max(lastTickSeq,data.lastQuote.sequence);
    if(data.lastQuote)updateReferencePrice(data.lastQuote.last,data.lastQuote.timestamp);
    else updateReferencePrice(data.bars.at(-1).c,data.bars.at(-1).time);
    // Same number, honest label: without a live feed the value is an archive close, not a quote.
@@ -149,6 +152,7 @@ function connectStream(){
    lastFrameAt=Date.now();
    const message=JSON.parse(event.data),target=labels[message.source];
    if(message.source==='mt5'&&message.symbol===marketSymbol()&&(message.feedId||null)===(activeFeedId()||null)){
+    if(!message.historical){lastSseTickAt=Date.now();if(Number.isFinite(message.sequence))lastTickSeq=Math.max(lastTickSeq,message.sequence);}
     if(!message.historical)paint(mt5,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
     if(!message.historical)updateReferencePrice(message.last,message.timestamp);
     scheduleAnalysis();
@@ -182,6 +186,32 @@ function watchdog(){
 window.addEventListener('mt5-symbol-change',()=>{lastAnalysisAt=0;quotes.reset();refreshAnalysis();refreshHealth();});
 window.addEventListener('mt5-feed-change',()=>{lastAnalysisAt=0;quotes.reset();feedOverride=null;clearedWithoutFeed=false;refreshAnalysis();refreshHealth();});
 window.addEventListener('gold3po-settings',e=>{if(e.detail?.zonesChanged){lastAnalysisAt=0;refreshAnalysis();}});
+// Safety net under the SSE stream: when no tick has arrived for a moment (a proxy that buffers the
+// stream, a stalled socket, a feed id the page filtered out) the newest quote is read directly, so
+// the price never freezes while MT5 is quoting. Ticks seen on the stream are not repeated.
+async function pollQuote(){
+ if(quotePolling||document.hidden||Date.now()-lastSseTickAt<700)return;
+ quotePolling=true;
+ try{
+  const params=new URLSearchParams({symbol:marketSymbol()});
+  const wanted=activeFeedId();if(wanted)params.set('feedId',wanted);
+  const response=await fetch('/v1/quote?'+params,{cache:'no-store'});
+  if(!response.ok)return;
+  const quote=await response.json();
+  if(quote.ageMs>20000||!(quote.sequence>lastTickSeq))return;
+  lastTickSeq=quote.sequence;lastPolledAt=Date.now();
+  if(!wanted&&quote.feedId&&quote.feedId!==displayedFeedId){lastAnalysisAt=0;scheduleAnalysis();}
+  window.dispatchEvent(new CustomEvent('market-tick',{detail:{...quote,polled:true}}));
+  updateReferencePrice(quote.last,quote.timestamp);
+ }catch{ /* the stream or the next poll recovers */ }
+ finally{quotePolling=false;}
+}
+window.setInterval(pollQuote,400);
+// While the stream is silent and only the poll delivers quotes, the chart and footprint are rebuilt
+// from the server every few seconds so they keep following the market.
+window.setInterval(()=>{if(!document.hidden&&feedOnline&&Date.now()-lastPolledAt<3000&&Date.now()-lastAnalysisAt>2500)scheduleAnalysis();},1000);
+// The manual refresh button: drop every cached piece of state and reload from the server.
+window.gold3poRefresh=()=>{quotes.reset();lastTickSeq=0;lastAnalysisAt=0;feedMismatch=0;try{source?.close();}catch{}lastFrameAt=Date.now();connectStream();refreshHealth();return refreshAnalysis();};
 refreshHealth();refreshAnalysis();connectStream();window.setInterval(refreshHealth,5000);window.setInterval(watchdog,10000);window.setInterval(streamWatch,5000);
 
 // Keep the quote strip in sync with the active account's live MT5 quote stream.

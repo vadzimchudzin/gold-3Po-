@@ -7,7 +7,7 @@ import { DEFAULT_FOOTPRINT_OPTIONS, validateFootprintOptions } from './footprint
 // Kept apart from setups (which are versioned research conditions) so a colour change never creates a setup version.
 
 export const LINE_STYLES = ['solid', 'dash', 'dot', 'dashdot', 'dashdotdot'];
-export const TIMEFRAMES = [5, 15, 30, 60, 240];
+export const TIMEFRAMES = [1, 5, 15, 30, 60, 240];
 
 export const DEFAULT_SETTINGS = Object.freeze({
   zones: { ...DEFAULT_ZONE_OPTIONS, timeframeMinutes: 15 },

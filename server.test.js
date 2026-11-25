@@ -766,3 +766,20 @@ test('the zones endpoint follows every new tick through the incremental bar cach
     assert.equal(next.lastPrice, price, 'the forming bar close equals the newest tick, as in MT5');
   }
 });
+
+test('GET /v1/quote returns the newest quote of the feed without scanning the buffer', async () => {
+  const empty = await fetch(base + '/v1/quote?symbol=XAUUSD');
+  assert.equal(empty.status, 404);
+  await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: auth, body: JSON.stringify(mt5(1)) });
+  await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: auth, body: JSON.stringify({ ...mt5(2), timestamp: '2026-11-17T15:00:01.000Z', bid: 2649.1, ask: 2649.3, last: 2649.2 }) });
+  const response = await fetch(base + '/v1/quote?symbol=XAUUSD');
+  const quote = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(quote.sequence, 2);
+  assert.equal(quote.bid, 2649.1);
+  assert.equal(quote.ask, 2649.3);
+  assert.equal(quote.last, 2649.2);
+  assert.ok(Number.isFinite(quote.ageMs));
+  assert.equal((await fetch(base + '/v1/quote?symbol=XAUUSD&feedId=nothex')).status, 400);
+  assert.equal((await fetch(base + '/v1/quote?symbol=EURUSD')).status, 400);
+});

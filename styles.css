@@ -533,3 +533,9 @@ input,select{transition:border-color var(--dur) var(--ease),background-color var
 .setup-presets button{border:1px solid var(--line);background:var(--surface-1);color:var(--muted);border-radius:6px;padding:5px 9px;font:10px var(--mono);cursor:pointer}
 .setup-presets button:hover{color:var(--gold);border-color:rgba(255,199,153,.45);background:rgba(255,199,153,.08)}
 .setup-subsection{font:9px var(--mono);letter-spacing:.1em;color:var(--gold);text-transform:uppercase;margin:12px 0 6px}
+
+.chart-tf button{min-width:34px}
+.refresh-btn{font-size:15px;line-height:1}
+.refresh-btn.spin{animation:gold-refresh-spin .7s linear}
+@keyframes gold-refresh-spin{to{transform:rotate(360deg)}}
+.panel-tools{flex-wrap:wrap;justify-content:flex-end}
