@@ -517,26 +517,6 @@ input,select{transition:border-color var(--dur) var(--ease),background-color var
 .foot-cell.bidask .bid-side{justify-content:flex-end;border-right:1px solid rgba(165,180,210,.14);color:#ffd5d5;background:linear-gradient(to left,rgba(239,68,68,calc(.24 + var(--side-intensity,0) * .56)) 0 var(--side-pct,0%),transparent var(--side-pct,0%))!important}
 .foot-cell.bidask .ask-side{justify-content:flex-start;color:#c8ffea;background:linear-gradient(to right,rgba(34,197,94,calc(.24 + var(--side-intensity,0) * .56)) 0 var(--side-pct,0%),transparent var(--side-pct,0%))!important}
 .foot-cell.foot-poc{outline:1.5px solid #ffc799;outline-offset:-1.5px;font-weight:700;z-index:2}
-/* Zone hover glow from sidebar (0ms CSS-only, no SVG rebuild) */
-.chart-zone{transition:opacity .14s ease,filter .14s ease}
-.chart-zone .zone-chart-label{font-size:10px;font-weight:600;letter-spacing:.02em;opacity:.78;pointer-events:none;transition:opacity .14s ease,font-size .14s ease}
-#priceChart.zone-hovering .chart-zone:not(.is-hovered):not(.selected-zone){opacity:.28}
-.chart-zone.is-hovered,.chart-zone.selected-zone{opacity:1!important}
-.chart-zone.is-hovered.has-glow,.chart-zone.selected-zone.has-glow{filter:drop-shadow(0 0 8px var(--zone-color,#ffc799)) drop-shadow(0 0 2px var(--zone-color,#ffc799))}
-.chart-zone.is-hovered .zone-body,.chart-zone.selected-zone .zone-body{fill-opacity:.52!important}
-.chart-zone.is-hovered .zone-edge,.chart-zone.selected-zone .zone-edge{stroke-width:3!important;stroke-opacity:1!important}
-.chart-zone.is-hovered .zone-edge-bot,.chart-zone.selected-zone .zone-edge-bot{stroke-width:2!important;stroke-opacity:.95!important}
-.chart-zone.is-hovered .zone-chart-label,.chart-zone.selected-zone .zone-chart-label{opacity:1!important;font-weight:700}
-.zone-row{transition:border-color .14s ease,background .14s ease,box-shadow .14s ease,transform .12s ease}
-.zone-row:hover,.zone-row.is-hovered{border-color:rgba(255,199,153,.55)!important;background:rgba(255,199,153,.09)!important;box-shadow:0 0 0 1px rgba(255,199,153,.28),0 6px 18px rgba(0,0,0,.32);transform:translateX(-2px)}
-/* Unified footprint panel polish & manual refresh button */
-.foot-refresh-btn{height:28px;padding:0 10px;border-radius:8px;border:1px solid rgba(255,199,153,.32);background:rgba(255,199,153,.10);color:#ffd8b5;font:600 11px/1 var(--font-sans,system-ui);letter-spacing:.02em;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:background .15s ease,border-color .15s ease,transform .1s ease}
-.foot-refresh-btn:hover{background:rgba(255,199,153,.20);border-color:rgba(255,199,153,.6)}
-.foot-refresh-btn:active{transform:scale(.96)}
-.footprint-panel{border-color:rgba(255,199,153,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
-.footprint-wrap{border-radius:10px;border:1px solid rgba(255,255,255,.07);background:linear-gradient(180deg,rgba(14,17,22,.96),rgba(10,12,16,.98))}
-.footprint-table .foot-head,.footprint-table .foot-deltas{background:rgba(18,22,29,.95);border-bottom:1px solid rgba(255,255,255,.07)}
-.footprint-table .price-level{color:#9aa6ba;background:rgba(15,18,24,.94);border-right:1px solid rgba(255,255,255,.07)}
 .footprint-table.is-compact .foot-cell{font-size:7px;padding:0}
 .footprint-table.is-compact .foot-cell.bidask .foot-side{padding:0 1px}
 .footprint-table.is-compact .poc-mark{display:none}

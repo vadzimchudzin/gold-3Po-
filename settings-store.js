@@ -7,7 +7,6 @@ import { DEFAULT_FOOTPRINT_OPTIONS, validateFootprintOptions } from './footprint
 // Kept apart from setups (which are versioned research conditions) so a colour change never creates a setup version.
 
 export const LINE_STYLES = ['solid', 'dash', 'dot', 'dashdot', 'dashdotdot'];
-export const ZONE_FILL_STYLES = ['solid', 'gradient', 'stripe', 'outline'];
 export const TIMEFRAMES = [5, 15, 30, 60, 240];
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -19,9 +18,6 @@ export const DEFAULT_SETTINGS = Object.freeze({
     lineStyle: 'solid',
     lineWidth: 2,
     fill: false,           // shade the zone body as a rectangle behind the candles
-    fillStyle: 'gradient', // how zones are shaded on the in-app chart: solid | gradient | stripe | outline
-    fillOpacity: 0.22,     // 0.05..0.60 base shading opacity for chart zones
-    glow: true,            // bright glow on hover/selection
     showLabels: true,
     showStrength: true,
     zonesVisible: true    // false publishes an empty snapshot, which clears every zone in MT5 at once
@@ -59,14 +55,11 @@ export function validateSettings(input = {}, base = DEFAULT_SETTINGS) {
     if (!HEX.test(mt5[key])) throw new TypeError(`${key} must be a #RRGGBB colour`);
   }
   if (!LINE_STYLES.includes(m.lineStyle)) throw new TypeError(`lineStyle must be one of ${LINE_STYLES.join(', ')}`);
-  if (!ZONE_FILL_STYLES.includes(m.fillStyle)) throw new TypeError(`fillStyle must be one of ${ZONE_FILL_STYLES.join(', ')}`);
-  mt5.fillOpacity = Number(m.fillOpacity);
-  if (!Number.isFinite(mt5.fillOpacity) || mt5.fillOpacity < 0.05 || mt5.fillOpacity > 0.6) throw new TypeError('fillOpacity must be between 0.05 and 0.6');
   mt5.lineWidth = Number(m.lineWidth);
   if (!Number.isInteger(mt5.lineWidth) || mt5.lineWidth < 1 || mt5.lineWidth > 5) throw new TypeError('lineWidth must be an integer 1..5');
   // MT5 renders dashed and dotted lines only at width 1, so a non-solid style always stores width 1.
   if (mt5.lineStyle !== 'solid') mt5.lineWidth = 1;
-  for (const key of ['fill', 'glow', 'showLabels', 'showStrength', 'zonesVisible']) if (typeof m[key] !== 'boolean') throw new TypeError(`${key} must be true or false`);
+  for (const key of ['fill', 'showLabels', 'showStrength', 'zonesVisible']) if (typeof m[key] !== 'boolean') throw new TypeError(`${key} must be true or false`);
 
   const u = section('ui', input.ui, base.ui);
   if (!['glass-dark', 'glass-light'].includes(u.theme)) throw new TypeError('theme must be glass-dark or glass-light');

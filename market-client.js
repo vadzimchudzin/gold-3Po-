@@ -1,11 +1,10 @@
 import { marketSymbol, marketFeedId, hasMt5Bridge } from './mt5-client.js';
 import { priceDigits, priceText, createQuoteGate } from './quote-display.js';
 const api=document.querySelector('#apiStatus'),mt5=document.querySelector('#mt5Status'),comex=document.querySelector('#comexStatus');
-const labels={mt5,comex};let source;let analysisTimer=null;let lastAnalysisAt=0;let reconnectTimer=null;let hasLoadedBars=false;
+const labels={mt5,comex};let source;let analysisTimer=null;let lastAnalysisAt=0;let reconnectTimer=null;
 const STALE_MS=45000,STREAM_SILENCE_MS=15000;
-// Any frame from the stream, ping included. A stream that stays silent while the page believes it is
-// connected is a dead socket (sleep, proxy, a restarted service): it is reopened instead of waiting for an error
-// that never comes, and until it is back the analysis is polled quickly so the chart keeps moving.
+// Any frame from the stream, ping included. A stream that stays silent is a dead socket (sleep, proxy,
+// a restarted service): it is reopened instead of waiting for an error that never comes.
 let lastFrameAt=Date.now();
 const pill=document.querySelector('.demo-pill'),link=document.querySelector('.connection');
 let clearedWithoutFeed=false;
@@ -64,7 +63,6 @@ function updateReferencePrice(price,timestamp){
 }
 function clearFeedDisplay(){
  quotes.reset();
- hasLoadedBars=false;
  displayedFeedId=null;
  feedOverride=null;
  const price=document.querySelector('#referencePrice');if(price){price.textContent='—';price.removeAttribute('title');delete price.dataset.archive;}
@@ -114,7 +112,6 @@ async function refreshAnalysis(){
   }
   displayedFeedId=data.feedId||null;
   if(data.bars?.length){
-   hasLoadedBars=true;
    window.dispatchEvent(new CustomEvent('market-analysis',{detail:data}));
    // The broker's tick size decides the decimals every quote on the page prints with.
    quoteDigits=priceDigits(data.footprintStep);
@@ -132,7 +129,7 @@ async function refreshAnalysis(){
   lastAnalysisAt=Date.now();
  }catch{ /* The chart remains on the last verified feed; health and SSE keep retrying. */ }
 }
-function scheduleAnalysis(delay=350){if(analysisTimer)return;analysisTimer=window.setTimeout(()=>{analysisTimer=null;refreshAnalysis();},delay);}
+function scheduleAnalysis(){if(analysisTimer)return;analysisTimer=window.setTimeout(()=>{analysisTimer=null;refreshAnalysis();},500);}
 async function refreshHealth(){
  try{
   const response=await fetch('/health',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);
@@ -152,14 +149,10 @@ function connectStream(){
    lastFrameAt=Date.now();
    const message=JSON.parse(event.data),target=labels[message.source];
    if(message.source==='mt5'&&message.symbol===marketSymbol()&&(message.feedId||null)===(activeFeedId()||null)){
-    if(!message.historical){
-     paint(mt5,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
-     updateReferencePrice(message.last,message.timestamp);
-     if(!hasLoadedBars)scheduleAnalysis(250);
-     window.dispatchEvent(new CustomEvent('market-tick',{detail:message}));
-    }else{
-     scheduleAnalysis(400);
-    }
+    if(!message.historical)paint(mt5,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
+    if(!message.historical)updateReferencePrice(message.last,message.timestamp);
+    scheduleAnalysis();
+    if(!message.historical)window.dispatchEvent(new CustomEvent('market-tick',{detail:message}));
    }else if(message.source==='comex'&&target&&!message.historical){
     paint(target,'ОНЛАЙН · '+ageLabel(Date.now()-Date.parse(message.receivedAt)),'online');
    }
@@ -189,8 +182,6 @@ function watchdog(){
 window.addEventListener('mt5-symbol-change',()=>{lastAnalysisAt=0;quotes.reset();refreshAnalysis();refreshHealth();});
 window.addEventListener('mt5-feed-change',()=>{lastAnalysisAt=0;quotes.reset();feedOverride=null;clearedWithoutFeed=false;refreshAnalysis();refreshHealth();});
 window.addEventListener('gold3po-settings',e=>{if(e.detail?.zonesChanged){lastAnalysisAt=0;refreshAnalysis();}});
-window.addEventListener('market-refresh-request',()=>{lastAnalysisAt=0;refreshAnalysis();});
-window.addEventListener('market-bar-close',()=>{scheduleAnalysis(400);});
 refreshHealth();refreshAnalysis();connectStream();window.setInterval(refreshHealth,5000);window.setInterval(watchdog,10000);window.setInterval(streamWatch,5000);
 
 // Keep the quote strip in sync with the active account's live MT5 quote stream.
