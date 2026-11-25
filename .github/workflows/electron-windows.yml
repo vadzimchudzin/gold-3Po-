@@ -8,6 +8,7 @@ on:
       - ".github/workflows/electron-windows.yml"
       - "electron/**"
       - "assets/**"
+      - "build/**"
       - "package.json"
       - "README.md"
       - "RELEASE-TEST-NOTES.md"
