@@ -54,8 +54,13 @@ function startWorker(command, args) {
 }
 
 export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, makeWorker = startWorker, request = fetch, publish = publishSnapshot,
-  now = () => Date.now(), pollMs = 1800, maxFailures = 5, maxBackoffMs = 30_000, staleAfterMs = 120_000, maxUnsent = 20_000 }) {
+  now = () => Date.now(), pollMs = 1800, maxFailures = 5, maxBackoffMs = 30_000, staleAfterMs = 120_000, maxUnsent = 20_000,
+  reconnectMs = 0, licenseCheckMs = 0 }) {
   let session = null;
+  // `wanted` is the operator's intent: set by connect(), cleared only by disconnect(). While it is set
+  // and the bridge is down for any other reason (terminal restarted, MT5 not open yet, a slow read
+  // that killed the worker), the session reopens itself instead of staying dead until a manual click.
+  let wanted = false, retryTimer = null, retryCount = 0;
   let status = { state: 'offline', message: 'MT5 не подключён.' };
   const fetchApi = (route, init = {}) => request(apiOrigin + route, { ...init, signal: AbortSignal.timeout(15_000) });
   const state = () => ({ ...status });
@@ -125,6 +130,8 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       // A hidden fleet of zones is published as an empty snapshot, which clears the chart immediately.
       owner.zonesVisible = body.zonesVisible !== false;
     } else if (!changed) {
+      if (licenseCheckMs && Date.now() - (owner.licenseAt || 0) < licenseCheckMs) return;
+      owner.licenseAt = Date.now();
       const response = await fetchApi('/v1/license/status');
       // An answered "not valid" ends the session at once; only an unreachable service is retried.
       let body;
@@ -171,7 +178,7 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     } catch (error) {
       if (session !== owner) return;
       owner.failures = (owner.failures || 0) + 1;
-      if (owner.failures >= maxFailures || owner.worker.stopped?.()) { await disconnect(error.message); return; }
+      if (owner.failures >= maxFailures || owner.worker.stopped?.()) { await lose(owner, error.message); return; }
       delay = Math.min(pollMs * 2 ** owner.failures, maxBackoffMs);
       set(owner, { state: 'reconnecting', retries: owner.failures, message: `Связь прервалась (${error.message}). Повтор ${owner.failures} из ${maxFailures} через ${Math.round(delay / 1000)} с${owner.failures === maxFailures - 1 ? ', последний: при новой ошибке соединение будет закрыто' : ''}.` });
     } finally {
@@ -205,6 +212,12 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
   }
 
   async function disconnect(message = 'MT5 отключён.') {
+    wanted = false;
+    stopRetry();
+    return release(message);
+  }
+
+  async function release(message) {
     const owner = session;
     session = null;
     if (owner) {
@@ -218,15 +231,55 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
     return state();
   }
 
+  function stopRetry() {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  function scheduleRetry(reason, carry) {
+    if (!wanted || !reconnectMs || session || retryTimer) return;
+    retryCount += 1;
+    const delay = Math.min(reconnectMs * 2 ** Math.min(retryCount - 1, 5), maxBackoffMs);
+    status = { ...status, state: 'reconnecting', feed: 'stale', retries: retryCount, message: `${reason} Переподключение через ${Math.round(delay / 1000)} с (попытка ${retryCount}).` };
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (wanted && !session) void open(carry);
+    }, delay);
+    retryTimer.unref?.();
+  }
+
+  // A lost bridge keeps the zones the terminal already draws and everything the next session needs to
+  // continue the same feed: the unsent ticks, the sequence and the last tick time to resume from.
+  async function lose(owner, message) {
+    if (session !== owner) return;
+    if (!reconnectMs || !wanted) { await disconnect(message); return; }
+    session = null;
+    clearTimeout(owner.timer);
+    owner.worker.stop();
+    await owner.levelWrite?.catch(() => {});
+    const carry = { feedId: owner.feedId, unsent: owner.unsent || [], lastTick: owner.lastTick, droppedTicks: owner.droppedTicks || 0 };
+    status = { ...status, state: 'reconnecting', feed: 'stale', message: `Связь с MT5 потеряна (${message}).` };
+    scheduleRetry(`Связь с MT5 потеряна (${message}).`, carry);
+  }
+
   async function connect() {
     if (session) throw new Error('Сначала отключите текущее соединение.');
     if (!workerCommand) throw new Error('Модуль MT5 не установлен.');
+    wanted = true;
+    stopRetry();
+    retryCount = 0;
+    return open(null);
+  }
+
+  async function open(carry) {
+    if (session || !workerCommand) return state();
     const worker = makeWorker(workerCommand, workerArgs);
     const owner = { worker, symbol: 'XAUUSD', sequence: Date.now() * 1000, levelAt: 0, dirty: true };
     session = owner;
-    status = { state: 'connecting', symbol: owner.symbol, message: 'Поиск уже авторизованного терминала MT5…' };
+    status = { state: 'connecting', symbol: owner.symbol, message: carry ? 'Переподключение к MT5…' : 'Поиск уже авторизованного терминала MT5…' };
     try {
-      const result = await worker.request('connect', {}, 80_000);
+      const resumeFrom = carry?.lastTick ? Math.floor(Date.parse(carry.lastTick) / 1000) : null;
+      let result = await worker.request('connect', Number.isSafeInteger(resumeFrom) ? { resumeFrom } : {}, 80_000);
       if (session !== owner) return state();
       if (!result.symbol?.toUpperCase() || !result.commonDataPath || !result.dataPath || !result.terminalPath) {
         throw new Error('MT5 не подтвердил авторизованный терминал, инструмент или каталог данных.');
@@ -237,6 +290,19 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
       owner.feedId = createHash('sha256')
         .update([String(owner.server || '').trim().toLowerCase(), String(owner.accountLogin || '').trim(), owner.symbol].join('|'))
         .digest('hex').slice(0, 32);
+      // Only the same account continues where the last session stopped. If MT5 now answers for another
+      // account, the resume point belongs to a different feed: ask again from the terminal's own cursor.
+      const resumed = Boolean(carry) && carry.feedId === owner.feedId;
+      if (carry && !resumed && Number.isSafeInteger(Math.floor(Date.parse(carry.lastTick) / 1000))) {
+        result = await worker.request('connect', {}, 80_000);
+        if (session !== owner) return state();
+      }
+      if (resumed) {
+        owner.unsent = carry.unsent;
+        owner.droppedTicks = carry.droppedTicks;
+        owner.lastTick = carry.lastTick;
+        owner.lastTickAt = now();
+      }
       owner.terminalPath = result.terminalPath;
       owner.commonDataPath = result.commonDataPath;
       owner.dataPath = result.dataPath;
@@ -258,10 +324,15 @@ export function createMt5Session({ workerCommand, workerArgs, apiOrigin, token, 
         terminalTickAt: result.lastTickAt ?? null, terminalTickAgeMs: Number.isFinite(tickAgeMs) ? tickAgeMs : null,
         zoneCount: 0, ...(owner.spec ? { tickSize: owner.spec.tickSize } : specNote)
       };
-      void seed(owner);
+      retryCount = 0;
+      if (resumed) void poll(owner);
+      else void seed(owner);
       return state();
     } catch (error) {
-      if (session === owner) await disconnect(error.message);
+      if (session === owner) {
+        await release(error.message);
+        scheduleRetry(error.message, carry);
+      }
       return state();
     }
   }

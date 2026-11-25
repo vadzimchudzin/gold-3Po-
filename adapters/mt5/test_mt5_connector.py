@@ -174,6 +174,19 @@ class ConnectorTests(unittest.TestCase):
         reads = [call for call in self.api.calls if call[0] == "copy_ticks_from"]
         self.assertTrue(all(call[2].tzinfo is timezone.utc and call[4] == -1 for call in reads))
 
+    def test_reconnect_resumes_from_the_last_delivered_second_without_a_hole(self):
+        self.api.rows = [tick(SECOND - 40, 100), tick(SECOND - 20, 100), tick(SECOND, 800)]
+        self.assertTrue(self.connect(resumeFrom=SECOND - 30)["ok"])
+        resumed = self.command("poll")
+        self.assertEqual([row["timestamp"] for row in resumed["ticks"]],
+                         ["2023-11-14T22:13:00.100Z", "2023-11-14T22:13:20.800Z"])
+        self.assertTrue(self.connect(resumeFrom=SECOND + 500)["ok"])
+        self.assertEqual(self.worker.cursor, (SECOND, 0))
+        self.assertTrue(self.connect(resumeFrom=SECOND - connector.HISTORY_LOOKBACK - 5)["ok"])
+        self.assertEqual(self.worker.cursor, (SECOND, 0))
+        self.assertTrue(self.connect(resumeFrom="soon")["ok"])
+        self.assertEqual(self.worker.cursor, (SECOND, 0))
+
     def test_chart_mode_uses_bid_or_last_price_like_the_mt5_chart(self):
         quote = tick(SECOND, 900, bid=2000.0, ask=2000.5, last=0.0)
         bid_bar = connector.encode_tick(quote, SECOND * 1000 + 900, connector.SYMBOL_CHART_MODE_BID)

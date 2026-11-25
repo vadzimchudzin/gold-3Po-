@@ -394,6 +394,11 @@ class Worker:
             self.verify(login, server)
             self.session = (login, server, symbol, boundary)
             self.cursor = (boundary, 0)
+            # A reconnect after a dropped bridge continues from the last tick already delivered, so the
+            # outage leaves no hole in the footprint. The parent de-duplicates the replayed second.
+            resume = command.get("resumeFrom")
+            if type(resume) is int and boundary - HISTORY_LOOKBACK <= resume < boundary:
+                self.cursor = (resume, 0)
             result = {
                 "symbol": symbol, "commonDataPath": terminal.commondata_path,
                 "dataPath": terminal.data_path, "terminalPath": terminal_path,

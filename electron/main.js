@@ -66,7 +66,13 @@ function registerMt5Ipc() {
     workerCommand: app.isPackaged ? workerPath(process.resourcesPath) : 'py.exe',
     workerArgs: app.isPackaged ? [] : ['-3.10', path.join(adapterDir, 'mt5_connector.py')],
     apiOrigin: localOrigin,
-    token: marketIngestToken
+    token: marketIngestToken,
+    // Ticks are read every 300 ms, so the app's candle moves with the terminal's instead of in
+    // two-second jumps; a lost bridge reopens itself (3 s, backing off to 30 s) until the operator
+    // presses Disconnect.
+    pollMs: 300,
+    licenseCheckMs: 2000,
+    reconnectMs: 3000
   });
   // Updates come from the published releases, so a fresh build reaches every workstation without a
   // manual reinstall. Nothing is downloaded until the operator asks for it.

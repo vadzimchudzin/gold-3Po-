@@ -623,3 +623,142 @@ test('the same tick from two accounts on one server never collapses into one eve
   assert.ok(eventIds[0] && eventIds[1], 'both accounts must produce a live batch');
   assert.notEqual(eventIds[0], eventIds[1], 'two demo accounts ending in 3333 must not dedupe into a single event');
 });
+
+const connectReply = { ok: true, symbol: 'XAUUSD', terminalPath: 'C:\\MT5\\terminal64.exe', commonDataPath: 'C:\\Common', dataPath: 'C:\\Data' };
+const waitFor = async (check, ms = 3000) => {
+  const until = Date.now() + ms;
+  while (Date.now() < until) { if (check()) return true; await new Promise(resolve => setTimeout(resolve, 10)); }
+  return check();
+};
+
+test('a dead connector is replaced by a new one and the same feed carries on, keeping the zones on the chart', async () => {
+  const workers = [];
+  const published = [];
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, maxFailures: 5, reconnectMs: 20, maxBackoffMs: 60,
+    makeWorker: () => {
+      const index = workers.length;
+      let stopped = false;
+      const worker = {
+        index, connectPayload: null, stop() { stopped = true; }, stopped: () => stopped,
+        async request(op, payload = {}) {
+          if (op === 'connect') { worker.connectPayload = payload; return { ...connectReply, accountLogin: '12345', server: 'RoboForex-Demo' }; }
+          if (op === 'history') return { ok: true, ticks: [] };
+          if (index === 0) { stopped = true; throw new Error('MT5 не ответил вовремя.'); }
+          return { ok: true, ticks: [{ ...tick, timestamp: new Date().toISOString() }] };
+        }
+      };
+      workers.push(worker);
+      return worker;
+    },
+    request: fakeApi().request,
+    publish: async (common, symbol, zones) => { published.push(zones.length); }
+  });
+  const first = await session.connect();
+  await waitFor(() => workers.length === 2);
+  assert.equal(workers.length, 2, 'a second connector is started without a click');
+  await waitFor(() => session.state().state === 'online' && session.state().feed === 'live');
+  assert.equal(session.state().feedId, first.feedId, 'the same account keeps the same feed');
+  assert.equal(workers[1].connectPayload.resumeFrom, undefined, 'no tick had arrived yet, so there is nothing to resume from');
+  assert.ok(published.length > 0 && !published.includes(0), 'the zones are not wiped from the MT5 chart during the outage');
+  await session.disconnect();
+});
+
+test('the reconnect resumes from the last delivered tick of the same feed', async () => {
+  const workers = [];
+  const stamp = new Date(Date.now() - 5000).toISOString();
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, reconnectMs: 15, maxBackoffMs: 40,
+    makeWorker: () => {
+      const index = workers.length;
+      let stopped = false;
+      const worker = {
+        connectPayload: null, stop() { stopped = true; }, stopped: () => stopped,
+        async request(op, payload = {}) {
+          if (op === 'connect') { worker.connectPayload = payload; return { ...connectReply, accountLogin: '12345', server: 'RoboForex-Demo' }; }
+          if (op === 'history') return { ok: true, ticks: [] };
+          if (index === 0 && !worker.sent) { worker.sent = true; return { ok: true, ticks: [{ ...tick, timestamp: stamp }] }; }
+          if (index === 0) { stopped = true; throw new Error('Модуль MT5 закрылся.'); }
+          return { ok: true, ticks: [] };
+        }
+      };
+      workers.push(worker);
+      return worker;
+    },
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await waitFor(() => workers.length === 2 && workers[1].connectPayload);
+  assert.equal(workers[1].connectPayload.resumeFrom, Math.floor(Date.parse(stamp) / 1000));
+  await session.disconnect();
+});
+
+test('MT5 not being open yet is retried until it is, instead of staying offline', async () => {
+  let attempts = 0;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, reconnectMs: 15, maxBackoffMs: 30,
+    makeWorker: () => ({
+      stop() {}, stopped: () => false,
+      async request(op) {
+        if (op === 'connect') {
+          attempts += 1;
+          if (attempts < 3) throw new Error('Не найден запущенный MetaTrader 5.');
+          return connectReply;
+        }
+        if (op === 'history') return { ok: true, ticks: [] };
+        return { ok: true, ticks: [] };
+      }
+    }),
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  const first = await session.connect();
+  assert.notEqual(first.state, 'online');
+  await waitFor(() => session.state().state === 'online');
+  assert.equal(session.state().state, 'online');
+  assert.equal(attempts, 3);
+  await session.disconnect();
+});
+
+test('an operator disconnect is final: nothing reconnects behind their back', async () => {
+  let connects = 0;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, reconnectMs: 15,
+    makeWorker: () => ({
+      stop() {}, stopped: () => false,
+      async request(op) {
+        if (op === 'connect') { connects += 1; return connectReply; }
+        return { ok: true, ticks: [] };
+      }
+    }),
+    request: fakeApi().request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await session.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(connects, 1);
+  assert.equal(session.state().state, 'offline');
+});
+
+test('an invalid licence ends the session for good even with reconnects enabled', async () => {
+  let connects = 0;
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 10, reconnectMs: 15,
+    makeWorker: () => ({
+      stop() {}, stopped: () => false,
+      async request(op) {
+        if (op === 'connect') { connects += 1; return connectReply; }
+        return { ok: true, ticks: [] };
+      }
+    }),
+    request: fakeApi({ licenseValid: () => false }).request,
+    publish: async () => {}
+  });
+  await session.connect();
+  await waitFor(() => session.state().state === 'offline');
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(connects, 1);
+  assert.equal(session.state().state, 'offline');
+});

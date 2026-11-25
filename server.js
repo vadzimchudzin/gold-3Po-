@@ -13,6 +13,7 @@ import { createSettingsStore } from './settings-store.js';
 import { createPatternStore } from './pattern-store.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const STREAM_PING_MS = 5000;
 const MAX_EVENTS = 1000000;
 // Only the newest MAX_EVENTS lines are ever read back, so the archive is trimmed on startup once it
 // grows past this size: an append-only file that history backfills had pushed to 4.9 GB.
@@ -110,7 +111,7 @@ function normalizeComex(input) {
   return { type: 'trade', source: 'comex', venue: 'comex_futures', symbol: input.symbol.trim().toUpperCase(), timestamp: new Date(input.timestamp).toISOString(), sequence: input.sequence, eventId: 'COMEX-' + input.tradeId.trim(), tradeId: input.tradeId.trim(), price: input.price, size: input.size, aggressorSide: input.aggressorSide, volumeKind: 'exchange_trade_size' };
 }
 
-export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, now = () => Date.now(), staleAfterMs = 15000, storageFile = process.env.MARKET_DATA_FILE || './data/market-events.jsonl', license = null, setupStore = null, settingsStore = null, patternStore = null, maxEvents = MAX_EVENTS, maxStorageBytes = MAX_STORAGE_BYTES } = {}) {
+export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, now = () => Date.now(), staleAfterMs = 15000, storageFile = process.env.MARKET_DATA_FILE || './data/market-events.jsonl', license = null, setupStore = null, settingsStore = null, patternStore = null, maxEvents = MAX_EVENTS, maxStorageBytes = MAX_STORAGE_BYTES, streamPingMs = STREAM_PING_MS } = {}) {
   const events = []; const lastSequence = new Map(); const feeds = new Map(); const activeFeeds = new Map(); const clients = new Set(); const seenEventIds = new Set();
   const feedScopeKey = (source, symbol) => source + ':' + symbol;
   const feedSequenceKey = (source, symbol, feedId) => source + ':' + symbol + ':' + (feedId || 'legacy');
@@ -566,7 +567,10 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
     if (req.method === 'GET' && url.pathname === '/v1/stream') {
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
       res.write('event: ready\ndata: {"status":"connected"}\n\n'); clients.add(res);
-      res.on('close', () => clients.delete(res)); return;
+      // A frame every 5 s even in a quiet market: the page tells a stalled stream from a quiet one by it.
+      const beat = setInterval(() => { try { res.write('event: ping\ndata: {}\n\n'); } catch {} }, streamPingMs);
+      beat.unref?.();
+      res.on('close', () => { clearInterval(beat); clients.delete(res); }); return;
     }
     if (req.method === 'POST' && url.pathname === '/v1/ingest/mt5/live-batch') {
       if (!token) return json(res, 503, { error: 'ingest_not_configured' });

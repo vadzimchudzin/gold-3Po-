@@ -732,3 +732,20 @@ test('a cached bar still takes the ticks that arrive after it was built', async 
   assert.equal(second.bars.at(-1).c, 2651.2, 'the cached bar must still take the newest tick, or the chart freezes');
   assert.equal(second.bars.at(-1).h, 2651.2, 'and its high moves with it');
 });
+
+test('the stream pings in a quiet market so the page can tell a dead socket from silence', async () => {
+  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  const app = createMarketServer({ token: 'test-secret', storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: null }), streamPingMs: 30 });
+  server = app.server;
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  base = 'http://127.0.0.1:' + server.address().port;
+  const response = await fetch(base + '/v1/stream');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let seen = '';
+  const until = Date.now() + 2000;
+  while (!/event: ping/.test(seen) && Date.now() < until) seen += decoder.decode((await reader.read()).value);
+  await reader.cancel();
+  assert.match(seen, /event: ready/);
+  assert.match(seen, /event: ping/);
+});

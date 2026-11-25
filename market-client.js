@@ -2,7 +2,11 @@ import { marketSymbol, marketFeedId, hasMt5Bridge } from './mt5-client.js';
 import { priceDigits, priceText, createQuoteGate } from './quote-display.js';
 const api=document.querySelector('#apiStatus'),mt5=document.querySelector('#mt5Status'),comex=document.querySelector('#comexStatus');
 const labels={mt5,comex};let source;let analysisTimer=null;let lastAnalysisAt=0;let reconnectTimer=null;let hasLoadedBars=false;
-const STALE_MS=45000;
+const STALE_MS=45000,STREAM_SILENCE_MS=15000;
+// Any frame from the stream, ping included. A stream that stays silent while the page believes it is
+// connected is a dead socket (sleep, proxy, a restarted service): it is reopened instead of waiting for an error
+// that never comes, and until it is back the analysis is polled quickly so the chart keeps moving.
+let lastFrameAt=Date.now();
 const pill=document.querySelector('.demo-pill'),link=document.querySelector('.connection');
 let clearedWithoutFeed=false;
 // One gate and one formatter for every quote on the page: a tick that arrives late cannot move the
@@ -143,8 +147,9 @@ async function refreshHealth(){
 }
 function connectStream(){
  if(!('EventSource'in window)){paint(api,'SSE НЕ ПОДДЕРЖИВАЕТСЯ','error');return;}
- source=new EventSource('/v1/stream');source.onopen=()=>{refreshHealth();scheduleAnalysis();};source.onerror=()=>{paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');reconnect();};
+ lastFrameAt=Date.now();source=new EventSource('/v1/stream');source.onopen=()=>{lastFrameAt=Date.now();refreshHealth();scheduleAnalysis();};source.addEventListener('ping',()=>{lastFrameAt=Date.now();});source.addEventListener('ready',()=>{lastFrameAt=Date.now();});source.onerror=()=>{paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');reconnect();};
  source.addEventListener('market',event=>{try{
+   lastFrameAt=Date.now();
    const message=JSON.parse(event.data),target=labels[message.source];
    if(message.source==='mt5'&&message.symbol===marketSymbol()&&(message.feedId||null)===(activeFeedId()||null)){
     if(!message.historical){
@@ -164,6 +169,14 @@ function reconnect(){
  if(reconnectTimer)return;
  reconnectTimer=window.setTimeout(()=>{reconnectTimer=null;try{source?.close();}catch{}connectStream();},5000);
 }
+function streamWatch(){
+ if(Date.now()-lastFrameAt<STREAM_SILENCE_MS){return;}
+ paint(api,'ПЕРЕПОДКЛЮЧЕНИЕ','warning');
+ try{source?.close();}catch{}
+ lastFrameAt=Date.now();
+ connectStream();
+ lastAnalysisAt=0;scheduleAnalysis(0);
+}
 function watchdog(){
  const age=Date.now()-lastAnalysisAt;
  if(!lastAnalysisAt){scheduleAnalysis();return;}
@@ -178,7 +191,7 @@ window.addEventListener('mt5-feed-change',()=>{lastAnalysisAt=0;quotes.reset();f
 window.addEventListener('gold3po-settings',e=>{if(e.detail?.zonesChanged){lastAnalysisAt=0;refreshAnalysis();}});
 window.addEventListener('market-refresh-request',()=>{lastAnalysisAt=0;refreshAnalysis();});
 window.addEventListener('market-bar-close',()=>{scheduleAnalysis(400);});
-refreshHealth();refreshAnalysis();connectStream();window.setInterval(refreshHealth,5000);window.setInterval(watchdog,10000);
+refreshHealth();refreshAnalysis();connectStream();window.setInterval(refreshHealth,5000);window.setInterval(watchdog,10000);window.setInterval(streamWatch,5000);
 
 // Keep the quote strip in sync with the active account's live MT5 quote stream.
 // The same gate orders the strip, so a replayed or overlapping frame never rewinds bid/ask.
