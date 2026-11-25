@@ -159,7 +159,7 @@ function renderDeltaPane(scale){
  if(wrap.scrollLeft!==chartViewport.scrollLeft)wrap.scrollLeft=chartViewport.scrollLeft;
 }
 function renderChart(){
- if(!bars.length){chart.innerHTML='';chart.setAttribute('viewBox','0 0 1000 390');chart.style.width='100%';clearDeltaPane();setEmptyState(true);return;}
+ if(!bars.length){chart.innerHTML='';chart.setAttribute('viewBox','0 0 1000 390');chart.style.width='100%';liveLayer=null;clearDeltaPane();setEmptyState(true);return;}
  setEmptyState(false);
  const left=64;
  // The chart fills the panel at any window width (up to 4K) and compresses history into it: a bar
@@ -172,7 +172,7 @@ function renderChart(){
  // the candle range are clipped by the chart's auto-scale and appear to be missing in MT5 parity checks.
  if(showZones)for(const zone of zones){if(Number.isFinite(Number(zone.high)))allPrices.push(Number(zone.high));if(Number.isFinite(Number(zone.low)))allPrices.push(Number(zone.low));}
  const plotted=allPrices.map(Number).filter(value=>Number.isFinite(value));
- if(!plotted.length){setEmptyState(true);return;}
+ if(!plotted.length){liveLayer=null;setEmptyState(true);return;}
  // A sticky band: the axis only grows when price leaves it, so a live tick never shifts the series.
  const range=priceRange({prices:plotted,previous:chartRange,zoom:verticalZoom});
  chartRange=range;
@@ -210,9 +210,59 @@ function renderChart(){
  const last=bars.at(-1),py=y(last.c);html+=`<line x1="${left}" y1="${py}" x2="${left+width}" y2="${py}" class="last-price-line"/><rect x="${left+width-2}" y="${py-11}" width="70" height="22" rx="5" class="last-price-tag"/><text x="${left+width+33}" y="${py+4}" text-anchor="middle" class="last-price-text">${fmt(last.c)}</text>`;
  chart.setAttribute('viewBox',`0 0 ${svgWidth} 390`);chart.style.width=svgWidth+'px';chart.innerHTML=html;
  chart.classList.toggle('zone-hovering',!!hoveredZone);
+ captureLiveLayer({index:bars.length-1,min,max,scale});
  renderDeltaPane(scale);
  updateChartZoomControls();
  if(live&&!hasAutoScrolled){chartViewport.scrollLeft=chartViewport.scrollWidth;hasAutoScrolled=true;}
+}
+// A full render rebuilds every node of the series — thousands of them on a long history — so it
+// cannot run on every streamed tick. The forming candle, the price line and the tag are patched in
+// place instead; the overlays (grid, axis, zones) are rebuilt only when they would move anyway:
+// a new bar, a replaced zone set, a changed scale, or a price outside the axis band.
+let liveLayer=null,liveZonesRevision=0;
+function liveZonesChanged(){liveZonesRevision+=1;}
+function captureLiveLayer({index,min,max,scale}){
+ const group=chart.querySelector(`.candle[data-index="${index}"]`);
+ if(!group){liveLayer=null;return;}
+ liveLayer={
+  count:bars.length,index,min,max,scale,zones:liveZonesRevision,
+  group,
+  wick:group.querySelector('.wick'),
+  body:group.querySelector('rect:not(.hit-area)'),
+  line:chart.querySelector('.last-price-line'),
+  tag:chart.querySelector('.last-price-tag'),
+  text:chart.querySelector('.last-price-text')
+ };
+}
+// Returns false when this tick needs a full render instead (the caller owns that decision).
+function patchLiveChart(){
+ const layer=liveLayer;
+ if(!layer||!bars.length)return false;
+ if(layer.count!==bars.length||layer.index!==bars.length-1)return false;
+ if(layer.zones!==liveZonesRevision||!chart.contains(layer.group))return false;
+ const bar=bars[layer.index];
+ if(!bar||!(layer.max>layer.min))return false;
+ const high=Number(bar.h),low=Number(bar.l),close=Number(bar.c),open=Number(bar.o);
+ if(![high,low,close,open].every(Number.isFinite))return false;
+ // Outside the band the grid, the axis labels and every zone rectangle sit at the wrong height:
+ // that is a re-scale, not a patch.
+ if(high>layer.max||low<layer.min||close>layer.max||close<layer.min)return false;
+ const y=p=>34+(layer.max-p)/(layer.max-layer.min)*315;
+ const up=close>=open,top=Math.min(y(open),y(close)),height=Math.max(1.5,Math.abs(y(open)-y(close))),py=y(close);
+ if(layer.wick){
+  layer.wick.setAttribute('y1',y(high));
+  layer.wick.setAttribute('y2',y(low));
+  layer.wick.setAttribute('class','wick '+(up?'wick-up':'wick-down'));
+ }
+ if(layer.body){
+  layer.body.setAttribute('y',top);
+  layer.body.setAttribute('height',height);
+  layer.body.setAttribute('class',up?'candle-up':'candle-down');
+ }
+ if(layer.line){layer.line.setAttribute('y1',py);layer.line.setAttribute('y2',py);}
+ if(layer.tag)layer.tag.setAttribute('y',py-11);
+ if(layer.text){layer.text.setAttribute('y',py+4);layer.text.textContent=fmt(close);}
+ return true;
 }
 let hoveredZone=null;
 function setHoveredZone(id){
@@ -552,7 +602,6 @@ $('#footZoomYIn')?.addEventListener('click',()=>changeFootprintZoom('y',footprin
 $('#footZoomYReset')?.addEventListener('click',()=>changeFootprintZoom('y',1));
 $('#footZoomFit')?.addEventListener('click',()=>fitFootprintOverview());
 $('#footRefresh')?.addEventListener('click',()=>{
- lastFootprintAutoAt=Date.now();
  renderFootprint();
  if(selected===bars.length-1)renderInspector();
  notify('Футпринт обновлён');
@@ -600,26 +649,41 @@ panelResizer?.addEventListener('keydown',event=>{
  renderChart();renderFootprint();
 });
 applyWorkspaceLayout();
-// A streamed tick updates the forming bar in place: the last footprint column and the last
-// candle move between authoritative refetches instead of waiting for the next 1.5 s poll.
-const FOOTPRINT_REFRESH_MS=10000;
-let liveFrame=0,liveRenderedAt=0,lastFootprintAutoAt=0,lastLiveTick=null,liveRuleBid=null,liveRuleAsk=null,liveRuleSide=null;
+// A streamed tick updates the forming bar in place: the candle, the price line and the last
+// footprint column follow the feed between authoritative refetches, the way the MT5 chart does.
+// The candle is patched on the next animation frame, so a burst of ticks costs one paint, while
+// the heavier panels (footprint column, inspector, cumulative delta) keep a calmer cadence.
+const LIVE_PANEL_MS=250,LIVE_REBUILD_MS=180,LIVE_FOOTPRINT_FULL_MS=1000;
+let liveFrame=0,liveFrameAt=0,liveRenderedAt=0,lastPanelAt=0,lastRebuildAt=0,lastFootprintFullAt=0,lastLiveTick=null,liveRuleBid=null,liveRuleAsk=null,liveRuleSide=null;
 function scheduleLiveRender(){
- if(liveFrame)return;
- const wait=Math.max(0,350-(performance.now()-liveRenderedAt));
- liveFrame=setTimeout(()=>{
+ const at=performance.now();
+ if(liveFrame){
+  // A frame is already queued. A window parked in the tray never runs it, so after a second the
+  // stale request is dropped and this tick takes over — the chart is current again on restore.
+  if(at-liveFrameAt<1000)return;
+  cancelAnimationFrame(liveFrame);
+ }
+ liveFrameAt=at;
+ liveFrame=requestAnimationFrame(()=>{
   liveFrame=0;
   liveRenderedAt=performance.now();
-  renderChart();
-  if(selected===bars.length-1)renderInspector();
-  // Refresh the footprint at most once every 10 seconds in the background (or instantly via #footRefresh),
-  // eliminating DOM/layout stutter during active gold sessions.
-  const nowMs=Date.now();
-  if(nowMs-lastFootprintAutoAt>=FOOTPRINT_REFRESH_MS){
-   lastFootprintAutoAt=nowMs;
-   if(!patchLiveFootprint())renderFootprint();
+  if(!patchLiveChart()){
+   // A new bar or a price outside the band has to rebuild the overlays. A fast market makes a new
+   // extreme every few ticks, and one rebuild per extreme is enough: never more than one per
+   // LIVE_REBUILD_MS, the rest of the ticks land in the rebuilt band on the next frame.
+   if(liveRenderedAt-lastRebuildAt>=LIVE_REBUILD_MS){lastRebuildAt=liveRenderedAt;renderChart();}
   }
- },wait);
+  if(liveRenderedAt-lastPanelAt<LIVE_PANEL_MS)return;
+  lastPanelAt=liveRenderedAt;
+  if(selected===bars.length-1)renderInspector();
+  if(patchLiveFootprint()){
+   // The forming column is current; nothing to rebuild.
+  }else if(liveRenderedAt-lastFootprintFullAt>=LIVE_FOOTPRINT_FULL_MS){
+   lastFootprintFullAt=liveRenderedAt;
+   renderFootprint();
+  }
+  if(liveLayer)renderDeltaPane(liveLayer.scale);
+ });
 }
 function applyLiveTick(event){
  if(replayMode||!bars.length||!event)return;
@@ -678,11 +742,11 @@ function mergeLiveBars(analysis){
 window.addEventListener('market-tick',e=>applyLiveTick(e.detail));
 // Footprint settings changed: re-render with the new options. Bars served before the change carry
 // the old marks, so drop their cached footprint fields and recompute them from the level maps.
-window.addEventListener('gold3po-settings',()=>{for(const b of bars){if(Array.isArray(b.levels)&&b.poc!==undefined){delete b.poc;delete b.valueArea;delete b.imbalances;delete b.stackedImbalances;delete b.absorbedLevels;delete b.unfinishedHigh;delete b.unfinishedLow;delete b.delta;delete b.deltaRatio;delete b.maxLevelVolume;}}renderChart();lastFootprintAutoAt=Date.now();renderFootprint();renderInspector();});
-window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=mergeLiveBars(a);live=true;analysisMeta=a;const tf=Number(a.timeframeMinutes||Number(a.intervalMs)/60000);document.querySelectorAll('.timeframe-label').forEach(node=>{if(Number.isFinite(tf)&&tf>0){const caption=tf>=60?(tf%60===0?tf/60+'ч':tf+'м'):tf+'м';node.textContent=caption+(node.classList.contains('footprint-timeframe')?' · ЕДИНЫЙ ТФ':' · ТИКИ БРОКЕРА');}});zones=a.zones||[];selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
+window.addEventListener('gold3po-settings',()=>{for(const b of bars){if(Array.isArray(b.levels)&&b.poc!==undefined){delete b.poc;delete b.valueArea;delete b.imbalances;delete b.stackedImbalances;delete b.absorbedLevels;delete b.unfinishedHigh;delete b.unfinishedLow;delete b.delta;delete b.deltaRatio;delete b.maxLevelVolume;}}renderChart();renderFootprint();renderInspector();});
+window.addEventListener('market-analysis',e=>{if(replayMode)return;const a=e.detail;if(!a?.bars?.length)return;const previousTime=bars[selected]?.time,wasAtLatest=selected===bars.length-1;bars=mergeLiveBars(a);live=true;analysisMeta=a;const tf=Number(a.timeframeMinutes||Number(a.intervalMs)/60000);document.querySelectorAll('.timeframe-label').forEach(node=>{if(Number.isFinite(tf)&&tf>0){const caption=tf>=60?(tf%60===0?tf/60+'ч':tf+'м'):tf+'м';node.textContent=caption+(node.classList.contains('footprint-timeframe')?' · ЕДИНЫЙ ТФ':' · ТИКИ БРОКЕРА');}});zones=a.zones||[];liveZonesChanged();selected=wasAtLatest||selected<0?bars.length-1:Math.max(0,bars.findIndex(b=>b.time===previousTime));levels=currentLevels();const feedLive=a.feed?.status==='online';const status=$('#chartStatus');if(status){status.textContent=(feedLive?'ОНЛАЙН · ':'ИСТОРИЯ · ')+barsWord(bars.length);status.className=feedLive?'ok':'warning';}const signalSummary=$('#signalSummary');if(signalSummary){const sweeps=bars.reduce((n,b)=>n+(b.sweeps?.length||0),0),stacked=bars.reduce((n,b)=>n+(b.stackedImbalances?.length||0),0),absorption=bars.filter(b=>b.absorption).length,exhaustion=bars.filter(b=>b.exhaustion).length,unfinished=bars.filter(b=>b.unfinishedHigh||b.unfinishedLow).length,absorbed=bars.reduce((n,b)=>n+((b.absorbedLevels||[]).length?1:0),0);const naked=a.profile?.naked?.length||0,div=a.divergence?.side;signalSummary.textContent='СНЯТИЯ '+sweeps+' · СТЕКИ '+stacked+' · ПОГЛОЩЕНИЕ УРОВНЕЙ '+absorbed+' · НЕЗАКРЫТЫЕ АУКЦИОНЫ '+unfinished+(naked?' · ГОЛЫХ POC '+naked:'')+(div?(div==='bearish'?' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ':' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ'):'');}const tag=$('#dataMode');if(tag)tag.textContent=feedLive?'ROBOFOREX MT5 · ОНЛАЙН':'ROBOFOREX MT5 · ИСТОРИЯ';const range=$('#barCount');if(range)range.textContent=barsWord(bars.length);const windowNode=$('#sessionWindow');if(windowNode){const hh=v=>{const d=new Date(v);return Number.isNaN(d.getTime())?'':String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');};windowNode.textContent=hh(bars[0].time)+' — '+hh(bars.at(-1).time);}renderZones();select(selected);});
 window.addEventListener('market-replay',e=>{
  const a=e.detail;if(!a?.bars?.length)return;
- replayMode=true;bars=a.bars;live=true;analysisMeta=a;zones=a.zones||[];selected=0;levels=currentLevels();hasAutoScrolled=false;
+ replayMode=true;bars=a.bars;live=true;analysisMeta=a;zones=a.zones||[];liveZonesChanged();selected=0;levels=currentLevels();hasAutoScrolled=false;
  const status=$('#chartStatus');if(status){status.textContent='ПОВТОР · '+barsWord(bars.length);status.className='ok';}
  const tag=$('#dataMode');if(tag)tag.textContent='ИСТОРИЧЕСКИЙ ПОВТОР';
  const count=$('#barCount');if(count)count.textContent=barsWord(bars.length);
@@ -692,7 +756,7 @@ window.addEventListener('market-replay',e=>{
 window.addEventListener('market-replay-step',e=>{if(replayMode)select(Number(e.detail?.index));});
 window.addEventListener('exit-replay',()=>{replayMode=false;});
 window.addEventListener('market-feed-clear',()=>{
- bars=[];zones=[];selected=-1;selectedZone=null;levels=[];analysisMeta=null;live=false;replayMode=false;hasAutoScrolled=false;chartRange=null;
+ bars=[];zones=[];liveZonesChanged();selected=-1;selectedZone=null;levels=[];analysisMeta=null;live=false;replayMode=false;hasAutoScrolled=false;chartRange=null;
  grid.dataset.autoScroll='1';
  const count=$('#barCount');if(count)count.textContent='ОЖИДАНИЕ ИСТОРИИ';
  const range=$('#sessionRange');if(range)range.textContent='Ожидание истории';

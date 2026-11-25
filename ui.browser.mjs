@@ -199,19 +199,29 @@ try {
 
   // Real time: a streamed tick lands in the forming bar between refetches, without a reload.
   // The price is outside the fixture range, so a new price row proves the tick was applied.
-  const formingVolume = () => page.evaluate(() => [...document.querySelectorAll('.foot-cell.foot-forming')]
-    .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0));
-  const beforeTick = await formingVolume();
+  // The forming column is compared together with its bar index: a tick that lands on a 15m boundary
+  // opens a new column, and its volume then starts from the tick instead of accumulating on the old one.
+  const forming = () => page.evaluate(() => {
+    const cells = [...document.querySelectorAll('.foot-cell.foot-forming')];
+    return {
+      index: cells[0]?.getAttribute('data-index') ?? null,
+      volume: cells.reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0)
+    };
+  });
+  const beforeTick = await forming();
   // Same 15m bucket as the last streamed tick above, so no new candle is created.
   const liveTick = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date().toISOString(), sequence: Date.now(), bid: 2649.1, ask: 2649.3, last: 2649.2, tickVolume: 9, realVolume: 0, flags: 32 };
   const liveResponse = await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify({...liveTick,feedId:browserFeedId}) });
   assert.equal(liveResponse.status, 202, 'a live tick must be accepted');
-  // Footprint refreshes on a 10s cadence to eliminate lag; #footRefresh triggers an immediate refresh.
+  // The forming column is patched a few times a second; #footRefresh forces a full rebuild of it.
   await page.waitForTimeout(450);
   await page.locator('#footRefresh').click();
   try {
-    await page.waitForFunction(before => [...document.querySelectorAll('.foot-cell.foot-forming')]
-      .reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0) > before, beforeTick, { timeout: 5000 });
+    await page.waitForFunction(before => {
+      const cells = [...document.querySelectorAll('.foot-cell.foot-forming')];
+      const volume = cells.reduce((sum, cell) => sum + cell.innerText.split(/\s+/).reduce((n, part) => n + (Number(part) || 0), 0), 0);
+      return (cells[0]?.getAttribute('data-index') ?? null) !== before.index ? volume >= 9 : volume > before.volume;
+    }, beforeTick, { timeout: 5000 });
   } catch (error) {
     throw new Error('a streamed tick never reached the forming bar: ' + error.message + ' · page errors: ' + (pageErrors.join(' | ') || 'none'));
   }
@@ -224,7 +234,8 @@ try {
     assert.equal(hovered, true, 'hovering a sidebar zone card must highlight its matching chart zone');
     await page.mouse.move(10, 10);
   }
-  assert.ok(await formingVolume() >= beforeTick + 9, 'the forming bar must absorb the tick volume immediately');
+  const afterTick = await forming();
+  assert.ok(afterTick.index === beforeTick.index ? afterTick.volume >= beforeTick.volume + 9 : afterTick.volume >= 9, 'the forming bar must absorb the tick volume immediately: ' + JSON.stringify({ beforeTick, afterTick }));
   assert.ok(await page.locator('.foot-cell.foot-forming').count() > 0, 'the forming column survives the tick');
 
   const firstCell = page.locator('.foot-cell:not(.empty-level)').first();
@@ -583,8 +594,63 @@ try {
   assert.ok(candles.wick > 0, 'traded rows outside candle bodies are rendered as wicks');
   assert.equal(candles.formingBody > 0, true, 'the forming column has a body too');
 
+  // A streamed tick has to move the forming candle itself — the way the MT5 chart does — without
+  // rebuilding the series, and the zone overlay has to survive it. Both regressed before: ticks were
+  // dropped until the next poll (chart stood still) or every tick redrew every node (lag).
+  const liveBefore = await page.evaluate(() => {
+    const chart = document.querySelector('#priceChart');
+    window.__liveProbe = { rebuilds: 0, patches: 0 };
+    new MutationObserver(list => {
+      for (const record of list) {
+        if (record.type === 'childList' && record.target === chart) window.__liveProbe.rebuilds += 1;
+        else if (record.type === 'attributes') window.__liveProbe.patches += 1;
+      }
+    }).observe(chart, { childList: true, attributes: true, subtree: true });
+    const candles = [...chart.querySelectorAll('.candle')];
+    const body = candles.at(-1)?.querySelector('rect:not(.hit-area)');
+    const price = number => Number(String(number).replace(/[^\d,-]/g, '').replace(',', '.'));
+    return {
+      index: candles.length - 1,
+      y: body ? Number(body.getAttribute('y')) : null,
+      height: body ? Number(body.getAttribute('height')) : null,
+      close: price(document.querySelector('.last-price-text')?.textContent || ''),
+      price: document.querySelector('.last-price-text')?.textContent || '',
+      zones: chart.querySelectorAll('.chart-zone').length
+    };
+  });
+  assert.ok(liveBefore.zones > 0, 'zones are drawn on the chart before the live ticks');
+  const liveTickPrice = Math.round((liveBefore.close + 0.9) * 100) / 100;
+  await page.evaluate(price => {
+    for (let i = 0; i < 10; i++) {
+      window.dispatchEvent(new CustomEvent('market-tick', { detail: {
+        timestamp: new Date().toISOString(), last: price + i * 0.05,
+        aggressorSide: i % 2 ? 'buy' : 'sell', tickVolume: 2, realVolume: 0
+      } }));
+    }
+  }, liveTickPrice);
+  await page.waitForTimeout(400);
+  const liveAfter = await page.evaluate(() => {
+    const chart = document.querySelector('#priceChart');
+    const candles = [...chart.querySelectorAll('.candle')];
+    const body = candles.at(-1)?.querySelector('rect:not(.hit-area)');
+    return {
+      index: candles.length - 1,
+      y: body ? Number(body.getAttribute('y')) : null,
+      height: body ? Number(body.getAttribute('height')) : null,
+      price: document.querySelector('.last-price-text')?.textContent || '',
+      zones: chart.querySelectorAll('.chart-zone').length,
+      probe: window.__liveProbe
+    };
+  });
+  assert.equal(liveAfter.index, liveBefore.index, 'the streamed ticks stay in the forming bar');
+  assert.ok(Math.abs(liveAfter.height - liveBefore.height) > 0.5 || Math.abs(liveAfter.y - liveBefore.y) > 0.5, 'a streamed tick must move the forming candle: ' + JSON.stringify({ before: liveBefore, after: liveAfter }));
+  assert.ok(liveAfter.price !== liveBefore.price, 'the last price tag follows the streamed tick');
+  assert.equal(liveAfter.zones, liveBefore.zones, 'the zone overlay must stay drawn while ticks patch the chart');
+  assert.ok(liveAfter.probe.patches > 0, 'the forming candle is patched in place');
+  assert.ok(liveAfter.probe.rebuilds <= 1, 'a stream of ticks must not rebuild the whole SVG: ' + liveAfter.probe.rebuilds + ' rebuilds');
+
   assert.deepEqual(pageErrors, [], 'browser must not emit uncaught JavaScript errors');
-  process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), zones, replay, backtest, risk planner, setup library, settings, live MT5/COMEX status and mobile overflow.\n');
+  process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), live candle patch, zones, replay, backtest, risk planner, setup library, settings, live MT5/COMEX status and mobile overflow.\n');
 } finally {
   if (browser) await browser.close();
   server.kill('SIGTERM');
