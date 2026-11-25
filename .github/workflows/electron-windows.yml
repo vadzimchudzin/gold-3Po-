@@ -92,6 +92,10 @@ jobs:
             "export const BUILD = { tag: '$tag' };"
           ) | Set-Content -LiteralPath "electron/build-info.js" -Encoding utf8
           Write-Host "Build tag: $tag"
+          # The footer of the window shows the same number, so a screenshot says exactly which build it is.
+          $html = Get-Content -LiteralPath "index.html" -Raw -Encoding utf8
+          $html = [regex]::Replace($html, "СБОРКА <b>[^<]*</b>", "СБОРКА <b>$($tag.TrimStart('v'))</b>")
+          Set-Content -LiteralPath "index.html" -Value $html -Encoding utf8 -NoNewline
 
       - name: Build Windows x64 installer
         shell: pwsh
@@ -101,6 +105,13 @@ jobs:
 
           $installer = Get-ChildItem -Path release -Filter "GOLD-3Po-Setup*.exe" | Select-Object -First 1
           if (-not $installer) { throw "Electron setup executable was not created." }
+          # The build number is part of the file name: two installers of the same version never look alike.
+          $named = $installer.Name -replace "Setup-${{ steps.version.outputs.value }}-", "Setup-${{ steps.version.outputs.value }}.${{ github.run_number }}-"
+          if ($named -ne $installer.Name) {
+            Rename-Item -LiteralPath $installer.FullName -NewName $named
+            Get-ChildItem -Path release -Filter "$($installer.Name).blockmap" -ErrorAction SilentlyContinue | Rename-Item -NewName "$named.blockmap"
+            $installer = Get-Item -LiteralPath (Join-Path release $named)
+          }
           $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$($installer.FullName).sha256" -Value "$hash  $($installer.Name)" -Encoding ascii
 
@@ -215,7 +226,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.value }}.${{ github.run_number }}
-          name: GOLD-3Po Market Lab v${{ steps.version.outputs.value }}
+          name: GOLD-3Po Market Lab v${{ steps.version.outputs.value }}.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: true
           generate_release_notes: true
