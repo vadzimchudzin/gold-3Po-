@@ -352,7 +352,14 @@ export function createMarketServer({ token = process.env.MARKET_INGEST_TOKEN, no
       const selection = selectFeedEvents(source, symbol, url);
       if (!selection) return json(res, 400, { error: 'invalid_feed_id' });
       const { feedId, events: selected } = selection;
-      const analysis = buildMarketAnalysis(selected, { intervalMs, priceStep: 0.1, footprintStep: footprintStepFor(source, symbol, feedId, 0.1), limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint });
+      // Same incremental bar cache as the chart: re-aggregating every stored tick for each poll of the
+      // MT5 bridge froze the service for a second at a time on a full archive.
+      const zoneStep = footprintStepFor(source, symbol, feedId, 0.1);
+      const analysis = barsAnalysis(
+        ['zones', source, symbol, feedId, intervalMs, zoneStep].join('|'),
+        selected,
+        { intervalMs, priceStep: 0.1, footprintStep: zoneStep, limit: 10000, zoneOptions: current.zones, footprintOptions: current.footprint }
+      );
       const zones = analysis.zones.map(zone => ({
         id: zone.id, side: zone.side, low: zone.low, high: zone.high,
         strength: zone.strength, label: zone.label, distance: zone.distance, state: zone.state

@@ -749,3 +749,20 @@ test('the stream pings in a quiet market so the page can tell a dead socket from
   assert.match(seen, /event: ready/);
   assert.match(seen, /event: ping/);
 });
+
+test('the zones endpoint follows every new tick through the incremental bar cache', async () => {
+  const feedId = 'c'.repeat(32);
+  const base0 = Date.now() - 3 * 3600_000;
+  const send = (path, ticks) => fetch(base + path, { method: 'POST', headers: auth, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', feedId, ticks }) });
+  const row = (i, price) => ({ timestamp: new Date(base0 + i * 20_000).toISOString(), sequence: i + 1, eventId: 'zc-' + i, bid: price, ask: price + 0.2, last: price, tickVolume: 1, realVolume: 0, flags: 134 });
+  const history = Array.from({ length: 400 }, (_, i) => row(i, 2650 + Math.sin(i / 9) * 6));
+  assert.equal((await send('/v1/ingest/mt5/history', history)).status, 202);
+  const url = base + '/v1/chart/zones?symbol=XAUUSD&feedId=' + feedId;
+  const first = await (await fetch(url)).json();
+  assert.equal(first.lastPrice, history.at(-1).last);
+  for (const [n, price] of [[400, 2663.45], [401, 2663.9], [402, 2661.15]]) {
+    assert.equal((await send('/v1/ingest/mt5/live-batch', [row(n, price)])).status, 202);
+    const next = await (await fetch(url)).json();
+    assert.equal(next.lastPrice, price, 'the forming bar close equals the newest tick, as in MT5');
+  }
+});

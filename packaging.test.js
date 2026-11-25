@@ -66,3 +66,13 @@ test('the packaged app looks for the MT5 connector where the build really puts i
   assert.ok(workflow.includes(`resources\\mt5-runtime\\${onedir ? name + '\\' : ''}${name}.exe`),
     'the CI smoke test must check the connector landed in the installed application');
 });
+
+test('the installer removes every older GOLD-3Po before it installs', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const nsh = await readFile(new URL('./build/installer.nsh', import.meta.url), 'utf8');
+  assert.match(nsh, /!macro customInit/);
+  assert.match(nsh, /taskkill[^\n]*GOLD-3Po Market Lab\.exe/);
+  assert.match(nsh, /taskkill[^\n]*gold3po-mt5\.exe/);
+  assert.match(nsh, /UninstallString/);
+  for (const root of ['HKCU', 'HKLM']) assert.match(nsh, new RegExp('Gold3PoRemoveRegistered ' + root));
+});
