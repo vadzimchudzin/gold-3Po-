@@ -121,7 +121,7 @@ function drawChart() {
   stats.chartDraws += 1;
   const { ctx, width, height } = prepare(chart);
   const c = colors();
-  if (!bars.length) { chartGeom = null; setEmptyState(true); updateChartZoomControls(); return; }
+  if (!bars.length) { chartGeom = null; setEmptyState(true); return; }
   setEmptyState(false);
   const L = chartLayout(width, height);
   const n = bars.length;
@@ -264,7 +264,6 @@ function drawChart() {
   drawDeltaPane(ctx, L, from, to, x, c);
   drawTimeAxis(ctx, L, from, to, x, c);
   drawLegend(ctx, L, c);
-  updateChartZoomControls();
 }
 
 function drawDeltaPane(ctx, L, from, to, x, c) {
@@ -335,11 +334,6 @@ function drawLegend(ctx, L, c) {
   if (d !== null) { ctx.fillStyle = d >= 0 ? c.up : c.down; ctx.fillText('Δ ' + (d > 0 ? '+' : '') + fmt(d, 0), px, L.priceTop + 4); }
 }
 
-function updateChartZoomControls() {
-  const horizontal = $('#chartZoomReset'), vertical = $('#chartPriceZoomReset');
-  if (horizontal) horizontal.textContent = Math.round(chartView.barSpacing / chartView.defaultSpacing * 100) + '%';
-  if (vertical) vertical.textContent = chartView.priceAuto ? 'Y авто' : 'Y';
-}
 
 // Gestures on the price chart.
 let chartDrag = null;
@@ -417,12 +411,6 @@ chart.addEventListener('wheel', event => {
   else zoomTime(chartView, Math.exp(-event.deltaY / 500), at.px, n, at.L.plotW);
   requestDraw('chart');
 }, { passive: false });
-$('#chartZoomOut')?.addEventListener('click', () => { zoomTime(chartView, 1 / 1.25, chartGeom?.L.plotW ?? 600, bars.length, chartGeom?.L.plotW ?? 600); requestDraw('chart'); });
-$('#chartZoomIn')?.addEventListener('click', () => { zoomTime(chartView, 1.25, chartGeom?.L.plotW ?? 600, bars.length, chartGeom?.L.plotW ?? 600); requestDraw('chart'); });
-$('#chartZoomReset')?.addEventListener('click', () => { resetTime(chartView); requestDraw('chart'); });
-$('#chartPriceZoomOut')?.addEventListener('click', () => { scalePrice(chartView, 1.2, chartGeom?.range || { min: 0, max: 1 }); requestDraw('chart'); });
-$('#chartPriceZoomIn')?.addEventListener('click', () => { scalePrice(chartView, 1 / 1.2, chartGeom?.range || { min: 0, max: 1 }); requestDraw('chart'); });
-$('#chartPriceZoomReset')?.addEventListener('click', () => { resetPrice(chartView); requestDraw('chart'); });
 
 // ---------------------------------------------------------------- footprint
 const FP = { axis: 66, profile: 92, head: 22, foot: 22 };
@@ -485,7 +473,6 @@ function drawFootprint() {
     footGeom = null;
     footStatus.textContent = 'Тики брокера ещё не поступили. Подключите MT5, чтобы построить футпринт.';
     footStatus.className = 'footprint-source-status is-sparse';
-    updateFootprintZoomControls();
     return;
   }
   const L = footLayout(width, height);
@@ -643,7 +630,6 @@ function drawFootprint() {
     ctx.strokeStyle = rgba(c.muted, 0.5); ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(0, Math.round(footHover.y) + 0.5); ctx.lineTo(L.plotW, Math.round(footHover.y) + 0.5); ctx.stroke(); ctx.setLineDash([]);
   }
-  updateFootprintZoomControls();
 }
 
 function footAt(event) {
@@ -733,11 +719,6 @@ footCanvas.addEventListener('wheel', event => {
   else zoomTime(footView, factor, at.px, bars.length, at.L.plotW);
   requestDraw('foot');
 }, { passive: false });
-function updateFootprintZoomControls() {
-  const xLabel = $('#footZoomXReset'), yLabel = $('#footZoomYReset');
-  if (xLabel) xLabel.textContent = 'X ' + Math.round(footView.barSpacing / footView.defaultSpacing * 100) + '%';
-  if (yLabel) yLabel.textContent = 'Y ' + Math.round(footRowH / 16 * 100) + '%';
-}
 function fitFootprintOverview() {
   if (!bars.length || !footGeom) return;
   const L = footGeom.L;
@@ -750,12 +731,6 @@ function fitFootprintOverview() {
   footView.priceAuto = true; footCenter = null;
   requestDraw('foot');
 }
-$('#footZoomXOut')?.addEventListener('click', () => { zoomTime(footView, 1 / 1.25, footGeom?.L.plotW ?? 600, bars.length, footGeom?.L.plotW ?? 600); requestDraw('foot'); });
-$('#footZoomXIn')?.addEventListener('click', () => { zoomTime(footView, 1.25, footGeom?.L.plotW ?? 600, bars.length, footGeom?.L.plotW ?? 600); requestDraw('foot'); });
-$('#footZoomXReset')?.addEventListener('click', () => { resetTime(footView); requestDraw('foot'); });
-$('#footZoomYOut')?.addEventListener('click', () => { footRowH = clamp(footRowH / 1.25, 3, 48); requestDraw('foot'); });
-$('#footZoomYIn')?.addEventListener('click', () => { footRowH = clamp(footRowH * 1.25, 3, 48); requestDraw('foot'); });
-$('#footZoomYReset')?.addEventListener('click', () => { footRowH = 16; footView.priceAuto = true; footCenter = null; requestDraw('foot'); });
 $('#footZoomFit')?.addEventListener('click', () => fitFootprintOverview());
 // The market client sends ladders only for the candles the footprint can show, with a margin.
 window.gold3poLevelsFrom = () => {
@@ -852,7 +827,7 @@ $('#resetView').addEventListener('click', () => {
 // Toggles, footprint mode and zoom live on this computer, like the window layout. Saved when they
 // change (checked every 2 s, written only on a difference) and once more when the page goes away.
 const VIEW_KEY = 'gold3po-view';
-const FOOT_MODES = ['bidask', 'delta', 'volume', 'deltaPct', 'buy', 'sell'];
+const FOOT_MODES = ['bidask', 'delta', 'volume', 'deltaPct'];
 const viewSnapshot = () => JSON.stringify({ showZones, showNumbers, mode, chartSpacing: chartView.barSpacing, footSpacing: footView.barSpacing, footRowH });
 let savedView = null, restoredZoom = null;
 function saveViewState() {
@@ -976,7 +951,6 @@ window.addEventListener('market-analysis', e => {
   else { const added = bars.filter(b => b.timeMs > previousLast).length; followNewBars(chartView, added); followNewBars(footView, added); }
   selected = wasAtLatest || timeframeChanged ? bars.length - 1 : Math.max(0, bars.findIndex(b => b.timeMs === previousTime));
   const tf = Number(a.timeframeMinutes || Number(a.intervalMs) / 60000);
-  document.querySelectorAll('.timeframe-label').forEach(node => { if (Number.isFinite(tf) && tf > 0) { const caption = tf >= 60 ? (tf % 60 === 0 ? tf / 60 + 'ч' : tf + 'м') : tf + 'м'; node.textContent = caption + (node.classList.contains('footprint-timeframe') ? ' · ТФ ГРАФИКА' : a.candleSource === 'mt5_m1_rates' ? ' · СВЕЧИ MT5' : ' · ПО ТИКАМ'); } });
   const feedLive = a.feed?.status === 'online';
   const status = $('#chartStatus'); if (status) { status.textContent = (feedLive ? 'ОНЛАЙН · ' : 'ИСТОРИЯ · ') + barsWord(bars.length); status.className = feedLive ? 'ok' : 'warning'; }
   const signalSummary = $('#signalSummary');
@@ -995,7 +969,7 @@ window.addEventListener('market-feed-clear', () => {
 });
 const initialStatus = $('#chartStatus'); if (initialStatus && !live) { initialStatus.textContent = 'ОЖИДАНИЕ ДАННЫХ · ПОДКЛЮЧИТЕ MT5'; initialStatus.className = 'warning'; }
 renderZones(); renderInspector(); requestDraw();
-for (const id of ['chartRefresh', 'footRefresh']) $('#' + id)?.addEventListener('click', async e => {
+for (const id of ['chartRefresh']) $('#' + id)?.addEventListener('click', async e => {
   const btn = e.currentTarget; btn.classList.remove('spin'); void btn.offsetWidth; btn.classList.add('spin'); btn.disabled = true;
   try { await window.gold3poRefresh?.(); notify('Данные перезагружены из MT5'); }
   catch { notify('Не удалось обновить: сервис недоступен'); }

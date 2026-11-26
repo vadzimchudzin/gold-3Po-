@@ -43,7 +43,8 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 });
   await page.addInitScript(feedId => {
     window.goldMt5 = {
-      state: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId, message: 'Тестовое подключение MT5.' }),
+      // Like the real session, every status carries the archive progress, so a periodic status poll never wipes it.
+      state: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId, message: 'Тестовое подключение MT5.', archive: window.__archive || null }),
       connect: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId }),
       disconnect: async () => ({ state: 'offline', symbol: 'XAUUSD', message: 'Тестовое отключение.' }),
       installIntegration: async () => ({ message: 'Тестовая интеграция.' }),
@@ -51,7 +52,7 @@ try {
       archive: async request => {
         window.__archiveRequests = [...(window.__archiveRequests || []), request];
         return { state: 'online', feed: 'online', symbol: 'XAUUSD', feedId, candles: { loaded: true, days: 10, count: 14000 },
-          archive: request.stop ? { state: 'stopped', days: 3, done: 40, total: 144, already: 10, ticks: 52000, skipped: 0 } : { state: 'running', days: request.days, done: 12, total: 144, already: 10, ticks: 8000, skipped: 0 } };
+          archive: window.__archive = request.stop ? { state: 'stopped', days: 3, done: 40, total: 144, already: 10, ticks: 52000, skipped: 0 } : { state: 'running', days: request.days, done: 12, total: 144, already: 10, ticks: 8000, skipped: 0 } };
       }
     };
   }, browserFeedId);
@@ -64,6 +65,16 @@ try {
   const frame = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const scene = async () => { await frame(); return page.evaluate(() => window.gold3poChart.scene()); };
   const chartState = () => page.evaluate(() => window.gold3poChart.state());
+  // Zoom is done with the mouse, as a trader would: wheel over the plot, over the price axis, Ctrl+wheel.
+  const wheel = async (selector, fx, fy, deltaY, { ctrl = false } = {}) => {
+    const box = await page.locator(selector).boundingBox();
+    await page.mouse.move(box.x + box.width * fx, box.y + box.height * fy);
+    if (ctrl) await page.keyboard.down('Control');
+    await page.mouse.wheel(0, deltaY);
+    if (ctrl) await page.keyboard.up('Control');
+    await page.waitForTimeout(80);
+  };
+  const CHART = '#priceChart', FOOT = 'canvas.footprint-canvas';
   const clickBar = async (where, index, price) => {
     await frame();
     const point = await page.evaluate(([w, i, p]) => window.gold3poChart.point(w, i, p), [where, index, price]);
@@ -109,15 +120,15 @@ try {
   assert.match(dataProvenance.status, /не интерполируются/, 'missing price levels must never be filled from OHLC');
   assert.ok(dataProvenance.columns.length > 0 && dataProvenance.columns.every(column => column.cells.every(cell => cell.bid + cell.ask + cell.unknown > 0)), 'the footprint draws only price rows the broker actually traded');
   const spacingBeforeZoom = (await chartState()).chartView.barSpacing;
-  await page.locator('#chartZoomIn').click();
-  assert.ok((await chartState()).chartView.barSpacing > spacingBeforeZoom, 'X zoom must enlarge candle spacing');
-  await page.locator('#chartZoomReset').click();
+  await wheel(CHART, 0.5, 0.4, -300);
+  assert.ok((await chartState()).chartView.barSpacing > spacingBeforeZoom, 'the wheel over the plot must enlarge candle spacing');
+  await page.locator('#resetView').click();
   const priceTagBeforeZoom = (await scene()).chart.lastPriceY;
-  await page.locator('#chartPriceZoomIn').click();
+  await wheel(CHART, 0.995, 0.3, -300);
   const priceTagAfterZoom = (await scene()).chart.lastPriceY;
-  assert.notEqual(priceTagAfterZoom,priceTagBeforeZoom,'Y zoom must change the price projection');
-  await page.locator('#chartPriceZoomReset').click();
-  await page.locator('#chartZoomReset').click();
+  assert.notEqual(priceTagAfterZoom,priceTagBeforeZoom,'the wheel over the price axis must change the price projection');
+  await page.locator('#resetView').click();
+  for (const gone of ['#chartZoomIn', '#chartPriceZoomIn', '#footZoomXIn', '#footZoomYIn', '#footRefresh']) assert.equal(await page.locator(gone).count(), 0, 'the panels carry no duplicate zoom/refresh buttons: ' + gone);
   const zoneTally = await page.evaluate(() => {
     const num = t => Number((t || '').replace(/[^\d]/g, ''));
     return {
@@ -162,12 +173,6 @@ try {
   const pctTexts = await cellTexts();
   assert.ok(pctTexts.includes('+50%') && pctTexts.includes('-56%') && pctTexts.every(text => /^[+-]?\d+%$/.test(text)), 'Delta % mode shows each row as a share of its sided volume: ' + pctTexts.slice(0, 8).join(' '));
   assert.ok(await page.locator('#footprintModes [data-mode="deltaPct"].selected').count() === 1, 'the Delta % button is marked selected');
-  await page.locator('#footprintModes [data-mode="buy"]').click();
-  const buyTexts = await cellTexts();
-  await page.locator('#footprintModes [data-mode="sell"]').click();
-  const sellTexts = await cellTexts();
-  assert.ok(buyTexts.includes('9') && buyTexts.includes('2') && sellTexts.includes('3') && sellTexts.includes('7'), 'buy shows the ask side and sell the bid side: ' + buyTexts.join(' ') + ' / ' + sellTexts.join(' '));
-  assert.notDeepEqual(buyTexts, sellTexts, 'buy and sell modes show different sides of the rows');
   await page.locator('#footprintModes [data-mode="bidask"]').click();
   const clusterRender = await (async () => {
     const cells = cellsOf(await scene());
@@ -233,19 +238,16 @@ try {
   await page.locator('#layoutButton').click();
   assert.ok(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout')), 'split TradingView layout must activate');
   assert.ok(await page.locator('#chartPanelResizer').isVisible(), 'split layout must expose the chart/footprint divider');
-  for (const id of ['#footZoomXOut', '#footZoomXIn', '#footZoomYOut', '#footZoomYIn']) {
-    assert.ok(await page.locator(id).isVisible(), 'footprint zoom control must be visible: ' + id);
-  }
+  assert.ok(await page.locator('#footZoomFit').isVisible(), 'the footprint overview button must be visible');
   { const before = await chartState();
-    await page.locator('#footZoomXIn').click();
-    assert.ok((await chartState()).footView.barSpacing > before.footView.barSpacing, 'X+ must widen footprint columns');
-    await page.locator('#footZoomYIn').click();
-    assert.ok((await chartState()).footRowH > before.footRowH, 'Y+ must increase footprint price-row height');
+    await wheel(FOOT, 0.4, 0.5, -300);
+    assert.ok((await chartState()).footView.barSpacing > before.footView.barSpacing, 'the wheel must widen footprint columns');
+    await wheel(FOOT, 0.4, 0.5, -300, { ctrl: true });
+    assert.ok((await chartState()).footRowH > before.footRowH, 'Ctrl+wheel must increase footprint price-row height');
     const view = await scene();
     assert.ok(view.foot.columns.some(column => column.width > before.footView.barSpacing), 'the wider columns are drawn');
   }
-  await page.locator('#footZoomXReset').click();
-  await page.locator('#footZoomYReset').click();
+  await page.locator('#resetView').click();
   await page.locator('#layoutButton').click();
   assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout'))), 'layout toggle restores stacked workspace');
 
@@ -276,12 +278,12 @@ try {
   assert.match(await page.locator('#comexPrice').innerText(), /2[\s\u00a0]?662/);
   await page.waitForFunction(() => window.gold3poChart.state().comexLevels === 2, null, { timeout: 5000 });
   await page.locator('#resetView').click();
-  await page.locator('#chartPriceZoomOut').click(); await page.locator('#chartPriceZoomOut').click();
+  await wheel(CHART, 0.995, 0.3, 300); await wheel(CHART, 0.995, 0.3, 300);
   assert.ok((await scene()).chart.comex >= 1, 'COMEX levels near the price are drawn');
   await page.locator('#comexToggle').click();
   assert.equal((await scene()).chart.comex, 0, 'the C button hides the COMEX levels');
   await page.locator('#comexToggle').click();
-  await page.locator('#chartPriceZoomReset').click();
+  await page.locator('#resetView').click();
   await page.unroute('**/v1/comex**');
   // The tick history download goes to the desktop bridge and reports its progress.
   await page.locator('#archiveDays').selectOption('5');
@@ -563,7 +565,7 @@ try {
   await page.locator('#resetView').click();
   await page.waitForTimeout(300);
   await clickBar('chart', (await chartState()).bars - 40);
-  for (let i = 0; i < 8; i++) await page.locator('#footZoomYOut').click();
+  for (let i = 0; i < 3; i++) await wheel(FOOT, 0.4, 0.5, 300, { ctrl: true });
   await page.waitForTimeout(300);
   const candles = await (async () => {
     const view = await scene();
@@ -593,8 +595,8 @@ try {
   await page.locator('#zonesToggle').click();
   await page.locator('#numbersToggle').click();
   await page.locator('#footprintModes button[data-mode="delta"]').click();
-  await page.locator('#chartZoomIn').click();
-  await page.locator('#footZoomYIn').click();
+  await wheel(CHART, 0.5, 0.4, -300);
+  await wheel(FOOT, 0.4, 0.5, -300, { ctrl: true });
   const before = await page.evaluate(() => window.gold3poChart.state());
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.gold3poChart?.state().bars > 0, null, { timeout: 15000 });

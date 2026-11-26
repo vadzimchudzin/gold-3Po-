@@ -141,7 +141,7 @@ test('an update offer appears in the bar and only installs on a click', async ()
 test('the chart has timeframe buttons and both panels have a refresh button',async()=>{
   const settingsClient=await readFile(new URL('./settings-client.js',import.meta.url),'utf8');
   for(const tf of [1,5,15,30,60,240])assert.ok(html.includes('data-tf="'+tf+'"'),'Missing timeframe button '+tf);
-  for(const id of ['chartRefresh','footRefresh'])assert.ok(html.includes('id="'+id+'"')&&app.includes("'"+id+"'"),'Refresh button not wired: '+id);
+  for(const id of ['chartRefresh'])assert.ok(html.includes('id="'+id+'"')&&app.includes("'"+id+"'"),'Refresh button not wired: '+id);
   assert.match(settingsClient,/button\[data-tf\]/);
   const client=await readFile(new URL('./market-client.js',import.meta.url),'utf8');
   assert.match(client,/window\.gold3poRefresh=/);
@@ -159,4 +159,15 @@ test('view state, archive depth and the desktop window survive a restart',async(
   assert.match(main,/window-state\.json/,'the window size and position are remembered');
   assert.match(main,/getNormalBounds\(\)/); assert.match(main,/isMaximized\(\)/);
   assert.match(main,/flushStorageData\(\)/,'localStorage is flushed to disk before hiding or exiting');
+});
+
+test('glass is the default look; the flat terminal look applies only when chosen', async () => {
+  const [html, css, settings] = await Promise.all(['./index.html', './styles.css', './settings-client.js'].map(f => readFile(new URL(f, import.meta.url), 'utf8')));
+  assert.match(html, /data-style="glass"/);
+  assert.match(html, /id="setStyle"[^]*data-value="glass"[^]*data-value="terminal"/);
+  assert.match(settings, /setStyle: \['ui', 'style', String\]/);
+  const layer = css.slice(css.indexOf('/* ── Terminal design'));
+  const selectors = [...layer.replace(/\/\*[^]*?\*\//g, '').replace(/@media[^{]*\{/g, '').matchAll(/(?:^|})\s*([^{}@][^{}]*)\{/g)].map(m => m[1].trim()).filter(Boolean);
+  assert.ok(selectors.length > 20);
+  for (const group of selectors) for (const sel of group.split(',')) assert.ok(sel.trim().startsWith('html[data-style="terminal"]'), 'terminal rule leaks into the glass look: ' + sel);
 });

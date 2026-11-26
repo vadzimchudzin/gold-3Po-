@@ -102,3 +102,10 @@ test('zones are drawn in MT5 until the switch is turned off, and the choice surv
     assert.equal((await createSettingsStore({ file }).get()).mt5.zonesVisible, true);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('the look defaults to glass, can be switched to terminal, and old files without it still load', () => {
+  assert.equal(DEFAULT_SETTINGS.ui.style, 'glass');
+  assert.equal(validateSettings({ ui: { style: 'terminal' } }).ui.style, 'terminal');
+  assert.equal(validateSettings({ ui: { theme: 'glass-light', timeDisplay: 'utc', showComex: true, showSignals: true } }).ui.style, 'glass');
+  assert.throws(() => validateSettings({ ui: { style: 'neon' } }), /style/);
+});

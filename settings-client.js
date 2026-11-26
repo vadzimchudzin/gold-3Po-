@@ -3,9 +3,8 @@
 const $ = id => document.getElementById(id);
 const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true },
   footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1 },
-  mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark', timeDisplay: 'broker', showComex: true, showSignals: true } };
+  mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark', style: 'glass', timeDisplay: 'broker', showComex: true, showSignals: true } };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
-const TF_LABEL = { 1: '1м', 5: '5м', 15: '15м', 30: '30м', 60: '1ч', 240: '4ч' };
 const DASH = { solid: '', dash: '10 6', dot: '2 5', dashdot: '10 5 2 5' };
 
 let settings = structuredClone(DEFAULTS);
@@ -15,7 +14,10 @@ window.gold3poIntervalMs = () => (settings.zones.timeframeMinutes || 15) * 60000
 
 const theme = name => { document.documentElement.dataset.theme = name === 'glass-light' ? 'glass-light' : 'glass-dark';
   try { localStorage.setItem('gold3po-theme', document.documentElement.dataset.theme); } catch {} };
-try { theme(localStorage.getItem('gold3po-theme') || 'glass-dark'); } catch {}
+// Look: 'glass' (translucent, glow) or 'terminal' (flat panels). Independent of light/dark.
+const look = name => { document.documentElement.dataset.style = name === 'terminal' ? 'terminal' : 'glass';
+  try { localStorage.setItem('gold3po-style', document.documentElement.dataset.style); } catch {} };
+try { theme(localStorage.getItem('gold3po-theme') || 'glass-dark'); look(localStorage.getItem('gold3po-style') || 'glass'); } catch {}
 
 function status(text, kind = '') { const el = $('settingsStatus'); if (!el) return; el.textContent = text; el.dataset.kind = kind; }
 
@@ -69,9 +71,9 @@ function render() {
   const stepSel = $('footClusterStep');
   if (stepSel) stepSel.value = String(f.ticksPerRow ?? 1);
   setSeg('setTheme', settings.ui.theme);
+  setSeg('setStyle', settings.ui.style || 'glass');
   setSeg('setTimeDisplay', settings.ui.timeDisplay || 'broker');
   setToggle('setShowComex', settings.ui.showComex !== false); setToggle('setShowSignals', settings.ui.showSignals !== false);
-  document.querySelectorAll('.timeframe-label').forEach(el => { el.textContent = `${TF_LABEL[z.timeframeMinutes] || z.timeframeMinutes + 'м'} · ${el.classList.contains('footprint-timeframe') ? 'ТФ ГРАФИКА' : 'СВЕЧИ MT5'}`; });
   preview();
 }
 
@@ -105,6 +107,7 @@ function change(section, key, value) {
   if (section === 'zones' && key === 'maxZones' && value < settings.zones.minZones) { settings.zones.minZones = value; (pending.zones ||= {}).minZones = value; }
   if (section === 'mt5' && key === 'lineStyle' && value !== 'solid') settings.mt5.lineWidth = 1;
   if (section === 'ui' && key === 'theme') theme(value);
+  if (section === 'ui' && key === 'style') look(value);
   // Display switches (time, overlays) take effect at once; the save below only makes them stick.
   if (section === 'ui') { window.gold3poSettings = settings; window.dispatchEvent(new CustomEvent('gold3po-settings', { detail: { settings, zonesChanged: false } })); }
   (pending[section] ||= {})[key] = value;
@@ -120,7 +123,7 @@ async function load() {
     const response = await fetch('/v1/settings', { cache: 'no-store' });
     if (!response.ok) return false; // e.g. licence not active yet: keep defaults until it is
     settings = await response.json();
-    theme(settings.ui?.theme);
+    theme(settings.ui?.theme); look(settings.ui?.style);
     render(); publish(true);
     return true;
   } catch { return false; }
@@ -140,7 +143,7 @@ function bind() {
   $('setLineWidth')?.addEventListener('input', e => change('mt5', 'lineWidth', Number(e.target.value)));
   $('setBuyColor')?.addEventListener('input', e => change('mt5', 'buyColor', e.target.value.toUpperCase()));
   $('setSellColor')?.addEventListener('input', e => change('mt5', 'sellColor', e.target.value.toUpperCase()));
-  const segs = { setTimeframe: ['zones', 'timeframeMinutes', Number], setLineStyle: ['mt5', 'lineStyle', String], setTheme: ['ui', 'theme', String], setTimeDisplay: ['ui', 'timeDisplay', String] };
+  const segs = { setTimeframe: ['zones', 'timeframeMinutes', Number], setLineStyle: ['mt5', 'lineStyle', String], setTheme: ['ui', 'theme', String], setStyle: ['ui', 'style', String], setTimeDisplay: ['ui', 'timeDisplay', String] };
   for (const [id, [section, key, cast]] of Object.entries(segs)) $(id)?.addEventListener('click', e => { const b = e.target.closest('button[data-value]'); if (b) change(section, key, cast(b.dataset.value)); });
   const toggles = { setFill: 'fill', setLabels: 'showLabels', setStrength: 'showStrength', setZonesVisible: 'zonesVisible' };
   for (const [id, key] of Object.entries(toggles)) $(id)?.addEventListener('click', () => {
