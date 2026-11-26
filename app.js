@@ -63,7 +63,7 @@ function colors() {
   palette = { comex: v('--comex', '#b69cff'), alert: v('--alert', '#ffb347'), up: v('--cyan', '#99ffe4'), down: v('--red', '#ff8080'), gold: v('--gold', '#ffc799'), text: v('--text', '#ffffff'), muted: v('--muted', '#a0a0a0'), muted2: v('--muted-2', '#7e7e7e'), line: v('--line', 'rgba(165,180,210,.12)'), panel: v('--panel-solid', '#161616'), mono: v('--mono', 'monospace').replace(/['"]/g, '') };
   return palette;
 }
-new MutationObserver(() => { palette = null; requestDraw(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+new MutationObserver(() => { palette = null; requestDraw(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-style'] });
 function rgba(color, alpha) {
   const hex = /^#([0-9a-f]{6})$/i.exec(color);
   if (hex) { const n = parseInt(hex[1], 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${alpha})`; }

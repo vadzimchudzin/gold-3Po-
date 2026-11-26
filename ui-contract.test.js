@@ -166,6 +166,8 @@ test('glass is the default look; the flat terminal look applies only when chosen
   assert.match(html, /data-style="glass"/);
   assert.match(html, /id="setStyle"[^]*data-value="glass"[^]*data-value="terminal"/);
   assert.match(settings, /setStyle: \['ui', 'style', String\]/);
+  const app = await readFile(new URL('./app.js', import.meta.url), 'utf8');
+  assert.match(app, /attributeFilter: \['data-theme', 'data-style'\]/, 'switching the look repaints the canvas colours at once');
   const layer = css.slice(css.indexOf('/* ── Terminal design'));
   const selectors = [...layer.replace(/\/\*[^]*?\*\//g, '').replace(/@media[^{]*\{/g, '').matchAll(/(?:^|})\s*([^{}@][^{}]*)\{/g)].map(m => m[1].trim()).filter(Boolean);
   assert.ok(selectors.length > 20);
