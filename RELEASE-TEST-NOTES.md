@@ -1,3 +1,17 @@
+# GOLD-3Po v1.2.2 — look, layout and persistence test
+
+1. **Look.** Settings → Interface: «Стекло» (default, translucent glowing panels) or «Терминал» (flat). Both work in the dark and light themes; switching repaints the chart and footprint colours at once, without a reload.
+2. **Navigation without buttons.** The chart and footprint have no zoom/refresh buttons any more: wheel zooms around the cursor, drag pans, drag on an axis stretches it, double click fits. This replaces the ⟳, «Обзор» and «Y−/Y+» buttons described in the v1.1.0 section.
+3. **Footprint header.** Seven controls; the duplicate buy/sell-only modes are gone (bid/ask stay inside the regular mode).
+4. **Persistence (since v1.2.1).** Close and reopen the app: zones/numbers toggles, footprint mode, zoom, row height, tick-history depth, window size, position and maximized state are restored. If the saved position is off-screen (monitor removed), the window opens on the visible screen.
+
+# GOLD-3Po v1.2.0 — broker candles, COMEX, alerts
+
+1. **Broker candles.** In live mode the chart is built from the broker's own M1 candles (`rates`), aggregated on the broker clock to every timeframe; live ticks are layered on top. The tick archive is downloaded only on request, in the background, and can be stopped.
+2. **COMEX.** The «C» toggle shows delayed COMEX gold futures (GC front month) levels shifted to spot by the basis; turning it off removes them.
+3. **Alerts.** One click on the chart places one price alert; alerts also fire on zone touches and new strategy signals, only on change, with a per-zone cooldown. Rows are removed with ✕.
+4. **Removed.** Backtests, replay, pattern library and the risk module are no longer part of the product.
+
 # GOLD-3Po v1.1.0 — live feed, chart and footprint test
 
 1. **Live feed.** With MT5 connected, the price strip, the last candle and the forming footprint column move with every tick, without waiting for a refresh. The ⟳ buttons above the chart and the footprint reload the window from MT5 (the connector also re-reads recent history with `copy_ticks_from`).
