@@ -23,7 +23,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     showStrength: true,
     zonesVisible: true    // false publishes an empty snapshot, which clears every zone in MT5 at once
   },
-  ui: { theme: 'glass-dark' }
+  // timeDisplay: candle times as the broker's terminal shows them (MT5 server time), in UTC, or local.
+  ui: { theme: 'glass-dark', timeDisplay: 'broker', showComex: true, showSignals: true }
 });
 
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -80,7 +81,9 @@ export function validateSettings(rawInput = {}, base = DEFAULT_SETTINGS) {
 
   const u = section('ui', input.ui, base.ui);
   if (!['glass-dark', 'glass-light'].includes(u.theme)) throw new TypeError('theme must be glass-dark or glass-light');
-  return { zones, footprint, mt5, ui: { theme: u.theme } };
+  if (!['broker', 'utc', 'local'].includes(u.timeDisplay)) throw new TypeError('timeDisplay must be broker, utc or local');
+  for (const key of ['showComex', 'showSignals']) if (typeof u[key] !== 'boolean') throw new TypeError(`${key} must be true or false`);
+  return { zones, footprint, mt5, ui: { theme: u.theme, timeDisplay: u.timeDisplay, showComex: u.showComex, showSignals: u.showSignals } };
 }
 
 export function createSettingsStore({ file = './data/settings.json' } = {}) {

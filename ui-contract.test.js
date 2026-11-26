@@ -13,16 +13,20 @@ test('liquidity zone rows are wired to selection and workspace reset clears sele
 
 test('live feed status client uses same-origin health and SSE endpoints',async()=>{const client=await readFile(new URL('./market-client.js',import.meta.url),'utf8');assert.match(html,/id="apiStatus"/);assert.match(html,/id="mt5Status"/);assert.match(html,/id="comexStatus"/);assert.match(client,/fetch\('\/health'/);assert.match(client,/new EventSource\('\/v1\/stream'/);assert.match(client,/window\.setInterval\(refreshHealth,\s*5000\)/);});
 
-test('research controls are wired to replay, backtest, risk and alert actions',async()=>{
- const client=await readFile(new URL('./research-client.js',import.meta.url),'utf8');
- for(const id of ['replayFrom','replayTo','replaySlider','replayPosition','backtestSummary','riskResult','signalMonitor'])assert.ok(html.includes('id="'+id+'"'),'Missing research target '+id);
- for(const id of ['loadReplay','playReplay','pauseReplay','liveView','replaySlider','runBacktest','calculateRisk','enableAlerts'])assert.ok(client.includes("$('"+id+"')?.addEventListener"),'Research control has no handler: '+id);
- assert.match(client,/\/v1\/market\/replay/);
- assert.match(client,/\/v1\/market\/backtest/);
- assert.match(client,/\/v1\/risk\/plan/);
- assert.match(client,/\/v1\/market\/signals/);
+test('strategy signals, alerts and the tick history are wired; backtests are gone',async()=>{
+ const strategy=await readFile(new URL('./strategy-client.js',import.meta.url),'utf8');
+ const alerts=await readFile(new URL('./alerts-client.js',import.meta.url),'utf8');
+ const archive=await readFile(new URL('./archive-client.js',import.meta.url),'utf8');
+ for(const id of ['signalMonitor','signalList','alertPrice','alertList','alertLog','archiveDays','archiveStatus','candlesInfo','comexPrice','comexBasis','alertMode','signalsToggle','comexToggle'])assert.ok(html.includes('id="'+id+'"'),'Missing target '+id);
+ for(const id of ['addAlert','alertFromChart','enableAlerts','alertZoneStrength'])assert.ok(alerts.includes("$('"+id+"')?.addEventListener"),'Alert control has no handler: '+id);
+ for(const id of ['alertZones','alertSignals','alertSound'])assert.ok(alerts.includes("['"+id+"', "),'Alert rule has no handler: '+id);
+ for(const id of ['archiveStart','archiveStop'])assert.ok(archive.includes("$('"+id+"')?.addEventListener"),'Archive control has no handler: '+id);
+ for(const id of ['alertMode','signalsToggle','comexToggle'])assert.ok(app.includes("'#"+id+"'"),'Chart control has no handler: '+id);
+ assert.match(strategy,/\/v1\/market\/signals/);
+ assert.match(archive,/bridge\.archive\(/);
+ for(const gone of ['replayFrom','runBacktest','calculateRisk','findAnalogues','backtestSummary','riskResult'])assert.ok(!html.includes('id="'+gone+'"'),'Backtest/replay control must be gone: '+gone);
+ assert.doesNotMatch(html,/бэктест/i);
 });
-
 
 test('Vesper palette is applied consistently',()=>{
   for (const color of ['#101010','#161616','#1c1c1c','#ffc799','#99ffe4','#ff8080']) assert.ok(styles.includes(color),'Missing Vesper palette color '+color);
@@ -31,15 +35,15 @@ test('Vesper palette is applied consistently',()=>{
 
 test('licence gate and setup library controls are wired',async()=>{
   const licenseClient=await readFile(new URL('./license-client.js',import.meta.url),'utf8');
-  const setupsClient=await readFile(new URL('./setups-client.js',import.meta.url),'utf8');
+  const setupsClient=await readFile(new URL('./strategy-client.js',import.meta.url),'utf8');
   for(const id of ['licenseGate','licenseMachineId','licenseKeyInput','activateLicense','copyMachineId','licenseStatus'])assert.ok(html.includes('id="'+id+'"'),'Missing licence target '+id);
   for(const id of ['activateLicense','copyMachineId'])assert.ok(licenseClient.includes("$('#"+id+"')?.addEventListener")||licenseClient.includes("document.querySelector('#"+id+"')?.addEventListener"),'Licence control has no handler: '+id);
   assert.match(licenseClient,/\/v1\/license\/status/);
   assert.match(licenseClient,/\/v1\/license\/activate/);
   for(const id of ['setupSelect','setupName','saveSetup','applySetup','exportSetup','importSetup','importSetupFile','setupStatus','condMinScore','condRejection','condStacked'])assert.ok(html.includes('id="'+id+'"'),'Missing setup target '+id);
-  for(const id of ['saveSetup','applySetup','exportSetup','importSetup','importSetupFile'])assert.ok(setupsClient.includes("$('"+id+"')?.addEventListener"),'Setup control has no handler: '+id);
+  for(const id of ['saveSetup','applySetup','deleteSetup','exportSetup','importSetup','importSetupFile'])assert.ok(setupsClient.includes("$('"+id+"')?.addEventListener"),'Setup control has no handler: '+id);
   assert.match(setupsClient,/\/v1\/setups/);
-  assert.match(html,/setups-client\.js/);
+  assert.match(html,/strategy-client\.js/);
 });
 
 test('MT5 auto-connect uses the already-authorized terminal without a credential form',async()=>{

@@ -37,6 +37,8 @@ HISTORY_MAX_READS = 64
 # and kill the live poll that shares this worker.
 BACKFILL_MAX_WINDOW = 6 * 60 * 60
 BACKFILL_LIMIT = 50_000
+# Candle reads: M1 bars, at most a month per request (~30k rows).
+RATES_MAX_SPAN = 31 * 24 * 60 * 60
 # Some terminals stamp ticks in the broker's server time. A tick cannot come from the future, so a
 # terminal clock this far ahead of UTC is a time-zone shift that is taken out of every timestamp.
 CLOCK_SHIFT_MIN_MS = 10 * 60 * 1000
@@ -404,6 +406,13 @@ class Worker:
             boundary = latest_ms // 1000 if latest_ms > 0 else now_ms // 1000
             ahead = latest_ms - now_ms if latest_ms else 0
             self.clock_offset_ms = round(ahead / CLOCK_SHIFT_UNIT_MS) * CLOCK_SHIFT_UNIT_MS if ahead > CLOCK_SHIFT_MIN_MS else 0
+            # A closed market (weekend, daily break) leaves the last tick behind real time, so the shift
+            # cannot be measured: keep the one measured on a live market, which the parent passes back.
+            offset_reliable = bool(latest_ms) and (ahead > CLOCK_SHIFT_MIN_MS or abs(ahead) <= CLOCK_SHIFT_MIN_MS)
+            hint = command.get("clockOffsetHint")
+            if (not offset_reliable and type(hint) is int and abs(hint) <= 14 * 3600 * 1000
+                    and hint % CLOCK_SHIFT_UNIT_MS == 0):
+                self.clock_offset_ms = hint
             self.verify(login, server)
             self.session = (login, server, symbol, boundary)
             self.cursor = (boundary, 0)
@@ -421,6 +430,7 @@ class Worker:
                 "lastTickAt": (EPOCH + timedelta(milliseconds=latest_ms - self.clock_offset_ms)).isoformat(timespec="seconds").replace("+00:00", "Z") if latest_ms else None,
                 "tickAgeMs": max(0, now_ms - (latest_ms - self.clock_offset_ms)) if latest_ms else None,
                 "clockOffsetMs": self.clock_offset_ms,
+                "clockOffsetReliable": offset_reliable,
                 "boundary": boundary
             }
             spec, missing = symbol_spec(self.api, symbol, symbol_info)
@@ -583,8 +593,40 @@ class Worker:
         self.require_session()
         return {"connected": True, "from": start, "to": end, "truncated": truncated, "ticks": ticks}
 
+    def rates(self, command):
+        """The broker's own M1 candles for [from, to) in terminal seconds, oldest first.
+
+        MT5 builds every timeframe from M1, so these minutes are the exact candles the terminal draws.
+        The chart is built from them at once; ticks are only needed for the footprint."""
+        _, _, symbol, _ = self.require_session()
+        start, end = command.get("from"), command.get("to")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end or end - start > RATES_MAX_SPAN:
+            raise WorkerError("invalid_command", "Provide a candle range: integer from < to, at most 31 days.")
+        rows = self.api.copy_rates_range(symbol, self.api.TIMEFRAME_M1,
+                                         EPOCH + timedelta(seconds=start), EPOCH + timedelta(seconds=end))
+        if rows is None:
+            raise mt5_error(self.api, "rates_read_failed", "MT5 could not read the broker's M1 candles.")
+        bars = []
+        for row in rows:
+            try:
+                stamp = int(row["time"])
+                o, h, l, c = (float(row[name]) for name in ("open", "high", "low", "close"))
+                volume = int(row["tick_volume"])
+                real = float(row["real_volume"])
+            except (KeyError, ValueError, IndexError, TypeError):
+                continue
+            if (stamp < start or stamp >= end or not all(map(math.isfinite, (o, h, l, c, real)))
+                    or min(o, h, l, c) <= 0 or h < max(o, c, l) or l > min(o, c) or volume < 0):
+                continue
+            bars.append({"t": stamp * 1000 - self.clock_offset_ms, "o": o, "h": h, "l": l, "c": c,
+                         "v": volume, "rv": real})
+        self.require_session()
+        return {"connected": True, "from": start, "to": end, "clockOffsetMs": self.clock_offset_ms, "rates": bars}
+
     def dispatch(self, command):
         op = command.get("op")
+        if op == "rates":
+            return self.rates(command)
         if op == "backfill":
             return self.backfill(command)
         if op == "connect":
@@ -593,7 +635,7 @@ class Worker:
             return self.poll()
         if op == "history":
             return self.history()
-        raise WorkerError("unknown_operation", "Supported MT5 operations are connect, poll, history and backfill.")
+        raise WorkerError("unknown_operation", "Supported MT5 operations are connect, poll, history, backfill and rates.")
 
 
 def reject_constant(_):

@@ -12,6 +12,7 @@ const detail = $('mt5Detail');
 let busy = false;
 
 function render(status) {
+  window.dispatchEvent(new CustomEvent('mt5-status', { detail: status }));
   const connected = status.state === 'online';
   const nextFeedId = typeof status.feedId === 'string' ? status.feedId : null;
   if (nextFeedId !== feedId) {

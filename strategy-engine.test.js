@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { averageTrueRange, generateSignals, attachWalkForwardCalibration } from './strategy-engine.js';
+import { averageTrueRange, generateSignals } from './strategy-engine.js';
 
 const bars = Array.from({length:40},(_,i)=>({
   time:new Date(Date.UTC(2026,0,1,0,i*15)).toISOString(),o:100+i*.02,h:100.5+i*.02,l:99.5+i*.02,c:100.1+i*.02,
@@ -20,17 +20,6 @@ test('liquidity sweep creates a scored long signal with explicit evidence',()=>{
   assert.ok(signals[0].evidence.includes('Снятие ликвидности и возврат'));
   assert.equal(signals[0].probability,null);
 });
-test('walk-forward calibration uses only trades closed before each signal',()=>{
-  const signal={id:'s',index:50,side:'long'};
-  const trades=Array.from({length:31},(_,i)=>({exitIndex:i+1,side:'long',netR:i<20?1:-1}));
-  const calibrated=attachWalkForwardCalibration([signal],trades)[0];
-  assert.equal(calibrated.calibrationSamples,31);
-  assert.equal(calibrated.calibrationStatus,'walk_forward_historical_win_rate');
-  assert.ok(calibrated.probability>0.5&&calibrated.probability<1);
-  const early=attachWalkForwardCalibration([{...signal,index:10}],trades)[0];
-  assert.equal(early.probability,null);
-});
-
 test('extended strategy conditions support imbalance/absorption triggers, candle geometry, trend and cooldown', () => {
   const base = Date.parse('2026-11-20T08:00:00Z');
   const bars = Array.from({ length: 25 }, (_, i) => ({

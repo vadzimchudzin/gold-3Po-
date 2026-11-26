@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('goldMt5', Object.freeze({
   connect: () => ipcRenderer.invoke('mt5:connect'),
   disconnect: () => ipcRenderer.invoke('mt5:disconnect'),
   refresh: () => ipcRenderer.invoke('mt5:refresh'),
+  archive: request => ipcRenderer.invoke('mt5:archive', request),
   installIntegration: () => ipcRenderer.invoke('mt5:install-integration'),
   setZonesVisible: visible => ipcRenderer.invoke('mt5:zones-visible', visible === true)
 }));

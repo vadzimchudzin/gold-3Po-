@@ -1,4 +1,4 @@
-# GOLD-3Po custom conditions — Vespera-style setup library
+# GOLD-3Po strategy profiles — Vespera-style setup library
 
 GOLD-3Po borrows Vespera's saved-setup model, adapted for a read-only research
 workspace: **named setups, append-only immutable versions, strict JSON
@@ -10,8 +10,11 @@ data or execution state — only research conditions.
 | Section | Fields |
 |---|---|
 | `strategy` | `minScore` (0–1), `atrPeriod` (1–200), `requireRejection`, `requireCloseEdge`, `requireStacked`, `requireDeltaAgree` (booleans), `allowedSides` (`long`/`short` subset), `sessionHoursUTC` (`null` or `[start, end)`), `minAtr` (price units). `maxZones` is still accepted for old exports but ignored: the zone count lives in **Settings → Zones** (`/v1/settings`) |
-| `backtest` | `stopAtr`, `targetR`, `maxBars`, `riskPct`, `maxRiskPct`, `pointValue`, `feePerUnit`, `slippage` |
-| `risk` | `maxRiskPct`, `minRiskReward` |
+| `zones` | optional (`null` = leave as is): the zone search from **Settings → Zones** |
+| `footprint` | optional (`null` = leave as is): the footprint settings from **Settings → Footprint** |
+
+`backtest` and `risk` sections from exports made before 1.2.0 are still accepted
+on import and dropped — the backtester and risk planner were removed.
 
 Unknown fields are **rejected**, not ignored — importing a settings/profile file
 as a setup fails loudly, exactly like Vespera.
@@ -23,9 +26,11 @@ as a setup fails loudly, exactly like Vespera.
   deduplicated by SHA-256 fingerprint. Editing live fields never rewrites a
   saved version.
 - **Apply** selects a setup version. The applied conditions drive
-  `/v1/market/signals`, `/v1/market/backtest` (as defaults; explicit query
-  parameters still win) and `/v1/risk/plan` guardrail defaults. There is no
+  `/v1/market/signals` and the signal marks and alerts on the chart; a profile
+  that carries `zones`/`footprint` switches those settings too. There is no
   executor here, so apply is always safe — the app never sends orders.
+- **Delete** removes a profile with all its versions; **Reset** returns to the
+  built-in conditions and leaves zone and footprint settings as they are.
 - **Export** downloads one version as JSON. **Import** always creates a new
   setup identity; it never modifies history and never auto-applies.
 - The library persists in `data/setups.json` (Node server) or
@@ -39,6 +44,8 @@ as a setup fails loudly, exactly like Vespera.
 - `POST /v1/setups/apply` — `{ id, version? }` → apply (latest when omitted).
 - `GET /v1/setups/export?id=…&version=…` — one version as JSON.
 - `POST /v1/setups/import` — `{ name, definition }` → new identity.
+- `DELETE /v1/setups?id=…` — delete a profile.
+- `POST /v1/setups/clear` — back to the built-in conditions.
 
 ## MT5 liquidity-zone drawing
 
@@ -59,8 +66,8 @@ The EA remains data-only: it draws objects and uploads ticks, it never trades.
 
 ## Honest limits
 
-- Conditions are research filters, not a profit guarantee. Changing conditions
-  changes which historical setups qualify — re-validate out of sample.
+- Conditions are filters, not a profit guarantee; there is no built-in
+  backtest, so validate a profile on your own data before relying on it.
 - Zone drawing is a heuristic overlay (repeated swing levels), not order-book
   depth; reactions at zones are probabilistic, not guaranteed.
 - MQL5 compilation and live drawing must be verified in MetaEditor/MT5; CI does

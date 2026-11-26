@@ -212,14 +212,3 @@ export function generateSignals(bars, options = {}) {
   }
   return signals;
 }
-
-export function attachWalkForwardCalibration(signals, closedTrades, { minSamples = 30, priorWins = 2, priorLosses = 2 } = {}) {
-  if (!Array.isArray(signals) || !Array.isArray(closedTrades) || !Number.isInteger(minSamples) || minSamples < 1) throw new TypeError('Invalid calibration input');
-  return signals.map(signal => {
-    const prior = closedTrades.filter(trade => trade.exitIndex < signal.index && trade.side === signal.side);
-    const wins = prior.filter(trade => trade.netR > 0).length;
-    if (prior.length < minSamples) return { ...signal, probability: null, calibrationStatus: 'insufficient_out_of_sample_samples', calibrationSamples: prior.length };
-    const probability = (wins + priorWins) / (prior.length + priorWins + priorLosses);
-    return { ...signal, probability: Number(probability.toFixed(4)), calibrationStatus: 'walk_forward_historical_win_rate', calibrationSamples: prior.length };
-  });
-}

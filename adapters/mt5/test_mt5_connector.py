@@ -102,7 +102,7 @@ class ConnectorTests(unittest.TestCase):
                           "terminalPath": self.terminal_path,
                           "accountLogin": "1234", "server": "Broker-Demo",
                           "specUnavailable": "tick_size_unusable",
-                          "clockOffsetMs": 0, "boundary": SECOND})
+                          "clockOffsetMs": 0, "clockOffsetReliable": False, "boundary": SECOND})
         # The whole session (history window and live cursor) is anchored to this tick, so connect
         # reports when it happened and how old it already was.
         self.assertEqual(result["lastTickAt"], "2023-11-14T22:13:20Z")
@@ -239,6 +239,34 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(self.worker.cursor, (SECOND, 0), "the live cursor is untouched")
         self.assertEqual(self.command("backfill", **{"from": SECOND - 7 * 3600, "to": SECOND})["error"], "invalid_command")
         self.assertEqual(self.command("backfill", **{"from": SECOND, "to": SECOND - 5})["error"], "invalid_command")
+
+    def test_rates_are_the_brokers_m1_candles_in_utc(self):
+        now = int(connector.datetime.now(timezone.utc).timestamp())
+        server = now + 2 * 3600
+        self.api.latest = SimpleNamespace(time=server, time_msc=server * 1000)
+        self.api.TIMEFRAME_M1 = 1
+        minute = server // 60 * 60
+        calls = []
+        self.api.copy_rates_range = lambda symbol, timeframe, start, end: calls.append((timeframe, int(start.timestamp()), int(end.timestamp()))) or [
+            {"time": minute - 120, "open": 2000.0, "high": 2001.0, "low": 1999.5, "close": 2000.5, "tick_volume": 40, "spread": 5, "real_volume": 0.0},
+            {"time": minute - 60, "open": 2000.5, "high": 2000.4, "low": 1999.0, "close": 1999.2, "tick_volume": 10, "spread": 5, "real_volume": 0.0},
+            {"time": minute, "open": 1999.2, "high": 1999.9, "low": 1999.1, "close": 1999.8, "tick_volume": 3, "spread": 5, "real_volume": 0.0}]
+        self.connect()
+        result = self.command("rates", **{"from": minute - 3600, "to": minute + 60})
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [(1, minute - 3600, minute + 60)])
+        self.assertEqual(result["clockOffsetMs"], 2 * 3600 * 1000)
+        # The second row is inconsistent (high below open) and is dropped, not drawn.
+        self.assertEqual([bar["t"] for bar in result["rates"]], [(minute - 120 - 7200) * 1000, (minute - 7200) * 1000])
+        self.assertEqual(result["rates"][0], {"t": (minute - 120 - 7200) * 1000, "o": 2000.0, "h": 2001.0, "l": 1999.5, "c": 2000.5, "v": 40, "rv": 0.0})
+        self.assertEqual(self.command("rates", **{"from": 0, "to": 40 * 86400})["error"], "invalid_command")
+
+    def test_a_closed_market_keeps_the_clock_shift_measured_on_a_live_one(self):
+        old = int(connector.datetime.now(timezone.utc).timestamp()) - 2 * 86400
+        self.api.latest = SimpleNamespace(time=old, time_msc=old * 1000)
+        connected = self.connect(clockOffsetHint=3 * 3600 * 1000)
+        self.assertFalse(connected["clockOffsetReliable"])
+        self.assertEqual(connected["clockOffsetMs"], 3 * 3600 * 1000)
 
     def test_a_terminal_clock_ahead_of_utc_is_taken_out_of_every_timestamp(self):
         now = int(connector.datetime.now(timezone.utc).timestamp())

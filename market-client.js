@@ -1,5 +1,6 @@
 import { marketSymbol, marketFeedId, hasMt5Bridge } from './mt5-client.js';
 import { priceDigits, priceText, createQuoteGate } from './quote-display.js';
+import { bucketStart } from './rate-store.js';
 
 // The page's link to the local market service.
 //  - Live ticks arrive on the SSE stream and move the forming candle in the browser at once.
@@ -15,7 +16,7 @@ const quotes=createQuoteGate();
 let source=null,reconnectTimer=null,lastFrameAt=Date.now();
 let analysisTimer=null,analysisInFlight=null,analysisQueued=false,lastAnalysisAt=0,requestSerial=0;
 let clearedWithoutFeed=false,quoteDigits=2,lastSseTickAt=0,lastTickSeq=0,quotePolling=false,feedOnline=false;
-let displayedFeedId=null,feedOverride=null,feedMismatch=0,lastBucket=null,forceFresh=false;
+let displayedFeedId=null,feedOverride=null,feedMismatch=0,lastBucket=null,forceFresh=false,alignMs=0,comexSummary=null;
 const feedStates={online:'ОНЛАЙН',stale:'УСТАРЕЛ',offline:'ОФФЛАЙН',waiting:'ОЖИДАНИЕ'};
 const feedText=status=>feedStates[String(status||'').toLowerCase()]||String(status||'ОЖИДАНИЕ').toUpperCase();
 const intervalMs=()=>Number(window.gold3poIntervalMs?.())||900000;
@@ -103,6 +104,7 @@ async function loadAnalysis(){
    if(pinned&&live&&pinned.ageMs>20000&&live.ageMs<10000){feedOverride=data.liveFeedId;scheduleAnalysis(0);return;}
   }
   displayedFeedId=data.feedId||null;
+  alignMs=Number(data.clockOffsetMs)||0;
   if(data.bars?.length){
    lastBucket=data.bars.at(-1).timeMs;
    window.dispatchEvent(new CustomEvent('market-analysis',{detail:data}));
@@ -132,15 +134,17 @@ async function refreshHealth(){
   const shown=activeFeedId();
   const mt5Feed=health.feeds.find(item=>item.source==='mt5'&&item.symbol===marketSymbol()&&(item.feedId||null)===(shown||null));
   if(!mt5Feed)paint(mt5,'ОЖИДАНИЕ','warning');else paint(mt5,feedText(mt5Feed.status)+' · '+ageLabel(mt5Feed.ageMs),mt5Feed.status);
+  // A licensed real-time COMEX feed pushed into the service wins over the delayed public quote.
   const comexFeed=health.feeds.find(item=>item.source==='comex');
-  if(!comexFeed)paint(comex,'ОЖИДАНИЕ','warning');else paint(comex,feedText(comexFeed.status)+' · '+ageLabel(comexFeed.ageMs),comexFeed.status);
+  if(comexFeed)paint(comex,feedText(comexFeed.status)+' · ЛЕНТА · '+ageLabel(comexFeed.ageMs),comexFeed.status);
+  else paintComexStatus();
  }catch{paint(api,'API НЕДОСТУПЕН','error');paint(mt5,'НЕДОСТУПНО','error');paint(comex,'НЕДОСТУПНО','error');}
 }
 // A tick in a newer candle than the window's last one: the previous candle just closed, so the window
 // (footprint marks, zones) is reloaded once.
 function noteTickBucket(timestamp){
  const at=Date.parse(timestamp);if(!Number.isFinite(at))return;
- const bucket=Math.floor(at/intervalMs())*intervalMs();
+ const bucket=bucketStart(at,intervalMs(),alignMs);
  if(lastBucket!==null&&bucket>lastBucket){lastBucket=bucket;scheduleAnalysis(600);}
 }
 function connectStream(){
@@ -154,6 +158,11 @@ function connectStream(){
  source.addEventListener('history',event=>{
   lastFrameAt=Date.now();
   try{const notice=JSON.parse(event.data);if((notice.feedId||null)===(activeFeedId()||null)||!activeFeedId())scheduleAnalysis(1500);}catch{}
+ });
+ // The broker's candles were (re)loaded: draw them.
+ source.addEventListener('candles',event=>{
+  lastFrameAt=Date.now();
+  try{const notice=JSON.parse(event.data);if(notice.symbol===marketSymbol()&&((notice.feedId||null)===(activeFeedId()||null)||!activeFeedId()))scheduleAnalysis(800);}catch{}
  });
  source.addEventListener('spec',event=>{
   lastFrameAt=Date.now();
@@ -224,7 +233,7 @@ window.gold3poRefresh=async()=>{
  try{source?.close();}catch{}
  connectStream();
  try{await window.goldMt5?.refresh?.();}catch{}
- refreshHealth();
+ refreshHealth();refreshComex();
  requestSerial+=1;
  if(analysisInFlight){analysisQueued=true;await analysisInFlight;}
  return refreshAnalysis();
@@ -236,9 +245,37 @@ window.addEventListener('market-tick',event=>{
  if(!tick||tick.source!=='mt5'||tick.symbol!==marketSymbol()||(tick.feedId||null)!==(shownFeedId||null))return;
  paintQuote(quotes.accept(tick));
 });
+// COMEX GC: the delayed public quote of the front month, its basis to spot and the session levels.
+function paintComexStatus(){
+ const s=comexSummary;
+ if(!s)return paint(comex,'ОЖИДАНИЕ','warning');
+ if(s.status==='disabled')return paint(comex,'ВЫКЛЮЧЕНО','warning');
+ if(s.status==='loading')return paint(comex,'ЗАГРУЗКА','warning');
+ if(s.status==='error')return paint(comex,'НЕТ ДАННЫХ · '+(s.error||'ошибка'),'error');
+ const delay=Number.isFinite(s.delayMs)?Math.round(s.delayMs/60000):null;
+ paint(comex,(s.status==='closed'?'РЫНОК ЗАКРЫТ':'ЗАДЕРЖКА '+(delay??'—')+' МИН')+(s.error?' · ОШИБКА ОБНОВЛЕНИЯ':''),s.status==='delayed'&&!s.error?'online':'warning');
+}
+async function refreshComex(){
+ if(document.hidden&&comexSummary)return;
+ try{
+  const response=await fetch('/v1/comex?symbol='+encodeURIComponent(marketSymbol()),{cache:'no-store'});
+  if(!response.ok)return;
+  comexSummary=await response.json();
+  const price=document.querySelector('#comexPrice'),delay=document.querySelector('#comexDelay'),basis=document.querySelector('#comexBasis');
+  const s=comexSummary;
+  if(price)price.textContent=Number.isFinite(s.price)?priceText(s.price,1)+(Number.isFinite(s.change)?'  '+(s.change>=0?'+':'')+s.change.toFixed(1):''):'—';
+  if(delay)delay.textContent=s.status==='delayed'?'· −'+Math.round((s.delayMs||0)/60000)+' МИН':s.status==='closed'?'· ЗАКРЫТ':'';
+  if(basis)basis.textContent=Number.isFinite(s.basis)?'базис '+(s.basis>=0?'+':'')+s.basis.toFixed(2)+' · объём '+(s.sessionVolume||0).toLocaleString('ru-RU'):(s.status==='error'?'нет связи с источником':'базис к споту —');
+  paintComexStatus();
+  window.dispatchEvent(new CustomEvent('gold3po-comex',{detail:s}));
+ }catch{ /* the next round retries */ }
+}
+window.gold3poComex=()=>comexSummary;
 // The footprint asks for the window again when it is scrolled onto candles whose ladders were not sent.
 window.gold3poRequestAnalysis=()=>scheduleAnalysis(300);
-refreshHealth();refreshAnalysis();connectStream();
+refreshHealth();refreshAnalysis();connectStream();refreshComex();
+window.setInterval(refreshComex,20000);
+window.addEventListener('license-activated',refreshComex);
 window.setInterval(refreshHealth,5000);
 window.setInterval(watchdog,2000);
 window.setInterval(streamWatch,5000);

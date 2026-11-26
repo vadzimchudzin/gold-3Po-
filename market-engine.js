@@ -59,17 +59,19 @@ export function aggregateTicks(events, { intervalMs = 15 * 60_000, footprintStep
 
 // Applies time-ordered ticks. The tick-rule state travels with the bar map, so a buffer that only grew
 // is extended with its new tail and classifies exactly as a full rebuild would.
-export function addTicks(bars, events, intervalMs, footprintStep, classifier = bars._classifier || (bars._classifier = createTickClassifier())) {
+// alignMs is the broker's clock shift: candles start on the server's clock, as in MT5.
+export function addTicks(bars, events, intervalMs, footprintStep, classifier = bars._classifier || (bars._classifier = createTickClassifier()), alignMs = 0) {
   for (const event of events) {
     const t = normalizeTick(event);
     if (t.type === 'quote') {
       const side = classifier.classify({ ...event, last: t.last });
       if (side !== t.direction) { t.direction = side; t.volume = tickVolume({ ...event, direction: side, aggressorSide: undefined }); }
     }
-    const start = floorTime(t.time, intervalMs);
+    const start = floorTime(t.time + alignMs, intervalMs) - alignMs;
     let bar = bars.get(start);
     if (!bar) { bar = { ...emptyBar(start, t.last), time: new Date(start).toISOString() }; bars.set(start, bar); }
     applyTickToBar(bar, t, footprintStep);
+    if (!(bar.lastMs >= t.time)) bar.lastMs = t.time;
   }
   return bars;
 }
@@ -87,7 +89,7 @@ export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1
     const total=bar.bid+bar.ask+bar.unknown;
     const delta=bar.ask-bar.bid;
     cumulativeDelta += delta;
-    const cacheKey = footKey + '|' + bar.tickCount;
+    const cacheKey = footKey + '|' + bar.tickCount + '|' + bar.h + '|' + bar.l;
     if (bar._footKey !== cacheKey) { bar._foot = footprintOf(bar.levels, { ...foot, priceStep: footprintStep, h: bar.h, l: bar.l, c: bar.c }); bar._footKey = cacheKey; }
     const fp = bar._foot;
     const prior=allBars.slice(Math.max(0,barIndex-20),barIndex);
@@ -101,7 +103,7 @@ export function finishAnalysis(bars, { intervalMs = 15 * 60_000, priceStep = 0.1
     return {time:bar.time,timeMs:bar.timeMs,o:bar.o,h:bar.h,l:bar.l,c:bar.c,tickCount:bar.tickCount,volume:total,bid:bar.bid,ask:bar.ask,unknown:bar.unknown,delta,cumulativeDelta,levels:fp.levels,imbalances:fp.imbalances,stackedImbalances:fp.stackedImbalances,
       poc:fp.poc,valueArea:fp.valueArea,deltaRatio:fp.deltaRatio,absorbedLevels:fp.absorbedLevels,
       unfinishedHigh:fp.unfinishedHigh,unfinishedLow:fp.unfinishedLow,maxLevelVolume:fp.maxLevelVolume,
-      sweeps,absorption,exhaustion};
+      sweeps,absorption,exhaustion,rateVolume:bar.rateVolume??null,coverage:bar.coverage??null};
   });
   const zones = detectLiquidityZones(result, priceStep, { ...zoneOptions, ...(maxZones === undefined ? {} : { maxZones }) });
   return { bars:result, zones, intervalMs, timeframeMinutes:intervalMs/60000, footprintStep, ticksPerRow: foot.ticksPerRow, rowStep: Number((footprintStep * foot.ticksPerRow).toFixed(8)), tickRule: bars._classifier ? bars._classifier.state() : null, profile:sessionProfile(result, { priceStep: footprintStep, options: foot }), divergence:cumulativeDivergence(result), tickCount, volumeKind:hasComex?'exchange_trade_size':'tick_activity_for_unknown_side; broker_reported_volume_only_with_explicit_aggressor', sideClassification:comexOnly?'licensed_vendor_aggressor_side; unknown_when_unavailable':'explicit_mt5_tick_flags; otherwise_price_against_quote', generatedAt:new Date().toISOString() };

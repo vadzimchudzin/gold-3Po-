@@ -2,63 +2,37 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { validateStrategyConditions, DEFAULT_STRATEGY_CONDITIONS } from './strategy-engine.js';
+import { validateSettings } from './settings-store.js';
 
-// Vespera-style setup library: named setups, append-only immutable versions,
-// strict definition validation (unknown fields are rejected), JSON import/export.
-// A setup never contains tokens, keys or personal data — only research conditions.
-
-export const DEFAULT_BACKTEST_CONDITIONS = {
-  stopAtr: 1.5,
-  targetR: 2,
-  maxBars: 20,
-  riskPct: 0.5,
-  maxRiskPct: 1,
-  pointValue: 1,
-  feePerUnit: 0,
-  slippage: 0,
-  breakevenR: 0,
-  trailingAtr: 0
-};
-
-export const DEFAULT_RISK_CONDITIONS = {
-  maxRiskPct: 1,
-  minRiskReward: 1.5
-};
+// Strategy profiles: named, append-only immutable versions, strict validation, JSON import/export.
+// A profile is everything a trader tunes for their own way of reading the market: the signal
+// conditions, and optionally the zone search and footprint settings that go with them. Applying a
+// profile switches all of it at once. A profile never contains tokens, keys or personal data.
+//
+// Earlier builds also stored backtest and risk sections. Backtests are gone from the app; those
+// sections are still accepted when an old file or export is read, and dropped.
 
 export const DEFAULT_DEFINITION = {
   strategy: { ...DEFAULT_STRATEGY_CONDITIONS },
-  backtest: { ...DEFAULT_BACKTEST_CONDITIONS },
-  risk: { ...DEFAULT_RISK_CONDITIONS }
+  zones: null,
+  footprint: null
 };
 
-const finite = Number.isFinite;
+const LEGACY_SECTIONS = ['backtest', 'risk'];
 
 export function validateDefinition(input) {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new TypeError('Setup definition must be an object');
-  for (const key of Object.keys(input)) if (!['strategy', 'backtest', 'risk'].includes(key)) throw new TypeError(`Unknown setup section: ${key}`);
+  for (const key of Object.keys(input)) if (!['strategy', 'zones', 'footprint', ...LEGACY_SECTIONS].includes(key)) throw new TypeError(`Unknown setup section: ${key}`);
   const strategy = validateStrategyConditions(input.strategy || {});
-  const backtest = { ...DEFAULT_BACKTEST_CONDITIONS, ...(input.backtest || {}) };
-  for (const key of Object.keys(input.backtest || {})) if (!(key in DEFAULT_BACKTEST_CONDITIONS)) throw new TypeError(`Unknown backtest condition: ${key}`);
-  if (!finite(backtest.stopAtr) || backtest.stopAtr <= 0 || backtest.stopAtr > 20) throw new TypeError('stopAtr must be in (0, 20]');
-  if (!finite(backtest.targetR) || backtest.targetR <= 0 || backtest.targetR > 50) throw new TypeError('targetR must be in (0, 50]');
-  if (!Number.isInteger(backtest.maxBars) || backtest.maxBars < 1 || backtest.maxBars > 500) throw new TypeError('maxBars must be an integer 1..500');
-  if (!finite(backtest.riskPct) || backtest.riskPct <= 0 || backtest.riskPct > 1) throw new TypeError('riskPct must be in (0, 1]');
-  if (!finite(backtest.maxRiskPct) || backtest.maxRiskPct <= 0 || backtest.maxRiskPct > 1) throw new TypeError('maxRiskPct must be in (0, 1]');
-  if (backtest.riskPct > backtest.maxRiskPct) throw new TypeError('riskPct must not exceed maxRiskPct');
-  if (!finite(backtest.pointValue) || backtest.pointValue <= 0) throw new TypeError('pointValue must be positive');
-  if (!finite(backtest.feePerUnit) || backtest.feePerUnit < 0) throw new TypeError('feePerUnit must be non-negative');
-  if (!finite(backtest.slippage) || backtest.slippage < 0) throw new TypeError('slippage must be non-negative');
-  if (!finite(backtest.breakevenR) || backtest.breakevenR < 0 || backtest.breakevenR > 10) throw new TypeError('breakevenR must be between 0 and 10');
-  if (!finite(backtest.trailingAtr) || backtest.trailingAtr < 0 || backtest.trailingAtr > 20) throw new TypeError('trailingAtr must be between 0 and 20');
-  const risk = { ...DEFAULT_RISK_CONDITIONS, ...(input.risk || {}) };
-  for (const key of Object.keys(input.risk || {})) if (!(key in DEFAULT_RISK_CONDITIONS)) throw new TypeError(`Unknown risk condition: ${key}`);
-  if (!finite(risk.maxRiskPct) || risk.maxRiskPct <= 0 || risk.maxRiskPct > 1) throw new TypeError('risk.maxRiskPct must be in (0, 1]');
-  if (!finite(risk.minRiskReward) || risk.minRiskReward <= 0 || risk.minRiskReward > 50) throw new TypeError('risk.minRiskReward must be in (0, 50]');
-  return { strategy, backtest, risk };
+  const zones = input.zones === undefined || input.zones === null ? null : validateSettings({ zones: input.zones }).zones;
+  const footprint = input.footprint === undefined || input.footprint === null ? null : validateSettings({ footprint: input.footprint }).footprint;
+  return { strategy, zones, footprint };
 }
 
+const normalize = definition => ({ strategy: definition.strategy, zones: definition.zones ?? null, footprint: definition.footprint ?? null });
+
 export function definitionFingerprint(definition) {
-  const canonical = JSON.stringify({ strategy: definition.strategy, backtest: definition.backtest, risk: definition.risk });
+  const canonical = JSON.stringify({ strategy: definition.strategy, zones: definition.zones ?? null, footprint: definition.footprint ?? null });
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 
@@ -98,7 +72,7 @@ export function createSetupStore({ file = './data/setups.json', now = () => Date
   function activeDefinitionSync() {
     const setup = state.activeId ? findSetup(state.activeId) : null;
     const version = setup ? setup.versions.find(v => v.version === (state.activeVersion ?? setup.versions.at(-1).version)) : null;
-    return version ? version.definition : DEFAULT_DEFINITION;
+    return version ? normalize(version.definition) : DEFAULT_DEFINITION;
   }
 
   async function save(name, definition) {
@@ -140,7 +114,7 @@ export function createSetupStore({ file = './data/setups.json', now = () => Date
     const target = version === null ? setup.versions.at(-1).version : Number(version);
     const found = setup.versions.find(v => v.version === target);
     if (!found) throw Object.assign(new Error('Setup version not found'), { status: 404 });
-    return { name: setup.name, version: found.version, fingerprint: found.fingerprint, definition: found.definition };
+    return { name: setup.name, version: found.version, fingerprint: found.fingerprint, definition: normalize(found.definition) };
   }
 
   async function importSetup(name, definition) {
@@ -149,8 +123,26 @@ export function createSetupStore({ file = './data/setups.json', now = () => Date
     return result;
   }
 
+  async function remove(id) {
+    await load();
+    const index = state.setups.findIndex(s => s.id === id);
+    if (index < 0) throw Object.assign(new Error('Setup not found'), { status: 404 });
+    state.setups.splice(index, 1);
+    if (state.activeId === id) { state.activeId = null; state.activeVersion = null; }
+    await persist();
+    return publicState();
+  }
+
+  // Back to the built-in conditions; the zone and footprint settings stay as they are.
+  async function clearActive() {
+    await load();
+    state.activeId = null; state.activeVersion = null;
+    await persist();
+    return publicState();
+  }
+
   async function list() { await load(); return publicState(); }
   async function activeDefinition() { await load(); return activeDefinitionSync(); }
 
-  return { save, apply, exportDefinition, importSetup, list, activeDefinition };
+  return { save, apply, remove, clearActive, exportDefinition, importSetup, list, activeDefinition };
 }

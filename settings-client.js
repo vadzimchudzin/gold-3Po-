@@ -3,7 +3,7 @@
 const $ = id => document.getElementById(id);
 const DEFAULTS = { zones: { minZones: 3, maxZones: 7, pivotWidth: 2, atrPeriod: 14, clusterAtr: 0.35, zoneWidthAtr: 0.15, maxDistanceAtr: 15, reactionBars: 6, timeframeMinutes: 15, usePriorDay: true, useSessions: true, useWeek: true, useHigherTf: true, useVolume: true },
   footprint: { imbalanceRatio: 3, imbalanceLevels: 3, minLevelVolume: 3, valueAreaShare: 0.7, absorptionMultiple: 2, ticksPerRow: 1 },
-  mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark' } };
+  mt5: { buyColor: '#FF0000', sellColor: '#FF0000', lineStyle: 'solid', lineWidth: 2, fill: false, showLabels: true, showStrength: true, zonesVisible: true }, ui: { theme: 'glass-dark', timeDisplay: 'broker', showComex: true, showSignals: true } };
 const SWATCHES = ['#FF0000', '#FF4D4D', '#FF8800', '#FFC799', '#FFD60A', '#30D158', '#0A84FF', '#BF5AF2', '#FFFFFF'];
 const TF_LABEL = { 1: '1м', 5: '5м', 15: '15м', 30: '30м', 60: '1ч', 240: '4ч' };
 const DASH = { solid: '', dash: '10 6', dot: '2 5', dashdot: '10 5 2 5' };
@@ -69,7 +69,9 @@ function render() {
   const stepSel = $('footClusterStep');
   if (stepSel) stepSel.value = String(f.ticksPerRow ?? 1);
   setSeg('setTheme', settings.ui.theme);
-  document.querySelectorAll('.timeframe-label').forEach(el => { el.textContent = `${TF_LABEL[z.timeframeMinutes] || z.timeframeMinutes + 'м'} · ${el.classList.contains('footprint-timeframe') ? 'ЕДИНЫЙ ТФ' : 'ТИКИ БРОКЕРА'}`; });
+  setSeg('setTimeDisplay', settings.ui.timeDisplay || 'broker');
+  setToggle('setShowComex', settings.ui.showComex !== false); setToggle('setShowSignals', settings.ui.showSignals !== false);
+  document.querySelectorAll('.timeframe-label').forEach(el => { el.textContent = `${TF_LABEL[z.timeframeMinutes] || z.timeframeMinutes + 'м'} · ${el.classList.contains('footprint-timeframe') ? 'ТФ ГРАФИКА' : 'СВЕЧИ MT5'}`; });
   preview();
 }
 
@@ -103,6 +105,8 @@ function change(section, key, value) {
   if (section === 'zones' && key === 'maxZones' && value < settings.zones.minZones) { settings.zones.minZones = value; (pending.zones ||= {}).minZones = value; }
   if (section === 'mt5' && key === 'lineStyle' && value !== 'solid') settings.mt5.lineWidth = 1;
   if (section === 'ui' && key === 'theme') theme(value);
+  // Display switches (time, overlays) take effect at once; the save below only makes them stick.
+  if (section === 'ui') { window.gold3poSettings = settings; window.dispatchEvent(new CustomEvent('gold3po-settings', { detail: { settings, zonesChanged: false } })); }
   (pending[section] ||= {})[key] = value;
   render();
   // The chart answers a timeframe click at once; the save below only makes it stick.
@@ -136,7 +140,7 @@ function bind() {
   $('setLineWidth')?.addEventListener('input', e => change('mt5', 'lineWidth', Number(e.target.value)));
   $('setBuyColor')?.addEventListener('input', e => change('mt5', 'buyColor', e.target.value.toUpperCase()));
   $('setSellColor')?.addEventListener('input', e => change('mt5', 'sellColor', e.target.value.toUpperCase()));
-  const segs = { setTimeframe: ['zones', 'timeframeMinutes', Number], setLineStyle: ['mt5', 'lineStyle', String], setTheme: ['ui', 'theme', String] };
+  const segs = { setTimeframe: ['zones', 'timeframeMinutes', Number], setLineStyle: ['mt5', 'lineStyle', String], setTheme: ['ui', 'theme', String], setTimeDisplay: ['ui', 'timeDisplay', String] };
   for (const [id, [section, key, cast]] of Object.entries(segs)) $(id)?.addEventListener('click', e => { const b = e.target.closest('button[data-value]'); if (b) change(section, key, cast(b.dataset.value)); });
   const toggles = { setFill: 'fill', setLabels: 'showLabels', setStrength: 'showStrength', setZonesVisible: 'zonesVisible' };
   for (const [id, key] of Object.entries(toggles)) $(id)?.addEventListener('click', () => {
@@ -145,6 +149,7 @@ function bind() {
     // Hiding or restoring the zones in the terminal must not wait for the next zone poll.
     if (key === 'zonesVisible') void window.goldMt5?.setZonesVisible?.(next);
   });
+  for (const [id, key] of Object.entries({ setShowComex: 'showComex', setShowSignals: 'showSignals' })) $(id)?.addEventListener('click', () => change('ui', key, settings.ui[key] === false));
   const zoneToggles = { setSrcDay: 'usePriorDay', setSrcSessions: 'useSessions', setSrcWeek: 'useWeek', setSrcTf: 'useHigherTf', setSrcVolume: 'useVolume' };
   for (const [id, key] of Object.entries(zoneToggles)) $(id)?.addEventListener('click', () => change('zones', key, !settings.zones[key]));
   document.querySelectorAll('.chart-tf').forEach(box => box.addEventListener('click', e => { const b = e.target.closest('button[data-tf]'); if (b) change('zones', 'timeframeMinutes', Number(b.dataset.tf)); }));
@@ -168,7 +173,7 @@ function bind() {
   $('openSettings')?.addEventListener('click', open);
 
   // Navigation rail.
-  const targets = { top: null, levels: '.levels-panel', footprint: '.footprint-panel', research: '.research-suite' };
+  const targets = { top: null, levels: '.levels-panel', footprint: '.footprint-panel', research: '.strategy-suite' };
   $('railNav')?.addEventListener('click', e => {
     const b = e.target.closest('.rail-item'); if (!b) return;
     const go = b.dataset.go;
@@ -183,4 +188,8 @@ function bind() {
 bind();
 render();
 load();
+// Chart toggles (signals, COMEX levels) save through the same path as the settings sheet.
+window.gold3poSetUi = (key, value) => change('ui', key, value);
 window.addEventListener('license-activated', load);
+// A strategy profile was applied: the service switched zones and footprint with it.
+window.addEventListener('gold3po-settings-replaced', e => { if (!e.detail?.zones) return; settings = e.detail; render(); publish(true); window.dispatchEvent(new CustomEvent('gold3po-timeframe', { detail: settings.zones.timeframeMinutes })); });

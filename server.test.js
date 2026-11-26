@@ -8,7 +8,6 @@ import { createMarketServer } from './server.js';
 import { createLicenseManager, issueLicenseKey } from './license.js';
 import { createSetupStore } from './setup-store.js';
 import { createSettingsStore } from './settings-store.js';
-import { createPatternStore } from './pattern-store.js';
 
 function testLicense(now = () => Date.now()) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -18,7 +17,7 @@ function testLicense(now = () => Date.now()) {
 }
 
 let server; let base;
-test.beforeEach(async () => { const app = createMarketServer({ token: 'test-secret', staleAfterMs: 10000, storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: null }) }); server = app.server; await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = 'http://127.0.0.1:' + server.address().port; });
+test.beforeEach(async () => { const app = createMarketServer({ token: 'test-secret', staleAfterMs: 10000, storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), comexFeed: null }); server = app.server; await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = 'http://127.0.0.1:' + server.address().port; });
 test.afterEach(async () => { await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
 const auth = { authorization: 'Bearer test-secret', 'content-type': 'application/json' };
 const mt5 = (sequence=1) => ({ source:'mt5',symbol:'XAUUSD',timestamp:'2026-11-17T15:00:00.000Z',sequence,bid:2648.2,ask:2648.4,last:2648.3,tickVolume:1,realVolume:0 });
@@ -40,7 +39,7 @@ test('startup loads only the latest retained events from a large JSONL archive',
     license: testLicense(),
     setupStore: createSetupStore({ file: null }),
     settingsStore: createSettingsStore({ file: null }),
-    patternStore: createPatternStore({ file: null })
+    comexFeed: null
   });
   const archiveServer = app.server;
   await new Promise(resolve => archiveServer.listen(0, '127.0.0.1', resolve));
@@ -103,25 +102,11 @@ test('re-importing MT5 history is idempotent even when the rolling history seque
   const liveResponse=await fetch(base+'/v1/ingest/mt5/tick',{method:'POST',headers:auth,body:JSON.stringify(live)});
   assert.equal(liveResponse.status,202,'historical batch sequences must not block the independent live sequence');
 });
-test('replay returns chronologically aggregated historical bars for a requested range',async()=>{
-  const ticks=[1,2,3].map(sequence=>({timestamp:'2026-11-17T15:0'+sequence+':00.000Z',sequence,bid:2648,ask:2648.2,last:2648.1,tickVolume:1,realVolume:0,flags:0}));
-  await fetch(base+'/v1/ingest/mt5/history',{method:'POST',headers:auth,body:JSON.stringify({source:'mt5',symbol:'XAUUSD',ticks})});
-  const response=await fetch(base+'/v1/market/replay?symbol=XAUUSD&from=2026-11-17T15:00:00.000Z&to=2026-11-17T16:00:00.000Z');
-  const data=await response.json();assert.equal(response.status,200);assert.equal(data.eventCount,3);assert.equal(data.bars.length,1);assert.equal(data.bars[0].tickCount,3);
-});
-test('backtest and signal monitor endpoints return explicit empty-history states',async()=>{
-  const [backtest,signals]=await Promise.all([
-    fetch(base+'/v1/market/backtest?symbol=XAUUSD'),
-    fetch(base+'/v1/market/signals?symbol=XAUUSD')
-  ]);
-  const bt=await backtest.json(),sig=await signals.json();
-  assert.equal(backtest.status,200);assert.equal(bt.summary.trades,0);assert.equal(bt.summary.winRate,null);
-  assert.equal(signals.status,200);assert.equal(sig.latest,null);assert.equal(sig.calibration.minimumSamples,30);
-});
-test('risk endpoint enforces sizing and reward-risk guardrails',async()=>{
-  const ok=await (await fetch(base+'/v1/risk/plan?equity=10000&riskPct=0.5&entry=2650&stop=2645&target=2660&pointValue=1')).json();
-  const blocked=await (await fetch(base+'/v1/risk/plan?equity=10000&riskPct=2&entry=2650&stop=2645&target=2652&pointValue=1')).json();
-  assert.equal(ok.allowed,true);assert.equal(ok.quantity,10);assert.equal(blocked.allowed,false);
+test('the signal monitor returns an explicit empty-history state and no backtest routes remain',async()=>{
+  const signals=await fetch(base+'/v1/market/signals?symbol=XAUUSD');
+  const sig=await signals.json();
+  assert.equal(signals.status,200);assert.equal(sig.latest,null);assert.deepEqual(sig.signals,[]);assert.equal(sig.strategy,null);
+  for(const path of ['/v1/market/replay','/v1/market/backtest','/v1/risk/plan','/v1/patterns/analogues'])assert.equal((await fetch(base+path+'?symbol=XAUUSD')).status,404,path+' is gone');
 });
 
 test('live MT5 batch preserves sequence order and safely retries an already ingested payload',async()=>{
@@ -231,28 +216,33 @@ test('chart zones endpoint serves an EA-ready payload and rejects non-gold symbo
   assert.equal(bad.status,400);
 });
 
-test('setup library API saves, applies, exports and imports with strict validation',async()=>{
-  const definition={strategy:{minScore:0.6,requireStacked:true,allowedSides:['long']},backtest:{stopAtr:2,targetR:3},risk:{minRiskReward:2}};
-  const saved=await(await fetch(base+'/v1/setups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Strict long',definition})})).json();
+test('strategy profile API saves, applies (zones and footprint too), exports, imports and deletes',async()=>{
+  const json={'content-type':'application/json'};
+  const definition={strategy:{minScore:0.6,requireStacked:true,allowedSides:['long']},zones:{maxZones:4,timeframeMinutes:5},footprint:{ticksPerRow:10}};
+  const saved=await(await fetch(base+'/v1/setups',{method:'POST',headers:json,body:JSON.stringify({name:'Strict long',definition})})).json();
   assert.ok(saved.setupId);assert.equal(saved.version,1);
-  const invalid=await fetch(base+'/v1/setups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Bad',definition:{strategy:{secretToken:'x'}}})});
+  const invalid=await fetch(base+'/v1/setups',{method:'POST',headers:json,body:JSON.stringify({name:'Bad',definition:{strategy:{secretToken:'x'}}})});
   assert.equal(invalid.status,422);
-  const applied=await(await fetch(base+'/v1/setups/apply',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:saved.setupId,version:1})})).json();
+  const applied=await(await fetch(base+'/v1/setups/apply',{method:'POST',headers:json,body:JSON.stringify({id:saved.setupId,version:1})})).json();
   assert.equal(applied.activeId,saved.setupId);
   assert.equal(applied.activeDefinition.strategy.requireStacked,true);
+  assert.equal(applied.settings.zones.maxZones,4,'applying a profile switches its zone settings');
+  assert.equal(applied.settings.zones.timeframeMinutes,5);
+  assert.equal(applied.settings.footprint.ticksPerRow,10);
+  assert.equal((await(await fetch(base+'/v1/settings')).json()).zones.maxZones,4);
   const list=await(await fetch(base+'/v1/setups')).json();
   assert.equal(list.setups.length,1);
   const exported=await(await fetch(base+'/v1/setups/export?id='+saved.setupId+'&version=1')).json();
-  assert.equal(exported.definition.backtest.targetR,3);
-  const imported=await(await fetch(base+'/v1/setups/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Imported copy',definition:exported.definition})})).json();
-  assert.notEqual(imported.setupId,saved.setupId);
-  const bt=await(await fetch(base+'/v1/market/backtest?symbol=XAUUSD')).json();
-  assert.equal(bt.setup.conditions.strategy.requireStacked,true);
-  assert.equal(bt.config.stopAtr,2);
-  const risk=await(await fetch(base+'/v1/risk/plan?equity=10000&riskPct=0.5&entry=2650&stop=2645&target=2657&pointValue=1')).json();
-  assert.equal(risk.allowed,false);
+  assert.equal(exported.definition.zones.maxZones,4);
+  const legacy=await(await fetch(base+'/v1/setups/import',{method:'POST',headers:json,body:JSON.stringify({name:'Old export',definition:{strategy:{minScore:0.7},backtest:{stopAtr:2},risk:{minRiskReward:2}}})})).json();
+  assert.ok(legacy.setupId,'an export from a build with backtests still imports');
+  const signals=await(await fetch(base+'/v1/market/signals?symbol=XAUUSD')).json();
+  assert.equal(signals.strategy.name,'Strict long','the signal monitor names the active profile');
+  const removed=await(await fetch(base+'/v1/setups?id='+saved.setupId,{method:'DELETE'})).json();
+  assert.equal(removed.activeId,null);assert.equal(removed.setups.length,1);
+  assert.equal((await fetch(base+'/v1/setups?id=missing',{method:'DELETE'})).status,404);
+  await fetch(base+'/v1/settings/reset',{method:'POST'});
 });
-
 test('zones and setups endpoints are licence-gated',async()=>{
   const manager=createLicenseManager({publicKeyPem:'unused',machineId:'AAAA-BBBB-CCCC-DDDD',licenseFile:null,stateFile:null,now:()=>Date.now()});
   const app=createMarketServer({token:'test-secret',storageFile:null,license:manager,setupStore:createSetupStore({file:null})});
@@ -332,20 +322,6 @@ const stackFixture = () => {
   ticks.push({ timestamp: new Date(barTime + 1800000).toISOString(), sequence: seq++, bid: 2650.3, ask: 2650.5, last: 2650.4, tickVolume: 4, realVolume: 4, flags: 0 });
   return ticks;
 };
-const sweepFixture = () => {
-  // A descending-lows market: every bar takes the prior low and closes back above it, so the
-  // sweep-and-reclaim rule fires throughout and the simulation closes trades the pattern
-  // memory can record. Anchored to the wall clock for the licence watermark.
-  const ticks = [];
-  let seq = 1;
-  const fixtureBase = Math.floor(Date.now() / 900000) * 900000;
-  const at = i => new Date(fixtureBase - (80 - i) * 900000).toISOString();
-  const push = (i, last, vol, flags) => ticks.push({ timestamp: at(i), sequence: seq++, bid: +(last - 0.1).toFixed(2), ask: +(last + 0.1).toFixed(2), last, tickVolume: vol, realVolume: vol, flags });
-  for (let i = 0; i < 25; i++) { push(i, 2649.02, 3, 0); push(i, 2649, 3, 0); push(i, 2649.15, 4, 32); }
-  for (let i = 25; i < 70; i++) { const low = 2649 - (i - 24) * 0.1; push(i, low + 0.02, 3, 0); push(i, low, 3, 0); push(i, low + 0.15, 4, 32); }
-  return ticks;
-};
-
 async function ingestHistory(ticks) {
   for (let i = 0; i < ticks.length; i += 1000) {
     const batch = ticks.slice(i, i + 1000);
@@ -357,25 +333,12 @@ async function ingestHistory(ticks) {
 test('analysis routes honour the stored footprint options, not engine defaults', async () => {
   await ingestHistory(stackFixture());
   // The default settings keep the 3-level buy stack; a strict imbalanceLevels setting must remove
-  // it from every analysis route, because the strategy reads these marks (strategy-engine.js reads
-  // bar.stackedImbalances).
-  const before = await (await fetch(base + '/v1/market/replay?symbol=XAUUSD&intervalMs=900000')).json();
-  const stacksBefore = before.bars.reduce((n, b) => n + (b.stackedImbalances || []).length, 0);
-  assert.ok(stacksBefore >= 1, 'the fixture must produce at least one stack under defaults');
+  // it from the analysis the chart and the strategy read (strategy-engine.js reads bar.stackedImbalances).
+  const path = '/v1/market/analysis?symbol=XAUUSD&intervalMs=900000';
+  const stacks = data => data.bars.reduce((n, b) => n + (b.stackedImbalances || []).length, 0);
+  assert.ok(stacks(await (await fetch(base + path)).json()) >= 1, 'the fixture must produce at least one stack under defaults');
   await fetch(base + '/v1/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ footprint: { imbalanceLevels: 10 } }) });
-  // Each route that returns bars is asserted on its own bars; the backtest route returns only a
-  // bar count, and the signals route returns no bars — the strategy's dependence on these marks is
-  // gated by the dedicated requireStacked test below, which proves the marks the strategy reads.
-  for (const path of ['/v1/market/replay?symbol=XAUUSD&intervalMs=900000', '/v1/market/analysis?symbol=XAUUSD&intervalMs=900000']) {
-    const data = await (await fetch(base + path)).json();
-    assert.ok(Array.isArray(data.bars), path + ' must return bars to assert on');
-    const stacks = data.bars.reduce((n, b) => n + (b.stackedImbalances || []).length, 0);
-    assert.equal(stacks, 0, path + ' must drop the stack under the strict setting');
-  }
-  // The backtest route receives the same marks: with the stack removed, its requireStacked setup
-  // closes no trades — the dedicated signals-route test proves the same dependency end to end.
-  const backtest = await (await fetch(base + '/v1/market/backtest?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.ok(Number.isInteger(backtest.bars), 'the backtest route reports its bar count');
+  assert.equal(stacks(await (await fetch(base + path)).json()), 0, 'the strict setting must drop the stack');
   await fetch(base + '/v1/settings/reset', { method: 'POST' });
 });
 
@@ -395,151 +358,14 @@ test('imbalanceLevels setting changes what the strategy sees in the signals rout
   await fetch(base + '/v1/settings/reset', { method: 'POST' });
 });
 
-test('pattern memory records closed setups once and searches them honestly', async () => {
-  await ingestHistory(sweepFixture());
-  const first = await (await fetch(base + '/v1/market/signals?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.ok(first.patternMemory.recorded > 0, 'the sweep fixture must close at least one setup for the memory to prove anything, got ' + JSON.stringify(first.patternMemory));
-  assert.ok(first.patternMemory.memory >= first.patternMemory.recorded);
-  // Re-running the same signals must not double the memory: dedup by a window-independent identity.
-  const second = await (await fetch(base + '/v1/market/signals?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.equal(second.patternMemory.recorded, 0, 'a second identical pass records nothing new');
-  assert.equal(second.patternMemory.memory, first.patternMemory.memory, 'the memory count is stable across calls');
-  // The analogues endpoint answers with the honest empty-or-thin state, never an invented win rate.
-  const analogues = await (await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.equal(analogues.calibrated, false, 'win rate appears only at the 30-sample minimum');
-  assert.equal(analogues.winRate, null);
-  assert.ok(Array.isArray(analogues.analogues));
-  assert.equal(analogues.count, analogues.analogues.length);
-  assert.ok(analogues.memory >= 0);
-  // A non-gold symbol is rejected at the boundary, and a bad threshold is a validation error.
-  assert.equal((await fetch(base + '/v1/patterns/analogues?symbol=EURUSD')).status, 400);
-  assert.equal((await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&threshold=2')).status, 422);
-});
-
-test('the reference rebuilds when a new tick leaves the event count constant (a full rolling buffer)', async () => {
-  // A tiny buffer cap: once the rolling buffer is full, every new tick evicts an old event, so
-  // the event count stops moving — exactly the production condition under which a count-keyed
-  // cache would serve a stale reference forever. The watermark must still invalidate it.
-  const app = createMarketServer({ token: 'test-secret', storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: null }), maxEvents: 60 });
-  const tinyServer = app.server;
-  await new Promise(resolve => tinyServer.listen(0, '127.0.0.1', resolve));
-  const url = 'http://127.0.0.1:' + tinyServer.address().port;
-  try {
-    await ingestHistoryAt(url, sweepFixture());
-    const first = await (await fetch(url + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000')).json();
-    assert.ok(first.reference, 'the fixture must yield a reference signal');
-    const referenceTime = first.reference.signalTime;
-    const countBefore = (await (await fetch(url + '/health')).json()).eventCount;
-    // A new sweep in a closed past bucket: the buffer is at its cap, so the count stays constant
-    // while the ingest watermark moves. The reference must move to the newer signal anyway.
-    const sweepBucket = Math.floor((Date.now() - 2400000) / 900000) * 900000;
-    const seq = Date.now();
-    const sweep = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date(sweepBucket + 60000).toISOString(), sequence: seq, bid: 2644.2, ask: 2644.4, last: 2644.3, tickVolume: 5, realVolume: 5, flags: 64 };
-    const reclaim = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date(sweepBucket + 300000).toISOString(), sequence: seq + 1, bid: 2644.6, ask: 2644.8, last: 2644.7, tickVolume: 5, realVolume: 5, flags: 32 };
-    const quietClose = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date(sweepBucket + 1000000).toISOString(), sequence: seq + 2, bid: 2644.7, ask: 2644.9, last: 2644.8, tickVolume: 2, realVolume: 2, flags: 0 };
-    for (const tick of [sweep, reclaim, quietClose]) await fetch(url + '/v1/ingest/mt5/tick', { method: 'POST', headers: auth, body: JSON.stringify(tick) });
-    const countAfter = (await (await fetch(url + '/health')).json()).eventCount;
-    assert.equal(countAfter, countBefore, 'fixture: the rolling buffer is at its cap, so the event count does not move');
-    const second = await (await fetch(url + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000')).json();
-    assert.ok(second.reference, 'the endpoint still yields a reference');
-    assert.notEqual(second.reference.signalTime, referenceTime, 'the reference must rebuild on the watermark alone: a count-keyed cache would serve the stale one forever');
-  } finally { await new Promise(resolve => tinyServer.close(resolve)); }
-});
-
-// Ingest against an explicit base URL, for tests that run their own server instance.
-async function ingestHistoryAt(url, ticks) {
-  for (let i = 0; i < ticks.length; i += 1000) {
-    const r = await fetch(url + '/v1/ingest/mt5/history', { method: 'POST', headers: auth, body: JSON.stringify({ source: 'mt5', symbol: 'XAUUSD', ticks: ticks.slice(i, i + 1000) }) });
-    assert.equal(r.status, 202, 'history batch must be accepted');
-  }
-}
-
-test('the signals route reports whether the pattern memory is actually writable', async () => {
-  // A real file-backed memory on a temp directory: a healthy file reports writable: true.
-  const healthyDir = await mkdtemp(join(tmpdir(), 'gold3po-signals-'));
-  const healthyApp = createMarketServer({ token: 'test-secret', storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: join(healthyDir, 'patterns.json') }) });
-  const healthyServer = healthyApp.server;
-  await new Promise(resolve => healthyServer.listen(0, '127.0.0.1', resolve));
-  const healthyUrl = 'http://127.0.0.1:' + healthyServer.address().port;
-  try {
-    await ingestHistoryAt(healthyUrl, sweepFixture());
-    const healthy = await (await fetch(healthyUrl + '/v1/market/signals?symbol=XAUUSD&intervalMs=900000')).json();
-    assert.equal(healthy.patternMemory.writable, true, 'a healthy memory file reports writable: true');
-    assert.ok(healthy.patternMemory.recorded > 0, 'the fixture must close at least one setup');
-    const stored = JSON.parse(await readFile(join(healthyDir, 'patterns.json'), 'utf8'));
-    assert.ok(stored.observations.length > 0, 'the batch actually reached the disk');
-  } finally { await new Promise(resolve => healthyServer.close(resolve)); }
-  // A poisoned memory (a corrupt file at startup) reports writable: false while still recording
-  // in memory, so "recorded but not saved" is distinguishable from "saved".
-  const poisonedDir = await mkdtemp(join(tmpdir(), 'gold3po-signals-'));
-  const poisonedFile = join(poisonedDir, 'patterns.json');
-  await writeFile(poisonedFile, '{not json', 'utf8');
-  const poisonedApp = createMarketServer({ token: 'test-secret', storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: poisonedFile }) });
-  const poisonedServer = poisonedApp.server;
-  await new Promise(resolve => poisonedServer.listen(0, '127.0.0.1', resolve));
-  const poisonedUrl = 'http://127.0.0.1:' + poisonedServer.address().port;
-  try {
-    await ingestHistoryAt(poisonedUrl, sweepFixture());
-    const poisoned = await (await fetch(poisonedUrl + '/v1/market/signals?symbol=XAUUSD&intervalMs=900000')).json();
-    assert.equal(poisoned.patternMemory.writable, false, 'a poisoned memory reports writable: false');
-    assert.ok(poisoned.patternMemory.recorded > 0, 'the setups are still recorded in memory, which is exactly the recorded-but-not-saved state');
-    assert.equal(await readFile(poisonedFile, 'utf8'), '{not json', 'the corrupt file is never rewritten');
-  } finally { await new Promise(resolve => poisonedServer.close(resolve)); }
-});
-
-test('the analogue search reuses its reference between polls and refreshes it on new events', async () => {
-  await ingestHistory(sweepFixture());
-  // Prime the cache: the first call builds the reference pipeline.
-  const first = await (await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.ok(first.reference, 'the fixture must yield a reference signal');
-  const referenceTime = first.reference.signalTime;
-  // A second poll with a different threshold reuses the cached reference: same signal time.
-  const second = await (await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000&threshold=0.6')).json();
-  assert.equal(second.reference.signalTime, referenceTime, 'the cached reference is reused between polls');
-  // New events invalidate the cache: a later sweep must move the reference to a newer signal,
-  // which only happens if the invalidation keyed on something that moves with every event,
-  // not on the event count (which stays constant once the rolling buffer is full).
-  // The later events are a sweep-and-reclaim followed by a quiet close, so the sweep bar closes
-  // and the strategy fires a newer signal than the cached reference.
-  // A genuine new sweep in a closed bucket AFTER the fixture's last bar but before now, so the
-  // licence clock watermark stays honest: the dip below the fixture's lowest low (~2644.4), the
-  // reclaim back above it in the same bucket, then a quiet bar in the next bucket closes it.
-  const sweepBucket = Math.floor((Date.now() - 2400000) / 900000) * 900000; // ~40 minutes ago
-  const seq = Date.now();
-  const sweep = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date(sweepBucket + 60000).toISOString(), sequence: seq, bid: 2644.2, ask: 2644.4, last: 2644.3, tickVolume: 5, realVolume: 5, flags: 64 };
-  const reclaim = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date(sweepBucket + 300000).toISOString(), sequence: seq + 1, bid: 2644.6, ask: 2644.8, last: 2644.7, tickVolume: 5, realVolume: 5, flags: 32 };
-  const quietClose = { source: 'mt5', symbol: 'XAUUSD', timestamp: new Date(sweepBucket + 1000000).toISOString(), sequence: seq + 2, bid: 2644.7, ask: 2644.9, last: 2644.8, tickVolume: 2, realVolume: 2, flags: 0 };
-  for (const tick of [sweep, reclaim, quietClose]) await fetch(base + '/v1/ingest/mt5/tick', { method: 'POST', headers: auth, body: JSON.stringify(tick) });
-  const third = await (await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000&threshold=0.6')).json();
-  assert.ok(third.reference, 'the endpoint still yields a reference after new events');
-  assert.notEqual(third.reference.signalTime, referenceTime, 'a new event must rebuild the reference, not serve the cached one');
-});
-
-test('a settings change invalidates the analogue cache, not just new events', async () => {
-  await ingestHistory(stackFixture());
-  // Prime the cache under the default footprint settings: the reference bar carries the fixture's
-  // 3-level stack, so the reference's stacked axis and stack count are positive.
-  const first = await (await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.ok(first.reference, 'the fixture must yield a reference signal');
-  assert.equal(first.reference.stacked, true, 'the default settings keep the stacked-imbalance axis true');
-  assert.ok(first.reference.stackCount >= 1, 'the reference bar reports its stack');
-  // Remove the fixture's stack via a footprint setting: the cached reference must be rebuilt, so
-  // the stacked axis itself flips — a stale cache would keep serving stacked=true.
-  await fetch(base + '/v1/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ footprint: { imbalanceLevels: 10 } }) });
-  const second = await (await fetch(base + '/v1/patterns/analogues?symbol=XAUUSD&intervalMs=900000')).json();
-  assert.ok(second.reference, 'the reference still exists after a settings change');
-  assert.equal(second.reference.stacked, false, 'a footprint change must rebuild the reference: the stacked axis keeps its stale true otherwise');
-  assert.equal(second.reference.stackCount, 0, 'the rebuilt reference reports no stacks under the strict setting');
-  await fetch(base + '/v1/settings/reset', { method: 'POST' });
-});
-
-test('pattern analogues endpoint is licence-gated like every research route', async () => {
+test('the signal monitor is licence-gated like every analysis route', async () => {
   const manager = createLicenseManager({ publicKeyPem: 'unused', machineId: 'AAAA-BBBB-CCCC-DDDD', licenseFile: null, stateFile: null, now: () => Date.now() });
-  const app = createMarketServer({ token: 'test-secret', storageFile: null, license: manager, setupStore: createSetupStore({ file: null }), patternStore: createPatternStore({ file: null }) });
+  const app = createMarketServer({ token: 'test-secret', storageFile: null, license: manager, setupStore: createSetupStore({ file: null }), comexFeed: null });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const url = 'http://127.0.0.1:' + app.server.address().port;
   try {
-    assert.equal((await fetch(url + '/v1/patterns/analogues')).status, 402);
+    assert.equal((await fetch(url + '/v1/market/signals')).status, 402);
+    assert.equal((await fetch(url + '/v1/comex')).status, 402);
   } finally { await new Promise(resolve => app.server.close(resolve)); }
 });
 
@@ -688,7 +514,7 @@ test('a startup archive past the size limit is trimmed down to the retained wind
   const app = createMarketServer({
     token: 'test-secret', storageFile, maxEvents: 5, maxStorageBytes: 10,
     license: testLicense(), setupStore: createSetupStore({ file: null }),
-    settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: null })
+    settingsStore: createSettingsStore({ file: null }), comexFeed: null
   });
   const trimServer = app.server;
   await new Promise(resolve => trimServer.listen(0, '127.0.0.1', resolve));
@@ -735,7 +561,7 @@ test('a cached bar still takes the ticks that arrive after it was built', async 
 
 test('the stream pings in a quiet market so the page can tell a dead socket from silence', async () => {
   await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  const app = createMarketServer({ token: 'test-secret', storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), patternStore: createPatternStore({ file: null }), streamPingMs: 30 });
+  const app = createMarketServer({ token: 'test-secret', storageFile: null, license: testLicense(), setupStore: createSetupStore({ file: null }), settingsStore: createSettingsStore({ file: null }), comexFeed: null, streamPingMs: 30 });
   server = app.server;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   base = 'http://127.0.0.1:' + server.address().port;

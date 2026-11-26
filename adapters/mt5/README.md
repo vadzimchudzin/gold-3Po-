@@ -27,7 +27,7 @@ The EA never reads or transmits the trading account password. The terminal must 
 - When standalone live delivery is enabled, ticks remain queued through HTTP errors and retry with backoff. The queue is capped at 20,000 ticks.
 - The terminal must remain open and connected. MT5 WebRequest is synchronous; a slow API can delay the EA's event processing. The local API binds only to loopback.
 - API events are appended to `%APPDATA%\GOLD-3Po Market Lab\market-events.jsonl` and reloaded after application restart.
-- The calculation API builds 15-minute OHLC bars and price-level activity. The chart supports historical replay; the footprint follows the selected candle.
+- The chart is built from the broker's own M1 candles on the broker clock and aggregated to any timeframe; ticks add the footprint, which follows the selected candle.
 
 ## Volume semantics
 

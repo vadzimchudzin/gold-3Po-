@@ -1,5 +1,6 @@
 import { addTicks, finishAnalysis } from './market-engine.js';
-import { createTickClassifier } from './footprint-engine.js';
+import { createTickClassifier, emptyBar } from './footprint-engine.js';
+import { bucketStart } from './rate-store.js';
 
 // The live window: one time-ordered tick buffer per feed (source + symbol + MT5 account), trimmed from
 // the oldest end in chunks, and an incremental bar cache per feed and timeframe.
@@ -96,16 +97,16 @@ export function createTickStore({ cap = 1_000_000 } = {}) {
   // last call, then the derived analysis (footprint, zones, profile) over the newest `limit` bars.
   function analysis(source, symbol, feedId, options) {
     const feed = feedFor(source, symbol, feedId, true);
-    const { intervalMs, footprintStep, limit, fresh = false } = options;
-    const cacheKey = [intervalMs, footprintStep, limit].join('|');
+    const { intervalMs, footprintStep, limit, fresh = false, alignMs = 0, rates = null } = options;
+    const cacheKey = [intervalMs, footprintStep, limit, alignMs].join('|');
     let cache = feed.caches.get(cacheKey);
     const keep = Math.max(1, limit) + 2;
     const rebuild = () => {
       const bars = new Map();
       const lastMs = feed.times.length ? feed.times.at(-1) : 0;
-      const fromMs = Math.floor(lastMs / intervalMs) * intervalMs - (keep - 1) * intervalMs;
+      const fromMs = bucketStart(lastMs, intervalMs, alignMs) - (keep - 1) * intervalMs;
       const start = lowerBound(feed.times, fromMs);
-      addTicks(bars, feed.ticks.slice(start), intervalMs, footprintStep);
+      addTicks(bars, feed.ticks.slice(start), intervalMs, footprintStep, undefined, alignMs);
       return { bars, epoch: feed.epoch, appended: feed.appended };
     };
     const firstEdit = feed.edits.length ? feed.edits[0].epoch : feed.epoch + 1;
@@ -117,8 +118,8 @@ export function createTickStore({ cap = 1_000_000 } = {}) {
       const pending = feed.appended - cache.appended;
       if (pending > feed.ticks.length) cache = Object.assign(cache, rebuild());
       else {
-        if (pending > 0) addTicks(cache.bars, feed.ticks.slice(feed.ticks.length - pending), intervalMs, footprintStep);
-        for (const edit of feed.edits) if (edit.epoch > cache.epoch) rebuildRange(feed, cache.bars, edit.from, edit.to, intervalMs, footprintStep, keep);
+        if (pending > 0) addTicks(cache.bars, feed.ticks.slice(feed.ticks.length - pending), intervalMs, footprintStep, undefined, alignMs);
+        for (const edit of feed.edits) if (edit.epoch > cache.epoch) rebuildRange(feed, cache.bars, edit.from, edit.to, intervalMs, footprintStep, keep, alignMs);
         cache.appended = feed.appended;
         cache.epoch = feed.epoch;
       }
@@ -128,7 +129,7 @@ export function createTickStore({ cap = 1_000_000 } = {}) {
       for (const key of old) cache.bars.delete(key);
     }
     const ticks = feed.ticks;
-    return finishAnalysis(cache.bars, {
+    return finishAnalysis(rates ? mergeRates(cache, rates, intervalMs, keep) : cache.bars, {
       ...options,
       tickCount: ticks.length,
       hasComex: source === 'comex',
@@ -137,17 +138,92 @@ export function createTickStore({ cap = 1_000_000 } = {}) {
   }
 
   // Rebuild only the candles an out-of-order batch touched, from the merged buffer.
-  function rebuildRange(feed, bars, from, to, intervalMs, footprintStep, keep) {
+  function rebuildRange(feed, bars, from, to, intervalMs, footprintStep, keep, alignMs = 0) {
     const newestMs = feed.times.length ? feed.times.at(-1) : 0;
-    const windowStart = Math.floor(newestMs / intervalMs) * intervalMs - (keep - 1) * intervalMs;
-    const first = Math.max(windowStart, Math.floor(from / intervalMs) * intervalMs);
-    const last = Math.floor(to / intervalMs) * intervalMs;
+    const windowStart = bucketStart(newestMs, intervalMs, alignMs) - (keep - 1) * intervalMs;
+    const first = Math.max(windowStart, bucketStart(from, intervalMs, alignMs));
+    const last = bucketStart(to, intervalMs, alignMs);
     if (last < first) return;
     for (let key = first; key <= last; key += intervalMs) bars.delete(key);
     const start = lowerBound(feed.times, first), end = lowerBound(feed.times, last + intervalMs);
     const before = start > 0 ? feed.ticks[start - 1] : null;
     const seed = createTickClassifier({ prevPrice: before ? Number(before.last) : null });
-    addTicks(bars, feed.ticks.slice(start, end), intervalMs, footprintStep, seed);
+    addTicks(bars, feed.ticks.slice(start, end), intervalMs, footprintStep, seed, alignMs);
+  }
+
+  // The window drawn: the broker's candles (exact OHLC as MT5 draws them) with the tick footprint on
+  // top wherever ticks exist. A candle without ticks is still drawn, from MT5's own bar, and says so
+  // through coverage 0. Tick bars are updated in place so their footprint cache survives.
+  function mergeRates(cache, rates, intervalMs, keep) {
+    const tickKeys = [...cache.bars.keys()];
+    const rateKeys = rates.keys.slice(-keep);
+    const union = [...new Set([...rateKeys, ...tickKeys])].sort((a, b) => a - b).slice(-keep);
+    if (!cache.rateOnly) cache.rateOnly = new Map();
+    const merged = new Map();
+    const latest = rates.latestMinute;
+    for (const key of union) {
+      const tb = cache.bars.get(key), rb = rates.bars.get(key);
+      if (tb && rb) {
+        const closed = rb.last + 60_000 >= key + intervalMs || latest >= key + intervalMs;
+        if (closed) { tb.o = rb.o; tb.h = rb.h; tb.l = rb.l; tb.c = rb.c; }
+        else {
+          tb.o = rb.o;
+          tb.h = Math.max(tb.h, rb.h);
+          tb.l = Math.min(tb.l, rb.l);
+          if (!(tb.lastMs >= rb.last)) tb.c = rb.c;
+        }
+        tb.rateVolume = rb.v;
+        tb.coverage = rb.v > 0 ? Math.min(1, Number((tb.tickCount / rb.v).toFixed(3))) : null;
+        merged.set(key, tb);
+      } else if (tb) {
+        merged.set(key, tb);
+      } else {
+        let bar = cache.rateOnly.get(key);
+        if (!bar) { bar = { ...emptyBar(key, rb.o), time: new Date(key).toISOString() }; cache.rateOnly.set(key, bar); }
+        bar.o = rb.o; bar.h = rb.h; bar.l = rb.l; bar.c = rb.c;
+        bar.unknown = rb.v; bar.volume = rb.v; bar.rateVolume = rb.v; bar.coverage = 0;
+        merged.set(key, bar);
+      }
+    }
+    if (cache.rateOnly.size > keep * 2) for (const key of [...cache.rateOnly.keys()]) if (!merged.has(key)) cache.rateOnly.delete(key);
+    // The tick-rule state the page continues from lives on the tick bar map.
+    merged._classifier = cache.bars._classifier;
+    return merged;
+  }
+
+  // Whether the window [fromMs, toMs) is already held in full. With the broker's candles known for
+  // that time, "full" means a tick in (almost) every minute MT5 recorded trading in; a few minutes are
+  // allowed to miss, because an Ask-only change counts in MT5's tick volume but is not a chart tick.
+  // Without candles, the stored ticks must reach both ends with no hole longer than ten minutes.
+  function covers(source, symbol, feedId, fromMs, toMs, minutes = null) {
+    if (Array.isArray(minutes) && !minutes.length) return true;
+    const feed = feedFor(source, symbol, feedId, false);
+    if (!feed || !feed.times.length) return false;
+    if (Array.isArray(minutes)) {
+      let hits = 0;
+      for (const minute of minutes) {
+        const i = lowerBound(feed.times, minute);
+        if (i < feed.times.length && feed.times[i] < minute + 60_000) hits += 1;
+      }
+      return hits >= Math.ceil(minutes.length * 0.95);
+    }
+    const start = lowerBound(feed.times, fromMs), end = lowerBound(feed.times, toMs);
+    if (end <= start) return false;
+    const gap = 10 * 60_000;
+    if (feed.times[start] - fromMs > gap || toMs - feed.times[end - 1] > gap) return false;
+    for (let i = start + 1; i < end; i++) if (feed.times[i] - feed.times[i - 1] > gap) return false;
+    return true;
+  }
+
+  // The last chart price at or before `ms` (within ten minutes), or null.
+  function priceAt(source, symbol, feedId, ms) {
+    const feed = feedFor(source, symbol, feedId, false);
+    if (!feed || !feed.times.length) return null;
+    const i = lowerBound(feed.times, ms + 1) - 1;
+    if (i < 0 || ms - feed.times[i] > 10 * 60_000) return null;
+    const tick = feed.ticks[i];
+    const price = Number(tick.last) > 0 ? Number(tick.last) : Number(tick.bid);
+    return price > 0 ? price : null;
   }
 
   function select(source, symbol, feedId) {
@@ -181,7 +257,7 @@ export function createTickStore({ cap = 1_000_000 } = {}) {
     if (feed) feed.caches.clear();
   }
 
-  return { add, analysis, select, feedsOf, recent, newestTimeMs, dropCaches, count: () => total };
+  return { add, analysis, covers, priceAt, select, feedsOf, recent, newestTimeMs, dropCaches, count: () => total };
 }
 
 // Remembers recently seen event ids in two generations, so de-duplication stays O(1) and its memory

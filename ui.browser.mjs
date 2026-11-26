@@ -9,7 +9,7 @@ const isolatedDataFile = '/tmp/gold-3po-browser-' + process.pid + '.jsonl';
 const isolatedSetupsFile = '/tmp/gold-3po-browser-setups-' + process.pid + '.json';
 const isolatedSettingsFile = '/tmp/gold-3po-browser-settings-' + process.pid + '.json';
 // Use an ephemeral port: a real installed GOLD-3Po may already own 8787.
-const server = spawn(process.execPath, ['server.js'], { env: { ...process.env, HOST: '127.0.0.1', PORT: '0', MARKET_INGEST_TOKEN: token, MARKET_DATA_FILE: isolatedDataFile, SETUPS_FILE: isolatedSetupsFile, SETTINGS_FILE: isolatedSettingsFile, LICENSE_REQUIRED: '0' }, stdio: ['ignore', 'pipe', 'ignore'] });
+const server = spawn(process.execPath, ['server.js'], { env: { ...process.env, HOST: '127.0.0.1', PORT: '0', MARKET_INGEST_TOKEN: token, MARKET_DATA_FILE: isolatedDataFile, SETUPS_FILE: isolatedSetupsFile, SETTINGS_FILE: isolatedSettingsFile, LICENSE_REQUIRED: '0', COMEX_FEED: '0' }, stdio: ['ignore', 'pipe', 'ignore'] });
 let base = '';
 let browser;
 try {
@@ -46,7 +46,13 @@ try {
       state: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId, message: 'Тестовое подключение MT5.' }),
       connect: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId }),
       disconnect: async () => ({ state: 'offline', symbol: 'XAUUSD', message: 'Тестовое отключение.' }),
-      installIntegration: async () => ({ message: 'Тестовая интеграция.' })
+      installIntegration: async () => ({ message: 'Тестовая интеграция.' }),
+      refresh: async () => ({ state: 'online', feed: 'online', symbol: 'XAUUSD', feedId }),
+      archive: async request => {
+        window.__archiveRequests = [...(window.__archiveRequests || []), request];
+        return { state: 'online', feed: 'online', symbol: 'XAUUSD', feedId, candles: { loaded: true, days: 10, count: 14000 },
+          archive: request.stop ? { state: 'stopped', days: 3, done: 40, total: 144, already: 10, ticks: 52000, skipped: 0 } : { state: 'running', days: request.days, done: 12, total: 144, already: 10, ticks: 8000, skipped: 0 } };
+      }
     };
   }, browserFeedId);
   const pageErrors = [];
@@ -243,28 +249,48 @@ try {
   await page.locator('#layoutButton').click();
   assert.ok(!(await page.locator('#workspace').evaluate(el => el.classList.contains('trading-layout'))), 'layout toggle restores stacked workspace');
 
-  await page.locator('#loadReplay').click();
-  await page.waitForFunction(() => document.querySelector('#replaySlider') && !document.querySelector('#replaySlider').disabled, null, { timeout:5000 });
-  assert.ok((await chartState()).bars >= 30, 'replay must load the selected historical range');
-  await page.locator('#replaySlider').evaluate(el=>{el.value='1';el.dispatchEvent(new Event('input',{bubbles:true}));});
-  assert.match(await page.locator('#selectedBar').innerText(), /#002/, 'replay slider must move the selected candle and footprint');
-  await page.locator('#playReplay').click();
-  await page.waitForTimeout(250);
-  await page.locator('#pauseReplay').click();
-  await page.locator('#liveView').click();
-  await page.waitForFunction(() => document.querySelector('#chartStatus')?.textContent.startsWith('ОНЛАЙН'), null, { timeout:5000 });
-  await page.locator('#runBacktest').click();
-  await page.waitForFunction(() => document.querySelector('#backtestSummary')?.textContent.includes('сделок'), null, { timeout:5000 });
-  await page.locator('#calculateRisk').click();
-  await page.waitForFunction(() => document.querySelector('#riskResult')?.textContent.includes('ПЛАН ПРОХОДИТ ПРОВЕРКУ'), null, { timeout:5000 });
-  assert.match(await page.locator('#riskChecks').innerText(), /ОК/);
-
-  // Pattern memory: the module is wired and answers its honest state, never an invented win rate.
-  assert.ok(await page.locator('#patternResult').count() === 1, 'the pattern memory panel must exist');
-  assert.ok(await page.locator('#findAnalogues').count() === 1, 'the analogue search button must exist');
-  await page.locator('#findAnalogues').click();
-  await page.waitForTimeout(900);
-  assert.match(await page.locator('#patternResult').innerText(), /аналог|снятия ликвидности|Память|порог|винрейт/i, 'the panel must report its state, not stay blank');
+  // Alerts: one typed in, one placed on the chart; both are drawn as lines and listed.
+  await page.locator('#alertPrice').fill('2700');
+  await page.locator('#addAlert').click();
+  await page.waitForFunction(() => document.querySelectorAll('#alertList .alert-row').length === 1, null, { timeout: 5000 });
+  await page.locator('#alertMode').click();
+  assert.equal((await chartState()).alertPick, true, 'the bell button arms the chart for an alert');
+  await clickBar('chart', (await chartState()).bars - 3, (await chartState()).last.c);
+  await page.waitForFunction(() => document.querySelectorAll('#alertList .alert-row').length === 2, null, { timeout: 5000 });
+  assert.equal((await chartState()).alertPick, false, 'one click places one alert');
+  assert.ok((await scene()).chart.alerts >= 1, 'the alert near the price is drawn on the chart');
+  // A tick across the typed level rings it once.
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2650, bid: 2650, ask: 2650.2 } })));
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('market-tick', { detail: { timestamp: new Date().toISOString(), last: 2701, bid: 2701, ask: 2701.2 } })));
+  await page.waitForFunction(() => /2[\s\u00a0]700/.test(document.querySelector('#alertLog')?.textContent || ''), null, { timeout: 5000 }).catch(async error => { throw new Error('alert log: ' + await page.locator('#alertLog').innerText() + ' / list: ' + await page.locator('#alertList').innerText()); });
+  assert.equal(await page.locator('#alertList .alert-row.is-done').count(), 1, 'a rung alert is marked done, not deleted');
+  while (await page.locator('#alertList .alert-row').count()) await page.locator('#alertList .alert-row button[data-act="remove"]').first().click();
+  assert.equal(await page.locator('#alertList .alert-row').count(), 0);
+  // The signal monitor answers for the active strategy.
+  await page.waitForFunction(() => /сигнал|ЛОНГ|ШОРТ/i.test(document.querySelector('#signalMonitor')?.textContent || ''), null, { timeout: 5000 });
+  // COMEX levels from the service are drawn and can be hidden from the chart toolbar.
+  await page.route('**/v1/comex**', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ enabled: true, status: 'delayed', price: 2662.5, change: 3.1, delayMs: 600000, basis: 12.4, sessionVolume: 15400,
+    levels: [{ key: 'poc', label: 'COMEX POC', price: 2662, spotPrice: 2649.6 }, { key: 'vah', label: 'COMEX VAH', price: 2663, spotPrice: 2650.6 }] }) }));
+  await page.locator('#chartRefresh').click();
+  await page.waitForFunction(() => document.querySelector('#comexBasis')?.textContent.includes('+12.40'), null, { timeout: 5000 });
+  assert.match(await page.locator('#comexPrice').innerText(), /2[\s\u00a0]?662/);
+  await page.waitForFunction(() => window.gold3poChart.state().comexLevels === 2, null, { timeout: 5000 });
+  await page.locator('#resetView').click();
+  await page.locator('#chartPriceZoomOut').click(); await page.locator('#chartPriceZoomOut').click();
+  assert.ok((await scene()).chart.comex >= 1, 'COMEX levels near the price are drawn');
+  await page.locator('#comexToggle').click();
+  assert.equal((await scene()).chart.comex, 0, 'the C button hides the COMEX levels');
+  await page.locator('#comexToggle').click();
+  await page.locator('#chartPriceZoomReset').click();
+  await page.unroute('**/v1/comex**');
+  // The tick history download goes to the desktop bridge and reports its progress.
+  await page.locator('#archiveDays').selectOption('5');
+  await page.locator('#archiveStart').click();
+  await page.waitForFunction(() => document.querySelector('#archiveStatus')?.textContent.includes('Загрузка за 5 дней'), null, { timeout: 5000 });
+  assert.deepEqual(await page.evaluate(() => window.__archiveRequests), [{ days: 5 }]);
+  assert.ok(await page.locator('#archiveStop').isEnabled(), 'a running download can be stopped');
+  await page.locator('#archiveStop').click();
+  await page.waitForFunction(() => document.querySelector('#archiveStatus')?.textContent.includes('остановлена'), null, { timeout: 5000 });
 
   // The two dormant footprint settings now have controls, and each one moves the screen. A synthetic
   // forming bar is built tick by tick through the same market-tick path the SSE feed uses: three
@@ -368,10 +394,10 @@ try {
   await page.locator('#setupName').fill('Browser strict');
   await page.locator('#condStacked').check();
   await page.locator('#saveSetup').click();
-  await page.waitForFunction(() => document.querySelector('#setupStatus')?.textContent.includes('Сохранено: Browser strict'), null, { timeout:5000 });
+  await page.waitForFunction(() => document.querySelector('#setupStatus')?.textContent.includes('Сохранено: «Browser strict»'), null, { timeout:5000 });
   await page.locator('#setupSelect').selectOption({ index: 1 });
   await page.locator('#applySetup').click();
-  await page.waitForFunction(() => document.querySelector('#setupStatus')?.textContent.includes('Применено'), null, { timeout:5000 });
+  await page.waitForFunction(() => document.querySelector('#setupStatus')?.textContent.includes('включён'), null, { timeout:5000 });
   const setupsState = await (await fetch(base + '/v1/setups')).json();
   assert.ok(setupsState.activeId, 'a setup must be active after Apply');
   assert.equal(setupsState.activeDefinition.strategy.requireStacked, true, 'applied conditions must persist server-side');
@@ -564,7 +590,7 @@ try {
   assert.ok(formingCells(await scene()).some(cell => cell.part === 'body'), 'the forming column has a body too');
 
   assert.deepEqual(pageErrors, [], 'browser must not emit uncaught JavaScript errors');
-  process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), zones, replay, backtest, risk planner, setup library, settings, live MT5/COMEX status and mobile overflow.\n');
+  process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), zones, alerts, signals, COMEX levels, tick history download, strategy profiles, settings, live MT5/COMEX status and mobile overflow.\n');
 } finally {
   if (browser) await browser.close();
   server.kill('SIGTERM');

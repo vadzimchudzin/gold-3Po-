@@ -3,6 +3,7 @@ import { footprintOf, footprintCell, applyTickToBar, emptyBar, tickVolume as foo
 import { zoneLabelRu, zoneStateRu } from './zone-labels.js';
 import { candlePart } from './footprint-candle.js';
 import { deltaSeries, formatDelta } from './delta-pane.js';
+import { bucketStart } from './rate-store.js';
 import { clamp, createViewport, barX, indexAt, visibleRange, panTime, zoomTime, followNewBars, resetTime, autoPriceRange, priceRangeOf, panPrice, scalePrice, resetPrice, niceStep } from './chart-view.js';
 
 // The workspace: a price chart and a footprint drawn on canvas, only the bars on screen, at most once
@@ -12,10 +13,23 @@ import { clamp, createViewport, barX, indexAt, visibleRange, panTime, zoomTime, 
 
 const $ = s => document.querySelector(s);
 const chart = $('#priceChart'), grid = $('#footprintGrid'), zoneList = $('#zoneList'), toast = $('#toast'), chartEmpty = $('#chartEmpty');
-let bars = [], zones = [], selected = -1, selectedZone = null, showZones = true, showNumbers = true, mode = 'bidask', live = false, replayMode = false, toastTimer;
+let bars = [], zones = [], selected = -1, selectedZone = null, showZones = true, showNumbers = true, mode = 'bidask', live = false, toastTimer;
+let signals = [], comexLevels = [], alertPick = false;
 let analysisMeta = null;
 const fmt = (v, d = 2) => Number(v).toLocaleString('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d });
-const timeLabel = (value, options = {}, method = 'toLocaleString') => { const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date[method]('en-GB', options); };
+// Candle times as the trader chose: the broker's server time (as MT5 shows it), UTC, or local time.
+// Every label is formatted as UTC after this shift, so one rule serves all three.
+const uiSetting = (key, fallback) => { const v = window.gold3poSettings?.ui?.[key]; return v === undefined ? fallback : v; };
+function timeShift(ms = Date.now()) {
+  const mode = uiSetting('timeDisplay', 'broker');
+  if (mode === 'utc') return 0;
+  if (mode === 'local') return -new Date(ms).getTimezoneOffset() * 60000;
+  return Number(analysisMeta?.clockOffsetMs) || 0;
+}
+const toMs = value => typeof value === 'number' ? value : value instanceof Date ? value.getTime() : Date.parse(value);
+const timeLabel = (value, options = {}) => { const ms = toMs(value); return Number.isFinite(ms) ? new Date(ms + timeShift(ms)).toLocaleString('en-GB', { ...options, timeZone: 'UTC' }) : String(value); };
+window.gold3poFormatTime = ms => timeLabel(ms, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+function timeZoneCaption() { const mode = uiSetting('timeDisplay', 'broker'); return mode === 'utc' ? 'UTC' : mode === 'local' ? 'МЕСТНОЕ ВРЕМЯ' : 'ВРЕМЯ MT5'; }
 const zonesWord = n => { const tens = n % 100, ones = n % 10; if (ones === 1 && tens !== 11) return n + ' зона'; if (ones >= 2 && ones <= 4 && (tens < 12 || tens > 14)) return n + ' зоны'; return n + ' зон'; };
 const barsWord = n => { const tens = n % 100, ones = n % 10; if (ones === 1 && tens !== 11) return n + ' СВЕЧА'; if (ones >= 2 && ones <= 4 && (tens < 12 || tens > 14)) return n + ' СВЕЧИ'; return n + ' СВЕЧЕЙ'; };
 const zoneStateText = state => zoneStateRu(state);
@@ -46,7 +60,7 @@ function colors() {
   if (palette) return palette;
   const css = getComputedStyle(document.documentElement);
   const v = (name, fallback) => (css.getPropertyValue(name) || '').trim() || fallback;
-  palette = { up: v('--cyan', '#99ffe4'), down: v('--red', '#ff8080'), gold: v('--gold', '#ffc799'), text: v('--text', '#ffffff'), muted: v('--muted', '#a0a0a0'), muted2: v('--muted-2', '#7e7e7e'), line: v('--line', 'rgba(165,180,210,.12)'), panel: v('--panel-solid', '#161616'), mono: v('--mono', 'monospace').replace(/['"]/g, '') };
+  palette = { comex: v('--comex', '#b69cff'), alert: v('--alert', '#ffb347'), up: v('--cyan', '#99ffe4'), down: v('--red', '#ff8080'), gold: v('--gold', '#ffc799'), text: v('--text', '#ffffff'), muted: v('--muted', '#a0a0a0'), muted2: v('--muted-2', '#7e7e7e'), line: v('--line', 'rgba(165,180,210,.12)'), panel: v('--panel-solid', '#161616'), mono: v('--mono', 'monospace').replace(/['"]/g, '') };
   return palette;
 }
 new MutationObserver(() => { palette = null; requestDraw(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -159,6 +173,30 @@ function drawChart() {
     scene.chart.zones.push({ id: z.id, side: z.side, selected: strong });
   }
 
+  // COMEX session levels, converted to spot by the basis.
+  scene.chart.comex = 0; scene.chart.alerts = 0; scene.chart.signals = 0;
+  const axisTags = [];
+  if (uiSetting('showComex', true)) for (const level of comexLevels) {
+    if (!Number.isFinite(level.spotPrice)) continue;
+    const ly2 = Math.round(y(level.spotPrice)) + 0.5;
+    if (ly2 < L.priceTop || ly2 > L.priceBottom) continue;
+    ctx.strokeStyle = rgba(c.comex, level.key === 'poc' ? 0.9 : 0.55); ctx.lineWidth = level.key === 'poc' ? 1.4 : 1; ctx.setLineDash(level.key === 'poc' ? [6, 3] : [2, 4]);
+    ctx.beginPath(); ctx.moveTo(0, ly2); ctx.lineTo(L.plotW, ly2); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+    ctx.fillStyle = rgba(c.comex, 0.95); ctx.textAlign = 'right';
+    ctx.fillText(level.label, L.plotW - 6, ly2 - 7);
+    scene.chart.comex += 1;
+  }
+  // Price alerts.
+  for (const alert of (window.gold3poAlerts?.list() || [])) {
+    if (!alert.active) continue;
+    const ay = Math.round(y(alert.price)) + 0.5;
+    if (ay < L.priceTop || ay > L.priceBottom) continue;
+    ctx.strokeStyle = rgba(c.alert, 0.85); ctx.setLineDash([1, 3]);
+    ctx.beginPath(); ctx.moveTo(0, ay); ctx.lineTo(L.plotW, ay); ctx.stroke(); ctx.setLineDash([]);
+    axisTags.push([ay, '🔔 ' + fmt(alert.price, 2), c.alert]);
+    scene.chart.alerts += 1;
+  }
+
   // Candles.
   const bodyW = Math.max(1, Math.min(chartView.barSpacing * 0.72, 24));
   stats.candles = 0;
@@ -173,6 +211,24 @@ function drawChart() {
     }
     stats.candles += 1;
     scene.chart.candles.push(i);
+  }
+
+  // Strategy signals: a triangle under the candle for a long, over it for a short.
+  if (uiSetting('showSignals', true) && signals.length) {
+    const byTime = new Map(); for (let i = from; i <= to; i++) byTime.set(bars[i].timeMs, i);
+    const size = clamp(chartView.barSpacing * 0.45, 4, 8);
+    for (const signal of signals) {
+      const i = byTime.get(signal.timeMs);
+      if (i === undefined) continue;
+      const b = bars[i], sx = x(i), long = signal.side === 'long';
+      const sy = long ? y(b.l) + 6 + size : y(b.h) - 6 - size;
+      ctx.fillStyle = rgba(long ? c.up : c.down, signal.closed ? 0.95 : 0.5);
+      ctx.beginPath();
+      if (long) { ctx.moveTo(sx, sy - size); ctx.lineTo(sx - size, sy + size * 0.6); ctx.lineTo(sx + size, sy + size * 0.6); }
+      else { ctx.moveTo(sx, sy + size); ctx.lineTo(sx - size, sy - size * 0.6); ctx.lineTo(sx + size, sy - size * 0.6); }
+      ctx.closePath(); ctx.fill();
+      scene.chart.signals += 1;
+    }
   }
 
   // Last price line.
@@ -198,7 +254,11 @@ function drawChart() {
     ctx.fillText((above ? '▲ ' : '▼ ') + fmt((z.low + z.high) / 2, 2), L.plotW + 6, ty);
   }
   const tag = (py, text, bg, fg) => { ctx.fillStyle = bg; ctx.fillRect(L.plotW + 1, py - 9, CH.axis - 2, 18); ctx.fillStyle = fg; ctx.fillText(text, L.plotW + 6, py); };
+  for (const [ty, text, tone] of axisTags) tag(ty, text, rgba(tone, 0.9), '#101010');
   if (ly > L.priceTop && ly < L.priceBottom) tag(ly, fmt(last.c, 2), c.gold, '#101010');
+  if (alertPick && chartHover && chartHover.x < L.plotW && chartHover.y < L.priceBottom) {
+    ctx.strokeStyle = rgba(c.alert, 0.9); ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(0, Math.round(chartHover.y) + 0.5); ctx.lineTo(L.plotW, Math.round(chartHover.y) + 0.5); ctx.stroke(); ctx.setLineDash([]);
+  }
   if (chartHover && !chartDrag && chartHover.x < L.plotW && chartHover.y < L.priceBottom) tag(chartHover.y, fmt(range.max - (chartHover.y - L.priceTop) / (L.priceBottom - L.priceTop) * span, 2), rgba(c.muted, 0.85), '#101010');
 
   drawDeltaPane(ctx, L, from, to, x, c);
@@ -241,14 +301,15 @@ function drawTimeAxis(ctx, L, from, to, x, c) {
   ctx.fillStyle = c.muted; ctx.textAlign = 'center';
   for (let i = from; i <= to; i++) {
     const ms = bars[i].timeMs ?? Date.parse(bars[i].time);
-    const minutes = Math.round(ms / 60000);
+    const shown = ms + timeShift(ms);
+    const minutes = Math.round(shown / 60000);
     if (minutes % labelMinutes !== 0) continue;
     const px = x(i);
     if (px < 20 || px > L.plotW - 20) continue;
-    const d = new Date(ms);
+    const d = new Date(shown);
     const midnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0;
     ctx.fillStyle = midnight ? c.text : c.muted;
-    ctx.fillText(midnight || labelMinutes >= 1440 ? timeLabel(d, { day: '2-digit', month: '2-digit', timeZone: 'UTC' }) : timeLabel(d, { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }), px, L.timeTop + 12);
+    ctx.fillText(midnight || labelMinutes >= 1440 ? timeLabel(ms, { day: '2-digit', month: '2-digit' }) : timeLabel(ms, { hour: '2-digit', minute: '2-digit' }), px, L.timeTop + 12);
   }
   if (chartHover && !chartDrag && chartHover.x < L.plotW && chartGeom) {
     const i = clamp(indexAt(chartView, chartHover.x, chartGeom.n, L.plotW), 0, chartGeom.n - 1);
@@ -301,7 +362,7 @@ chart.addEventListener('pointermove', event => {
   if (!chartDrag) {
     const at = chartZone(event);
     chartHover = at.area === 'plot' ? { x: at.px, y: at.py } : null;
-    chart.style.cursor = at.area === 'price-axis' ? 'ns-resize' : at.area === 'time-axis' ? 'ew-resize' : 'crosshair';
+    chart.style.cursor = at.area === 'price-axis' ? 'ns-resize' : at.area === 'time-axis' ? 'ew-resize' : alertPick ? 'copy' : 'crosshair';
     requestDraw('chart');
     return;
   }
@@ -325,7 +386,12 @@ function endChartDrag(event) {
   const drag = chartDrag;
   chartDrag = null;
   chart.classList.remove('is-dragging', 'is-scaling-price', 'is-scaling-time');
-  if (!drag.moved && drag.area === 'plot' && event?.type === 'pointerup') {
+  if (!drag.moved && drag.area === 'plot' && event?.type === 'pointerup' && alertPick && chartGeom) {
+    const { range, L } = chartGeom;
+    const price = range.max - (drag.py - L.priceTop) / (L.priceBottom - L.priceTop) * (range.max - range.min);
+    window.dispatchEvent(new CustomEvent('gold3po-alert-add', { detail: { price: Number(price.toFixed(2)) } }));
+    setAlertPick(false);
+  } else if (!drag.moved && drag.area === 'plot' && event?.type === 'pointerup') {
     const i = indexAt(chartView, drag.px, bars.length, drag.L.plotW);
     if (i >= 0 && i < bars.length) select(i, { from: 'chart' });
   }
@@ -431,11 +497,12 @@ function drawFootprint() {
   const colW = footView.barSpacing, cellW = Math.max(2, colW - 2);
   const digits = digitsFor(G.row);
   const feet = [];
-  let scale = 1, bidScale = 1, askScale = 1, trimmed = 0, sparse = 0, ticks = 0, clusters = 0;
+  let scale = 1, bidScale = 1, askScale = 1, trimmed = 0, sparse = 0, ticks = 0, clusters = 0, noTicks = 0;
   for (let i = from; i <= to; i++) {
     const f = barFootprint(bars[i]);
     feet.push(f);
     if (!Array.isArray(f.levels)) { trimmed += 1; continue; }
+    if (!f.levels.length && !(f.tickCount > 0)) { noTicks += 1; continue; }
     if (f.levels.length < 3) sparse += 1;
     ticks += Number(f.tickCount) || 0; clusters += f.levels.length;
     for (const r of f.levels) { const t = (r.bid || 0) + (r.ask || 0) + (r.unknown || 0); if (t > scale) scale = t; if ((r.bid || 0) > bidScale) bidScale = r.bid; if ((r.ask || 0) > askScale) askScale = r.ask; }
@@ -446,8 +513,9 @@ function drawFootprint() {
   footStatus.textContent = (exchange ? 'ИСТОЧНИК · БИРЖЕВЫЕ СДЕЛКИ' : 'ИСТОЧНИК · MT5 OTC / ТИКОВАЯ АКТИВНОСТЬ, НЕ БИРЖЕВОЙ ОБЪЁМ') + ' · ШАГ ' + fmt(G.row, digits) + ' · '
     + 'ценовые уровни не интерполируются из OHLC · '
     + (sparse ? `РЕДКИЕ ДАННЫЕ · ${sparse}/${feet.length} свечей имеют менее 3 ценовых уровней` : `ПЛОТНОСТЬ · ${ticks} тиков / ${clusters} кластеров`)
-    + (trimmed ? ` · загружаются уровни ещё ${trimmed} свечей` : '');
-  footStatus.className = 'footprint-source-status ' + (sparse ? 'is-sparse' : 'is-dense');
+    + (trimmed ? ` · загружаются уровни ещё ${trimmed} свечей` : '')
+    + (noTicks ? ` · БЕЗ ТИКОВ · ${noTicks} свечей только из MT5 — скачайте историю тиков в блоке «История для футпринта»` : '');
+  footStatus.className = 'footprint-source-status ' + (sparse || noTicks ? 'is-sparse' : 'is-dense');
 
   ctx.font = `${clamp(Math.round(footRowH * 0.62), 8, 12)}px ${c.mono}`;
   ctx.textBaseline = 'middle';
@@ -463,6 +531,11 @@ function drawFootprint() {
     const column = { index: i, forming: i === n - 1 && live, up, x: cx, width: colW, cells: [], delta: null };
     scene.foot.columns.push(column);
     if (!Array.isArray(f.levels)) continue;
+    if (!f.levels.length && !(f.tickCount > 0)) {
+      column.noTicks = true;
+      if (colW >= 34) { ctx.save(); ctx.font = `9px ${c.mono}`; ctx.fillStyle = rgba(c.muted, 0.7); ctx.textAlign = 'center'; ctx.fillText('нет тиков', cx, G.y((f.h + f.l) / 2)); ctx.restore(); }
+      continue;
+    }
     const va = f.valueArea, imb = new Map((f.imbalances || []).map(m => [Number(m.price).toFixed(8), m.side]));
     const stacked = new Set((f.stackedImbalances || []).flatMap(s => (s.prices || []).map(p => s.side + Number(p).toFixed(8))));
     const absorbed = new Set((f.absorbedLevels || []).map(a => Number(a.price).toFixed(8)));
@@ -717,7 +790,7 @@ function renderInspector() {
   const raw = bars[selected]; if (!raw) { clear(); return; }
   const b = barFootprint(raw);
   const d = (b.unknown || 0) > 0 && !(b.bid || b.ask) ? null : (b.delta ?? barDelta(b)), bid = b.bid || 0, ask = b.ask || 0;
-  $('#selectedBar').textContent = `#${String(selected + 1).padStart(3, '0')} · ${timeLabel(b.time, { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', timeZone: 'UTC' })}`;
+  $('#selectedBar').textContent = `#${String(selected + 1).padStart(3, '0')} · ${timeLabel(b.time, { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}`;
   $('#selectedDelta').textContent = d === null ? '— Δ' : `${d > 0 ? '+' : ''}${fmt(d, 0)} Δ`;
   $('#selectedDelta').className = `delta-chip ${d === null ? '' : d >= 0 ? 'positive-bg' : 'negative-bg'}`;
   $('#bidVolume').textContent = fmt(bid, 0);
@@ -741,6 +814,8 @@ function renderInspector() {
     parts.push(b.imbalances?.length ? `имбалансов ${b.imbalances.length}${stackedCount ? `, из них стеков ${stackedCount}` : ''}` : 'имбалансов нет');
     parts.push(absorbed.length ? `поглощение на ${absorbed.length === 1 ? 'уровне' : absorbed.length + ' уровнях'}` : 'поглощения нет');
     let text = `${parts.join(' · ')}.`;
+    if (raw.coverage === 0) text = 'Тиков по этой свече нет: она взята из истории MT5 целиком. Скачайте историю тиков в блоке «История для футпринта», чтобы увидеть объём по ценам.';
+    else if (Number.isFinite(raw.coverage) && raw.coverage < 0.9) text = `Тики есть примерно для ${Math.round(raw.coverage * 100)}% этой свечи — футпринт неполный. ` + text;
     if (divergence?.side) text += divergence.side === 'bearish' ? ' Цена растёт, кумулятивная дельта падает — покупатели не подтверждают движение.' : ' Цена падает, кумулятивная дельта растёт — продавцы не подтверждают движение.';
     verdict.className = `flow-verdict ${divergence?.side ? 'is-' + divergence.side : ''}`;
     verdict.textContent = text;
@@ -766,7 +841,7 @@ $('#zonesToggle').addEventListener('click', e => { showZones = !showZones; e.cur
 $('#numbersToggle').addEventListener('click', e => { showNumbers = !showNumbers; e.currentTarget.setAttribute('aria-pressed', String(showNumbers)); renderFootprint(); });
 $('#footprintModes').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; $('#footprintModes').querySelectorAll('button').forEach(x => x.classList.toggle('selected', x === b)); renderFootprint(); }));
 $('#resetView').addEventListener('click', () => {
-  replayMode = false; showZones = true; showNumbers = true; mode = 'bidask'; selectedZone = null;
+  showZones = true; showNumbers = true; mode = 'bidask'; selectedZone = null; setAlertPick(false);
   resetTime(chartView); resetPrice(chartView); resetTime(footView); footView.priceAuto = true; footCenter = null; footRowH = 16;
   $('#zonesToggle').setAttribute('aria-pressed', 'true'); $('#numbersToggle').setAttribute('aria-pressed', 'true'); $('#zonesToggle').classList.remove('is-off');
   renderZones(); $('#footprintModes').querySelectorAll('button').forEach(b => b.classList.toggle('selected', b.dataset.mode === 'bidask'));
@@ -818,12 +893,12 @@ if (typeof ResizeObserver !== 'undefined') {
 let classifier = createTickClassifier();
 let pendingTicks = [];
 function applyLiveTick(event, { replay = false } = {}) {
-  if (replayMode || !bars.length || !event) return;
+  if (!bars.length || !event) return;
   const time = Date.parse(event.timestamp), interval = Number(analysisMeta?.intervalMs || window.gold3poIntervalMs?.() || 900000);
   const lastNum = Number(event.last);
   if (!Number.isFinite(time) || !(interval > 0) || !(lastNum > 0)) return;
   if (!replay && Number.isFinite(event.sequence)) { pendingTicks.push(event); if (pendingTicks.length > 5000) pendingTicks.splice(0, pendingTicks.length - 5000); }
-  const start = Math.floor(time / interval) * interval;
+  const start = bucketStart(time, interval, Number(analysisMeta?.clockOffsetMs) || 0);
   const previous = bars.at(-1);
   if (start < previous.timeMs) return; // a late tick for a closed candle: the next reload is authoritative
   if (start > previous.timeMs) {
@@ -849,7 +924,6 @@ window.addEventListener('market-tick', e => applyLiveTick(e.detail));
 window.addEventListener('gold3po-settings', () => { for (const b of bars) { if (Array.isArray(b.levels) && b.poc !== undefined) { delete b.poc; delete b.valueArea; delete b.imbalances; delete b.stackedImbalances; delete b.absorbedLevels; delete b.unfinishedHigh; delete b.unfinishedLow; delete b.deltaRatio; delete b.maxLevelVolume; } } requestDraw('foot'); renderInspector(); });
 
 window.addEventListener('market-analysis', e => {
-  if (replayMode) return;
   const a = e.detail; if (!a?.bars?.length) return;
   const previousTime = bars[selected]?.timeMs, wasAtLatest = selected === bars.length - 1 || selected < 0;
   const previousLast = bars.at(-1)?.timeMs, timeframeChanged = analysisMeta && analysisMeta.intervalMs !== a.intervalMs;
@@ -863,29 +937,17 @@ window.addEventListener('market-analysis', e => {
   else { const added = bars.filter(b => b.timeMs > previousLast).length; followNewBars(chartView, added); followNewBars(footView, added); }
   selected = wasAtLatest || timeframeChanged ? bars.length - 1 : Math.max(0, bars.findIndex(b => b.timeMs === previousTime));
   const tf = Number(a.timeframeMinutes || Number(a.intervalMs) / 60000);
-  document.querySelectorAll('.timeframe-label').forEach(node => { if (Number.isFinite(tf) && tf > 0) { const caption = tf >= 60 ? (tf % 60 === 0 ? tf / 60 + 'ч' : tf + 'м') : tf + 'м'; node.textContent = caption + (node.classList.contains('footprint-timeframe') ? ' · ЕДИНЫЙ ТФ' : ' · ТИКИ БРОКЕРА'); } });
+  document.querySelectorAll('.timeframe-label').forEach(node => { if (Number.isFinite(tf) && tf > 0) { const caption = tf >= 60 ? (tf % 60 === 0 ? tf / 60 + 'ч' : tf + 'м') : tf + 'м'; node.textContent = caption + (node.classList.contains('footprint-timeframe') ? ' · ТФ ГРАФИКА' : a.candleSource === 'mt5_m1_rates' ? ' · СВЕЧИ MT5' : ' · ПО ТИКАМ'); } });
   const feedLive = a.feed?.status === 'online';
   const status = $('#chartStatus'); if (status) { status.textContent = (feedLive ? 'ОНЛАЙН · ' : 'ИСТОРИЯ · ') + barsWord(bars.length); status.className = feedLive ? 'ok' : 'warning'; }
   const signalSummary = $('#signalSummary');
   if (signalSummary) { const sweeps = bars.reduce((n, b) => n + (b.sweeps?.length || 0), 0), stacked = bars.reduce((n, b) => n + (b.stackedImbalances?.length || 0), 0), unfinished = bars.filter(b => b.unfinishedHigh || b.unfinishedLow).length, absorbed = bars.reduce((n, b) => n + ((b.absorbedLevels || []).length ? 1 : 0), 0); const naked = a.profile?.naked?.length || 0, div = a.divergence?.side; signalSummary.textContent = 'СНЯТИЯ ' + sweeps + ' · СТЕКИ ' + stacked + ' · ПОГЛОЩЕНИЕ УРОВНЕЙ ' + absorbed + ' · НЕЗАКРЫТЫЕ АУКЦИОНЫ ' + unfinished + (naked ? ' · ГОЛЫХ POC ' + naked : '') + (div ? (div === 'bearish' ? ' · ДИВЕРГЕНЦИЯ: МЕДВЕЖЬЯ' : ' · ДИВЕРГЕНЦИЯ: БЫЧЬЯ') : ''); }
   const range = $('#barCount'); if (range) range.textContent = barsWord(bars.length);
-  const windowNode = $('#sessionWindow'); if (windowNode) { const hh = v => { const d = new Date(v); return Number.isNaN(d.getTime()) ? '' : String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); }; windowNode.textContent = hh(bars[0].time) + ' — ' + hh(bars.at(-1).time); }
+  renderTimeWindow();
   renderZones(); renderInspector(); requestDraw();
 });
-window.addEventListener('market-replay', e => {
-  const a = e.detail; if (!a?.bars?.length) return;
-  replayMode = true; bars = a.bars; live = true; analysisMeta = a; zones = a.zones || []; selected = 0;
-  resetTime(chartView); resetPrice(chartView); resetTime(footView); footView.priceAuto = true; footCenter = null;
-  const status = $('#chartStatus'); if (status) { status.textContent = 'ПОВТОР · ' + barsWord(bars.length); status.className = 'ok'; }
-  const tag = $('#dataMode'); if (tag) tag.textContent = 'ИСТОРИЧЕСКИЙ ПОВТОР';
-  const count = $('#barCount'); if (count) count.textContent = barsWord(bars.length);
-  const summary = $('#signalSummary'); if (summary) summary.textContent = 'ПОВТОР · ' + (a.eventCount || 0) + ' ТИКОВ БРОКЕРА';
-  renderZones(); select(0);
-});
-window.addEventListener('market-replay-step', e => { if (replayMode) select(Number(e.detail?.index)); });
-window.addEventListener('exit-replay', () => { replayMode = false; });
 window.addEventListener('market-feed-clear', () => {
-  bars = []; zones = []; selected = -1; selectedZone = null; analysisMeta = null; live = false; replayMode = false; pendingTicks = [];
+  bars = []; zones = []; signals = []; selected = -1; selectedZone = null; analysisMeta = null; live = false; pendingTicks = [];
   resetTime(chartView); resetPrice(chartView); resetTime(footView); footView.priceAuto = true; footCenter = null;
   const count = $('#barCount'); if (count) count.textContent = 'ОЖИДАНИЕ ИСТОРИИ';
   const range = $('#sessionRange'); if (range) range.textContent = 'Ожидание истории';
@@ -901,10 +963,44 @@ for (const id of ['chartRefresh', 'footRefresh']) $('#' + id)?.addEventListener(
   finally { btn.disabled = false; window.setTimeout(() => btn.classList.remove('spin'), 800); }
 });
 
+// Overlays: strategy signals, COMEX levels, price alerts.
+function renderTimeWindow() {
+  const label = $('#timeZoneLabel'); if (label) label.textContent = timeZoneCaption();
+  const node = $('#sessionWindow'); if (!node || !bars.length) return;
+  node.textContent = timeLabel(bars[0].timeMs ?? bars[0].time, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ' — ' + timeLabel(bars.at(-1).timeMs ?? bars.at(-1).time, { hour: '2-digit', minute: '2-digit' });
+}
+function setAlertPick(on) {
+  alertPick = Boolean(on);
+  const button = $('#alertMode'); if (button) { button.setAttribute('aria-pressed', String(alertPick)); button.classList.toggle('is-active', alertPick); }
+  chart.classList.toggle('is-picking', alertPick);
+  if (alertPick) notify('Кликните по графику на нужной цене — алерт будет поставлен. Esc — отмена.');
+  requestDraw('chart');
+}
+function syncOverlayButtons() {
+  for (const [id, key] of [['#signalsToggle', 'showSignals'], ['#comexToggle', 'showComex']]) {
+    const on = uiSetting(key, true) !== false, button = $(id);
+    if (button) { button.setAttribute('aria-pressed', String(on)); button.classList.toggle('is-off', !on); }
+  }
+}
+$('#alertMode')?.addEventListener('click', () => setAlertPick(!alertPick));
+window.addEventListener('keydown', e => { if (e.key === 'Escape' && alertPick) setAlertPick(false); });
+window.addEventListener('gold3po-alert-pick', e => setAlertPick(e.detail?.on !== false));
+for (const [id, key, label] of [['#signalsToggle', 'showSignals', 'Сигналы стратегии'], ['#comexToggle', 'showComex', 'Уровни COMEX']]) $(id)?.addEventListener('click', () => {
+  const next = uiSetting(key, true) === false;
+  window.gold3poSetUi?.(key, next);
+  syncOverlayButtons(); requestDraw('chart');
+  notify(`${label} ${next ? 'показаны' : 'скрыты'}`);
+});
+window.addEventListener('gold3po-signals', e => { signals = Array.isArray(e.detail?.signals) ? e.detail.signals : []; requestDraw('chart'); });
+window.addEventListener('gold3po-comex', e => { comexLevels = Array.isArray(e.detail?.levels) ? e.detail.levels : []; requestDraw('chart'); });
+window.addEventListener('gold3po-alerts-changed', () => requestDraw('chart'));
+window.addEventListener('gold3po-settings', () => { syncOverlayButtons(); renderTimeWindow(); requestDraw(); });
+syncOverlayButtons();
+
 // Read-only view of what is on screen, for the browser test and for diagnostics.
 window.gold3poChart = Object.freeze({
   state: () => ({ bars: bars.length, last: bars.at(-1) ? { time: bars.at(-1).time, o: bars.at(-1).o, h: bars.at(-1).h, l: bars.at(-1).l, c: bars.at(-1).c, tickCount: bars.at(-1).tickCount, levels: Array.isArray(bars.at(-1).levels) ? bars.at(-1).levels.length : null, bid: bars.at(-1).bid, ask: bars.at(-1).ask } : null,
-    selected, selectedZone, zones: zones.length, showZones, showNumbers, mode, intervalMs: analysisMeta?.intervalMs ?? null, rowStep: bars.length ? rowStep() : null, chartView: { ...chartView }, footView: { ...footView }, footRowH, footGeometry: footGeom ? { top: footGeom.L.top, bottom: footGeom.L.bottom, plotW: footGeom.L.plotW, center: footGeom.G.center, perPrice: footGeom.G.perPrice } : null, stats: { ...stats }, pendingTicks: pendingTicks.length, empty: !bars.length }),
+    selected, selectedZone, zones: zones.length, signals: signals.length, comexLevels: comexLevels.length, alertPick, clockOffsetMs: analysisMeta?.clockOffsetMs ?? null, candleSource: analysisMeta?.candleSource ?? null, showZones, showNumbers, mode, intervalMs: analysisMeta?.intervalMs ?? null, rowStep: bars.length ? rowStep() : null, chartView: { ...chartView }, footView: { ...footView }, footRowH, footGeometry: footGeom ? { top: footGeom.L.top, bottom: footGeom.L.bottom, plotW: footGeom.L.plotW, center: footGeom.G.center, perPrice: footGeom.G.perPrice } : null, stats: { ...stats }, pendingTicks: pendingTicks.length, empty: !bars.length }),
   scene: () => JSON.parse(JSON.stringify(scene)),
   // Page coordinates of a bar (and optionally a price) on either canvas, so a test clicks what a trader would.
   point: (where, index, price) => {

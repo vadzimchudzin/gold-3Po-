@@ -816,3 +816,70 @@ test('an invalid licence ends the session for good even with reconnects enabled'
   assert.equal(connects, 1);
   assert.equal(session.state().state, 'offline');
 });
+
+test('the broker M1 candles are loaded first and refreshed, so the chart never waits for ticks', async () => {
+  const api = fakeApi();
+  const asked = [];
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, historyHours: 0, candleDays: 3, ratesRefreshMs: 50,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: commonRoot, dataPath: 'C:\\Data', boundary: Math.floor(Date.now() / 1000), clockOffsetMs: 7200000, clockOffsetReliable: true },
+      rates: ({ from, to }) => { asked.push(to - from); return { ok: true, rates: [{ t: Date.now() - 120000, o: 1, h: 2, l: 0.5, c: 1.5, v: 10, rv: 0 }] }; },
+      poll: { ok: true, ticks: [] }
+    }),
+    request: api.request, publish: async () => {}
+  });
+  await session.connect();
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const state = await session.disconnect();
+  assert.ok(asked[0] >= 3 * 86400, 'the first read covers the configured candle days');
+  assert.ok(asked.slice(1).some(span => span <= 3600), 'later reads only refresh the newest minutes');
+  const sent = api.calls.filter(c => c.path === '/v1/ingest/mt5/rates');
+  assert.ok(sent.length >= 2);
+  assert.equal(sent[0].body.clockOffsetMs, 7200000, 'the broker clock shift travels with the candles');
+  assert.equal(sent[0].body.clockOffsetReliable, true);
+  assert.equal(state.state, 'offline');
+});
+
+test('the tick archive downloads on request, skips what the service already holds, and can be stopped', async () => {
+  const calls = [];
+  const base = fakeApi();
+  const request = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    if (path === '/v1/ingest/mt5/coverage') {
+      const body = JSON.parse(init.body);
+      calls.push(body.windows.length);
+      // Every other window is already in the local archive.
+      return { ok: true, status: 200, json: async () => ({ covered: body.windows.map((_, i) => body.windows.length > 1 && i % 2 === 1) }) };
+    }
+    return base.request(url, init);
+  };
+  const reads = [];
+  const session = createMt5Session({
+    workerCommand: 'fake', workerArgs: [], apiOrigin: 'http://127.0.0.1:9', token: 't', pollMs: 20, historyHours: 0, backfillWindowSec: 3600, archiveBudgetMs: 5,
+    makeWorker: fakeWorker({
+      connect: { ok: true, symbol: 'XAUUSD', commonDataPath: commonRoot, dataPath: 'C:\\Data', boundary: Math.floor(Date.now() / 1000) },
+      rates: { ok: true, rates: [] },
+      backfill: async ({ from, to }) => { reads.push({ from, to }); await new Promise(r => setTimeout(r, 20)); return { ok: true, ticks: [tick] }; },
+      poll: { ok: true, ticks: [] }
+    }),
+    request, publish: async () => {}
+  });
+  await session.connect();
+  await assert.rejects(session.archive({ days: 30 }), /от 1 до 7/);
+  const started = await session.archive({ days: 1 });
+  assert.equal(started.archive.state, 'running');
+  assert.equal(started.archive.total, 24);
+  assert.equal(started.archive.already, 12, 'covered windows are not read again');
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const midway = session.state().archive;
+  assert.ok(midway.done > 12 && reads.length > 0);
+  assert.ok(reads.every((r, i) => i === 0 || r.to <= reads[i - 1].to), 'newest first');
+  const stopped = await session.archive({ stop: true });
+  assert.equal(stopped.archive.state, 'stopped');
+  const count = reads.length;
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(reads.length, count, 'a stopped archive reads nothing more');
+  assert.ok(base.calls.some(c => c.path === '/v1/ingest/mt5/history'), 'archive ticks are ingested as history');
+  await session.disconnect();
+});
