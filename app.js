@@ -848,6 +848,40 @@ $('#resetView').addEventListener('click', () => {
   select(bars.length - 1); notify('Вид сброшен');
 });
 
+// ---------------------------------------------------------------- view state across restarts
+// Toggles, footprint mode and zoom live on this computer, like the window layout. Saved when they
+// change (checked every 2 s, written only on a difference) and once more when the page goes away.
+const VIEW_KEY = 'gold3po-view';
+const FOOT_MODES = ['bidask', 'delta', 'volume', 'deltaPct', 'buy', 'sell'];
+const viewSnapshot = () => JSON.stringify({ showZones, showNumbers, mode, chartSpacing: chartView.barSpacing, footSpacing: footView.barSpacing, footRowH });
+let savedView = null, restoredZoom = null;
+function saveViewState() {
+  const next = viewSnapshot();
+  if (next === savedView) return;
+  try { localStorage.setItem(VIEW_KEY, next); savedView = next; } catch {}
+}
+function restoreViewState() {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null'); } catch {}
+  if (!s || typeof s !== 'object') { savedView = viewSnapshot(); return; }
+  if (typeof s.showZones === 'boolean') showZones = s.showZones;
+  if (typeof s.showNumbers === 'boolean') showNumbers = s.showNumbers;
+  if (FOOT_MODES.includes(s.mode)) mode = s.mode;
+  if (Number.isFinite(s.chartSpacing)) chartView.barSpacing = clamp(s.chartSpacing, chartView.minSpacing, chartView.maxSpacing);
+  if (Number.isFinite(s.footSpacing)) footView.barSpacing = clamp(s.footSpacing, footView.minSpacing, footView.maxSpacing);
+  if (Number.isFinite(s.footRowH)) footRowH = clamp(s.footRowH, 3, 48);
+  restoredZoom = { chart: chartView.barSpacing, foot: footView.barSpacing };
+  $('#zonesToggle').setAttribute('aria-pressed', String(showZones)); $('#zonesToggle').classList.toggle('is-off', !showZones);
+  $('#numbersToggle').setAttribute('aria-pressed', String(showNumbers));
+  $('#footprintModes').querySelectorAll('button').forEach(b => b.classList.toggle('selected', b.dataset.mode === mode));
+  savedView = viewSnapshot();
+}
+restoreViewState();
+setInterval(saveViewState, 2000);
+window.addEventListener('pagehide', saveViewState);
+window.addEventListener('beforeunload', saveViewState);
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveViewState(); });
+
 // ---------------------------------------------------------------- layout
 const workspace = $('#workspace'), layoutButton = $('#layoutButton'), panelResizer = $('#chartPanelResizer');
 let layoutMode = 'stacked', splitRatio = 0.5, splitPointer = false;
@@ -933,7 +967,12 @@ window.addEventListener('market-analysis', e => {
   const seen = Number(a.lastQuote?.sequence);
   pendingTicks = Number.isFinite(seen) ? pendingTicks.filter(t => t.sequence > seen) : [];
   for (const tick of pendingTicks) applyLiveTick(tick, { replay: true });
-  if (timeframeChanged || !previousLast) { resetTime(chartView); resetPrice(chartView); resetTime(footView); footView.priceAuto = true; footCenter = null; selectedZone = null; }
+  if (timeframeChanged || !previousLast) {
+    resetTime(chartView); resetPrice(chartView); resetTime(footView); footView.priceAuto = true; footCenter = null; selectedZone = null;
+    // The first window after a restart keeps the zoom the trader left; only the position starts at the latest bar.
+    if (restoredZoom && !timeframeChanged) { chartView.barSpacing = restoredZoom.chart; footView.barSpacing = restoredZoom.foot; }
+    restoredZoom = null;
+  }
   else { const added = bars.filter(b => b.timeMs > previousLast).length; followNewBars(chartView, added); followNewBars(footView, added); }
   selected = wasAtLatest || timeframeChanged ? bars.length - 1 : Math.max(0, bars.findIndex(b => b.timeMs === previousTime));
   const tf = Number(a.timeframeMinutes || Number(a.intervalMs) / 60000);

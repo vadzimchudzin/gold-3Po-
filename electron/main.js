@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, session, shell, Tray } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { createMt5Session } from './mt5-session.js';
 import { createUpdater } from './updater.js';
@@ -6,7 +6,7 @@ import { BUILD } from './build-info.js';
 import { workerPath } from './mt5-runtime.js';
 import { installMt5Integration } from './mt5-integration.js';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, appendFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createMarketServer } from '../server.js';
@@ -102,6 +102,8 @@ function registerMt5Ipc() {
       bridgeLog('update', `installing ${file} into ${installDir}`);
       spawn(file, ['/S', `/D=${installDir}`], { detached: true, stdio: 'ignore' }).unref();
       isQuitting = true;
+    if (mainWindow) writeWindowState(mainWindow);
+    flushStorage();
       setTimeout(() => app.quit(), 600);
     }
   });
@@ -333,10 +335,39 @@ function closeSplash(startedAt) {
   setTimeout(() => { if (!splash.isDestroyed()) splash.close(); }, wait);
 }
 
+// Window size, position and maximized state survive a restart. A saved position that is no longer on
+// any screen (a monitor was unplugged) is dropped and the window opens centred.
+const windowStatePath = () => path.join(userDataPath, 'window-state.json');
+function readWindowState() {
+  try {
+    const state = JSON.parse(readFileSync(windowStatePath(), 'utf8'));
+    const { x, y, width, height } = state.bounds || {};
+    if (![width, height].every(Number.isFinite) || width < 1040 || height < 720) return null;
+    const bounds = { width: Math.round(width), height: Math.round(height) };
+    if ([x, y].every(Number.isFinite)) {
+      const visible = screen.getAllDisplays().some(({ workArea: a }) => x + 80 > a.x && x + 80 < a.x + a.width && y + 20 > a.y && y + 20 < a.y + a.height);
+      if (visible) Object.assign(bounds, { x: Math.round(x), y: Math.round(y) });
+    }
+    return { bounds, maximized: state.maximized === true };
+  } catch { return null; }
+}
+function writeWindowState(window) {
+  if (!window || window.isDestroyed()) return;
+  try {
+    const file = windowStatePath(), tmp = file + '.tmp';
+    writeFileSync(tmp, JSON.stringify({ bounds: window.getNormalBounds(), maximized: window.isMaximized() }));
+    renameSync(tmp, file);
+  } catch (error) { logError(error); }
+}
+// Chromium writes localStorage lazily; push it to disk before the app hides or exits.
+function flushStorage() { try { session.defaultSession.flushStorageData(); } catch {} }
+
 function createMainWindow(splashStartedAt) {
+  const saved = readWindowState();
   const window = new BrowserWindow({
-    width: 1480,
-    height: 980,
+    width: saved?.bounds.width ?? 1480,
+    height: saved?.bounds.height ?? 980,
+    ...(Number.isFinite(saved?.bounds.x) ? { x: saved.bounds.x, y: saved.bounds.y } : {}),
     minWidth: 1040,
     minHeight: 720,
     show: false,
@@ -356,7 +387,12 @@ function createMainWindow(splashStartedAt) {
   mainWindow = window;
   let showOnReady = true;
 
+  let stateTimer = null;
+  const rememberWindow = () => { clearTimeout(stateTimer); stateTimer = setTimeout(() => writeWindowState(window), 500); };
+  for (const event of ['resize', 'move', 'maximize', 'unmaximize']) window.on(event, rememberWindow);
+
   const hideToTray = () => {
+    clearTimeout(stateTimer); writeWindowState(window); flushStorage();
     if (!tray || isQuitting) return false;
     showOnReady = false;
     window.hide();
@@ -387,7 +423,8 @@ function createMainWindow(splashStartedAt) {
   });
 
   window.once('ready-to-show', () => {
-    if (showOnReady && !isQuitting) window.show();
+    // maximize() also shows the window, so it only runs when the window is to be shown anyway.
+    if (showOnReady && !isQuitting) { if (saved?.maximized) window.maximize(); window.show(); }
     closeSplash(splashStartedAt);
   });
   window.on('closed', () => {

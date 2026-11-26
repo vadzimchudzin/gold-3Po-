@@ -589,6 +589,25 @@ try {
   await page.waitForTimeout(300);
   assert.ok(formingCells(await scene()).some(cell => cell.part === 'body'), 'the forming column has a body too');
 
+  // Close and reopen: toggles, footprint mode and zoom come back as they were left.
+  await page.locator('#zonesToggle').click();
+  await page.locator('#numbersToggle').click();
+  await page.locator('#footprintModes button[data-mode="delta"]').click();
+  await page.locator('#chartZoomIn').click();
+  await page.locator('#footZoomYIn').click();
+  const before = await page.evaluate(() => window.gold3poChart.state());
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.gold3poChart?.state().bars > 0, null, { timeout: 15000 });
+  const after = await page.evaluate(() => window.gold3poChart.state());
+  assert.equal(after.showZones, false, 'zones stay hidden after a restart');
+  assert.equal(after.showNumbers, false, 'footprint numbers stay hidden after a restart');
+  assert.equal(after.mode, 'delta', 'footprint mode survives a restart');
+  assert.equal(after.chartView.barSpacing, before.chartView.barSpacing, 'chart zoom survives a restart');
+  assert.equal(after.footRowH, before.footRowH, 'footprint row height survives a restart');
+  assert.equal(await page.locator('#footprintModes button.selected').getAttribute('data-mode'), 'delta');
+  assert.equal(await page.locator('#zonesToggle').getAttribute('aria-pressed'), 'false');
+  await page.locator('#resetView').click();
+
   assert.deepEqual(pageErrors, [], 'browser must not emit uncaught JavaScript errors');
   process.stdout.write('Browser checks passed: empty state, chart, footprint (POC, value area, profile, delta row, live tick), zones, alerts, signals, COMEX levels, tick history download, strategy profiles, settings, live MT5/COMEX status and mobile overflow.\n');
 } finally {

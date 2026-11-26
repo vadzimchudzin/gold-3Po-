@@ -49,6 +49,8 @@ async function run(request) {
   finally { busy = false; render(last); }
 }
 
+try { const saved = localStorage.getItem('gold3po-archive-days'); const select = $('archiveDays'); if (saved && select && [...select.options].some(o => o.value === saved)) select.value = saved; } catch {}
+$('archiveDays')?.addEventListener('change', e => { try { localStorage.setItem('gold3po-archive-days', e.target.value); } catch {} });
 $('archiveStart')?.addEventListener('click', () => run({ days: Number($('archiveDays')?.value) || 3 }));
 $('archiveStop')?.addEventListener('click', () => run({ stop: true }));
 window.addEventListener('mt5-status', e => render(e.detail));

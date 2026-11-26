@@ -598,3 +598,67 @@ html[data-theme="glass-light"] .footprint-tip{background:rgba(255,255,255,.96)}
 @media(max-width:1180px){.strategy-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.strategy-grid .archive-module{grid-column:1/-1;border-left:0!important}}
 @media(max-width:700px){.strategy-grid{grid-template-columns:1fr}.strategy-grid .alerts-module,.strategy-grid .archive-module{border-left:0!important}.alert-fields{grid-template-columns:1fr}}
 .instrument-strip{gap:24px}
+
+/* ── Terminal design (1.2.1): flat panels, thin borders, market colours ─────────────
+   One layer over everything above: no glass, glow, gradients or pill buttons. Canvas colours
+   follow the same tokens (app.js reads --cyan/--red/--gold/--comex/--alert). */
+html[data-theme="glass-dark"]{color-scheme:dark;--bg:#0e1013;--panel:#14171b;--panel-solid:#14171b;--chart-bg:#0f1215;--text:#d8dbe0;--muted:#8a909a;--muted-2:#6c727c;--muted-3:#4c525b;--line:#22262c;--line-strong:#30353d;--surface-1:#181b20;--surface-2:#1d2026;--surface-3:#23272e;--surface-4:#2b3038;--v-glass:#14171b;--v-glass-edge:transparent;--v-shadow:none;--v-fill:#1a1d22;--v-fill-strong:#262a31;--v-accent:#c9a54e;--v-cta-ink:#15120a;--v-radius:6px;--gold:#c9a54e;--cyan:#26a69a;--red:#ef5350;--pos:#26a69a;--apple:#4f8fd6;--comex:#8c96e8;--alert:#e0a43a;--rail-on:#1f232a;--seg-on:#2a2e36;--atmosphere:none;--atmosphere-filter:none}
+html[data-theme="glass-light"]{color-scheme:light;--bg:#eef0f3;--panel:#ffffff;--panel-solid:#ffffff;--chart-bg:#ffffff;--text:#1c2026;--muted:#5d6470;--muted-2:#7a818c;--muted-3:#a3a9b2;--line:#dde0e5;--line-strong:#c9cdd4;--surface-1:#f5f6f8;--surface-2:#eceef1;--surface-3:#e3e6ea;--surface-4:#d6dae0;--v-glass:#ffffff;--v-glass-edge:transparent;--v-shadow:none;--v-fill:#f3f4f6;--v-fill-strong:#e5e8ec;--v-accent:#9a7420;--v-cta-ink:#ffffff;--v-radius:6px;--gold:#9a7420;--cyan:#089981;--red:#e0313f;--pos:#089981;--apple:#2a6fc2;--comex:#5b5fc7;--alert:#c27a00;--rail-on:#e8ebef;--seg-on:#ffffff;--atmosphere:none;--atmosphere-filter:none}
+html{--mono:"Cascadia Mono","JetBrains Mono",Consolas,ui-monospace,monospace;--sans:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+body{background:var(--bg);font:13px/1.4 var(--sans);letter-spacing:0}
+.atmosphere,.ambient{display:none}
+*,*::before,*::after{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+
+/* shell */
+
+.rail{background:var(--panel);box-shadow:none;border:1px solid var(--line);border-radius:6px}
+@media(min-width:1181px){.rail{position:sticky;top:0;height:100vh;width:184px;border:0;border-right:1px solid var(--line);border-radius:0;padding:14px 8px;gap:2px}}
+@media(min-width:701px){.app-shell{gap:0;padding:0}.rail{top:0;height:100vh;border-width:0 1px 0 0;border-radius:0}}
+.rail .brand-mark{width:34px;height:34px;border-radius:6px;margin:0 0 0 6px;border:1px solid var(--line-strong);box-shadow:none}
+.brand-name{font-weight:600;letter-spacing:0;font-size:13px}
+.rail-item{border-radius:4px;color:var(--muted);font-size:13px}
+.rail-item:hover{background:var(--surface-2);color:var(--text)}
+.rail-item.on{background:var(--rail-on);color:var(--text);box-shadow:inset 2px 0 0 var(--gold)}
+.main-content{padding:0 16px 16px;max-width:none}
+.topbar{height:48px;border-bottom:1px solid var(--line)}
+.page-heading{padding:14px 0 12px}
+.page-heading .eyebrow,.page-heading p{display:none}
+.page-heading h1{font-size:18px;font-weight:600;letter-spacing:0;margin:0}
+.page-heading h1 em{color:inherit}
+
+/* surfaces */
+.panel,.research-suite,.instrument-strip,.mt5-strip,.mt5-dialog,.settings-drawer,.license-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:none}
+.mt5-strip{background:var(--surface-1)}
+.panel-header,.side-panel-heading,.research-suite-heading{border-bottom:1px solid var(--line)}
+.panel h2,.side-panel-heading h2,.research-suite-heading h2{font-size:14px;font-weight:600;letter-spacing:0}
+.panel-kicker,.research-module-title>span{display:none}
+.research-module-title h3{font-size:13px;font-weight:600}
+.live-dot{box-shadow:none}
+
+/* controls */
+.primary-button,.research-button.primary{border-radius:4px;background:var(--v-accent);color:var(--v-cta-ink);box-shadow:none;font-weight:600}
+.primary-button:hover,.research-button.primary:hover:not(:disabled){background:var(--v-accent);filter:brightness(1.08);box-shadow:none}
+.ghost-button,.research-button,.square-button,.ghost-round{border-radius:4px;background:var(--surface-1);border:1px solid var(--line-strong);box-shadow:none}
+.ghost-button:hover,.research-button:hover:not(:disabled),.square-button:hover,.ghost-round:hover{background:var(--surface-3);border-color:var(--line-strong)}
+.segmented{border-radius:4px;background:var(--surface-1);padding:2px}
+.segmented button{border-radius:3px}
+.segmented button.selected,.segmented button[aria-pressed="true"]{background:var(--seg-on);color:var(--text);box-shadow:none}
+input,select,textarea,.research-fields input,.research-fields select,.setup-fields select,.foot-step-select,.license-input{border-radius:4px!important;box-shadow:none}
+.count-badge,.market-tag,.demo-pill,.timeframe-label,.update-badge,.delta-chip{border-radius:3px}
+.brand-mark,.instrument-icon{box-shadow:none}
+
+/* text: labels in the UI font at readable sizes; only numbers stay monospaced */
+.eyebrow,.quote-label,.summary-label,.segmented button,.market-tag,.demo-pill,.connection,.chart-footer,.zone-info small,.research-disclaimer,.research-fields label,.research-button,.research-meta,.research-status,.setup-checks,.setup-presets button,.setup-presets>span,.setup-subsection,.settings-subhead,.footprint-source-status,.footprint-tip,.timeframe-label,.app-footer,.alert-empty,.chart-empty small,.delta-caption,.update-badge,.setup-with-settings,.research-fields select,.setup-fields select,.research-actions select,.foot-step-select{font-family:var(--sans);letter-spacing:0;text-transform:none}
+.quote-label,.summary-label,.research-fields label,.settings-subhead,.setup-subsection{font-size:11px;color:var(--muted)}
+.segmented button,.research-button,.setup-presets button,.research-fields select,.setup-fields select,.research-actions select,.foot-step-select,.research-fields input{font-size:12px}
+.market-tag,.demo-pill,.connection,.chart-footer,.research-disclaimer,.research-meta,.research-status,.setup-checks,.footprint-source-status,.footprint-tip,.timeframe-label,.app-footer,.alert-empty,.chart-empty small,.delta-caption,.update-badge,.setup-with-settings,.setup-presets>span,.zone-info small{font-size:11px}
+.quote-value,.zone-right b,.detail-stats b,.selected-bar strong{font-family:var(--mono);letter-spacing:0}
+.zone-right small,.zone-reaction,.zone-stats,.status-row b,.research-result,.signal-row,.alert-row,.research-trades,.method-note p{font-family:var(--sans);letter-spacing:0;font-size:11px}
+.status-row b{font-weight:500}
+.research-result{line-height:1.5}
+.buy-text{color:var(--cyan)}.sell-text{color:var(--red)}
+.zone-row.selected{background:var(--surface-2);box-shadow:inset 2px 0 var(--gold)}
+::selection{background:color-mix(in srgb,var(--gold) 35%,transparent)}
+@media(max-width:850px){.main-content{padding:0 10px 14px}}
+html[data-theme] .rail-item.on{color:var(--text)}
+html[data-theme] .primary-button,html[data-theme] .research-button.primary{box-shadow:none}

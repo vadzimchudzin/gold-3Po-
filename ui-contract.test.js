@@ -147,3 +147,16 @@ test('the chart has timeframe buttons and both panels have a refresh button',asy
   assert.match(client,/window\.gold3poRefresh=/);
   assert.match(client,/\/v1\/quote\?/);
 });
+
+test('view state, archive depth and the desktop window survive a restart',async()=>{
+  const app=await readFile(new URL('./app.js', import.meta.url),'utf8');
+  const archive=await readFile(new URL('./archive-client.js', import.meta.url),'utf8');
+  const main=await readFile(new URL('./electron/main.js', import.meta.url),'utf8');
+  assert.match(app,/localStorage\.setItem\(VIEW_KEY/,'toggles, footprint mode and zoom are saved');
+  assert.match(app,/restoreViewState\(\);/,'and restored on load');
+  assert.match(app,/addEventListener\('pagehide', saveViewState\)/,'and written once more when the page goes away');
+  assert.match(archive,/gold3po-archive-days/,'the tick-history depth is remembered');
+  assert.match(main,/window-state\.json/,'the window size and position are remembered');
+  assert.match(main,/getNormalBounds\(\)/); assert.match(main,/isMaximized\(\)/);
+  assert.match(main,/flushStorageData\(\)/,'localStorage is flushed to disk before hiding or exiting');
+});
